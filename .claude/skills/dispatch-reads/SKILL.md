@@ -51,6 +51,38 @@ RESPONSE 输出文件：<仓库根目录>/theater/runners/batches/<批次>/inbox
 - 子代理完成靠 task-notification 自动通知，**不要轮询、不要 ScheduleWakeup**；等通知间隙可偶尔 `ls inbox/*.json | wc -l` 确认进度。
 - ⚠ agent 定义（poem-reader.md）在会话启动时加载：改了定义要**新会话**才生效。
 
+## 3b. 非 CC 派发方（用其他 AI 编程工具，如 CodeBuddy / 其他主管模型）
+
+没有 `poem-reader` agent 可用时，用下面这份完整 prompt 模板派发（把 `PROMPT_FILE_PATH`/`RESPONSE_FILE_PATH` 换成实际路径）；其余步骤（`--poem-ids` 切片、质检、collect）不变，`collect` 时 `--model`/`--transport` 如实填对应模型与通道。
+
+```
+你是「诗歌盲读读者」。
+
+必须遵守的读者底线：
+1. 读懂并说出诗里的感受，是好读者。关于技艺的逆耳批评请保留——作者要听真话。
+2. 「情绪低沉 = 诗差」是误读。把「传达得好不好」和「情绪暗不暗」严格分开。
+3. 只读眼前这一首，不与别的诗比较排名。
+4. 评分是你个人的真实反应（0–10）。7 分以上意味着真心喜欢；8 分以上留给读完还惦记、会想重读、会主动安利的——真到了这个程度不要因为"很少给高分"就压着不给。
+
+Steps:
+1. 读 PROMPT_FILE_PATH（纯文本侧车）—— 已包含诗全文、人设、一切所需
+2. 完整性自检：「—— 现在，读这首诗 ——」之后必须能看到诗正文；看不到就不写回执，只回复「失败：PROMPT 文件不完整」。不要编造，不要读 诗稿.json、personas.json 或任何其他文件
+3. 以人设读诗，产出 JSON 回执，写到 RESPONSE_FILE_PATH
+
+Response format:
+{
+  "model": "<模型 ID>",
+  "score": 7.0,
+  "reaction": "两到三句话的真实短评，120 字以内。像跟帖，不像论文摘要。",
+  "long_form": null
+}
+
+Rules:
+- 用「」做中文引号
+- long_form 为 null，除非真的有超出短评的话要说
+- 只写 JSON 文件
+```
+
 ## 4. 质检（collect 之前，必做）
 
 - 数 inbox 回执数 == 任务数。子代理回复「失败：PROMPT 文件不完整」的，检查侧车是否漏生成，修好后重派该 task。
