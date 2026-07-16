@@ -66,7 +66,7 @@
 **做了什么：**
 
 1. **INITIALIZATION（00 的要求）完成**：建三层目录（corpus / theater / results）；原始导出归档 `corpus\raw\`；诠释档案移入 `corpus\`；写 `README.md`（硬边界在第一行）。
-2. **corpus 入库**：`theater\src\build_corpus.py` 合并多个原始导出 → `corpus\诗稿.json`，按 genre 分现代诗/词/歌词/杂文，多数进读者池。修复了一个导出坑：正文首行的标题带不间断空格 \xa0，宽松比较后剥除。
+2. **corpus 入库**：`theater\src\build_corpus_huawei.py` 合并多个原始导出 → `corpus\诗稿.json`，按 genre 分现代诗/词/歌词/杂文，多数进读者池。修复了一个导出坑：正文首行的标题带不间断空格 \xa0，宽松比较后剥除。
 3. **读者阵容**：`theater\personas\personas.json`，12 位读者（老学究/诗刊编辑/译者之眼/读出声的人/结构派/先感后想/同代守夜人/语言游戏者/倾听者/时间轴读者/知情读者/全知档案员），覆盖 knows_诠释 × knows_date × 九种感受取向。
 4. **跑批 runner**：`theater\runners\runner.py`（coverage 覆盖账 / plan 挑最薄组合出任务 / ingest 校验落盘）。reads 存单一 append-only JSONL。
 5. **应用**：`theater\src\server.py`（零依赖本地服务器，端口 8737）+ `webapp\`（榜单页/全部作品/时间轴/诗详情页/深读页；反应分布图=SVG 点状直方图；作者动作：切公开私密/剪自注/背景小注/标写作时间/诠释升格，写 corpus 前自动备份）。

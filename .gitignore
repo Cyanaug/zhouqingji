@@ -32,3 +32,6 @@ collect_tmp.log
 # never committed. See 01_corpus_schema.md / 03_runner_and_coverage.md.
 /corpus/
 /results/
+
+# Internal fork-audit working doc — not meant for the public repo
+/FORK_REPORT.md

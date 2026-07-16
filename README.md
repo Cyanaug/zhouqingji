@@ -27,7 +27,7 @@
 
 ## 怎么用
 
-**第一次用、corpus 还是空的**：先看 `01_corpus_schema.md` 里 `诗稿.json` 的字段格式，把你自己的诗整理成同样结构的 JSON 数组存到 `corpus/诗稿.json`（`corpus/`、`results/` 默认不存在，需要你自己建）。手写几条起步即可；也可以参照 `theater/src/build_corpus.py`、`theater/src/merge_corpus.py` 的模式给自己的诗歌来源写一份转换脚本——这两个文件是历史脚本、设备专属，不能直接跑，照抄模式就好。
+**第一次用、corpus 还是空的**：先看 `01_corpus_schema.md` 里 `诗稿.json` 的字段格式，把你自己的诗整理成同样结构的 JSON 数组存到 `corpus/诗稿.json`（`corpus/`、`results/` 默认不存在，需要你自己建）。手写几条起步即可；也可以参照 `theater/src/build_corpus_huawei.py`、`theater/src/merge_corpus_xiaomi.py` 的模式给自己的诗歌来源写一份转换脚本——这两个文件是历史脚本、设备专属，不能直接跑，照抄模式就好（记得把里面的 `author` 换成你自己的笔名）。
 
 1. 启动应用：`python theater/src/server.py`，浏览器开 http://localhost:8737 —— corpus 为空也能正常打开，只是榜单/时间轴是空的。
 2. 推进一轮盲读（"加厚"覆盖）：按 `.claude/skills/dispatch-reads/SKILL.md` 的流程走（用 Claude Code 就说一声「跑一轮」；用其他 AI 编程工具参考技能文档里附的通用 prompt 模板），会按覆盖账自动补最薄的 (诗 × 读者) 组合。

@@ -3,11 +3,11 @@
 
 这是作者自己用华为手机备忘录导出时写的一次性入库脚本，字段名和文件路径都
 写死对应华为导出的形状，不是"任意设备 → 诗稿.json"的通用转换器。其他设备
-（如小米，见 merge_corpus.py）请照着这个模式各自写一份等价脚本，不要指望
-改这一份就能通用。
+（如小米，见 merge_corpus_xiaomi.py）请照着这个模式各自写一份等价脚本，
+不要指望改这一份就能通用。跑之前记得把下面 "author" 那行换成你自己的笔名。
 
 只在 诗稿.json 不存在时全量生成；已存在则拒绝运行（corpus 只进不毁，
-后续并入新设备批次时写增量逻辑，不覆盖，见 merge_corpus.py）。
+后续并入新设备批次时写增量逻辑，不覆盖，见 merge_corpus_xiaomi.py）。
 """
 import hashlib
 import json
@@ -58,7 +58,7 @@ def main():
         content = normalize_content(e["title"], e["content"])
         corpus.append({
             "id": f"zq-{i:04d}",
-            "author": "cyan",
+            "author": "your-pen-name",  # 换成你自己的笔名——这不是必须保留的字段值
             "title": e["title"],
             "genre": e["genre"],
             "content": content,

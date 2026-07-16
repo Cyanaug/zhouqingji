@@ -56,7 +56,7 @@ def main():
         content = normalize_content(e["title"], e["content"])
         added.append({
             "id": f"zq-{i:04d}",
-            "author": "cyan",
+            "author": "your-pen-name",  # 换成你自己的笔名——这不是必须保留的字段值
             "title": e["title"],
             "genre": e["genre"],
             "content": content,
@@ -90,5 +90,5 @@ def main():
 
 if __name__ == "__main__":
     if not OUT.exists():
-        sys.exit("诗稿.json 不存在，请先跑 build_corpus.py 做首次全量生成。")
+        sys.exit("诗稿.json 不存在，请先跑 build_corpus_huawei.py 做首次全量生成。")
     main()
