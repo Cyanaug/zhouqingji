@@ -222,6 +222,15 @@ def cmd_collect(args):
         })
     if missing:
         print(f"缺 {len(missing)} 份回执：{', '.join(missing)}", file=sys.stderr)
+    if merged:
+        # 展示本批回执的 model 分布，供派发方核对出处：应是真实底层模型 ID，
+        # 不是派发工具/平台名（如 codebuddy）。reads.jsonl 只追加不删，入库前是最后一道人眼关。
+        dist = {}
+        for m in merged:
+            k = m["reader"]["model"]
+            dist[k] = dist.get(k, 0) + 1
+        print("本批回执 model 分布：" + "，".join(
+            f"{k} ×{v}" for k, v in sorted(dist.items())))
     tmp = inbox / "_merged.json"
     tmp.write_text(json.dumps(merged, ensure_ascii=False, indent=1),
                    encoding="utf-8")

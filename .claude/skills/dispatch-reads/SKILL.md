@@ -81,12 +81,14 @@ Rules:
 - 用「」做中文引号
 - long_form 为 null，除非真的有超出短评的话要说
 - 只写 JSON 文件
+- model 填你实际运行的底层模型 ID（如 glm-5v、gemini-2.5-pro），**不是派发工具/平台名**（codebuddy、cursor 是工具名，不是模型）。此字段保持模型自报、不由派发方代填：平台悄悄降级换模型时（名义 3.1-pro 实跑 2.5-pro 之类），代填会把真实出处盖掉
 ```
 
 ## 4. 质检（collect 之前，必做）
 
 - 数 inbox 回执数 == 任务数。子代理回复「失败：PROMPT 文件不完整」的，检查侧车是否漏生成，修好后重派该 task。
 - 抽查 JSON 合法性；重点检查**空诗**：task 的 `content_hash` 为 `da39a3ee5e6b4b0d3255bfef95601890afd80709`（空串 SHA1）说明源诗 content 为空，其回执是编造的——移入 `inbox/quarantine/`，并向作者报告该 poem_id 的语料有问题。
+- 抽查回执 `model` 字段：应是真实模型 ID，不是派发工具/平台名（出现 codebuddy 之类的先隔离，查明实际模型、改正后再收）。reads.jsonl 只追加不删，错的 model 一旦入库就永久留底。
 - 不合格回执一律隔离，不修不补，让 collect 报"缺失"。
 
 ## 5. 入库与验证
@@ -96,7 +98,7 @@ python runner.py collect --tasks batches/<批次>/tasks --inbox batches/<批次>
 python runner.py coverage --full   # 验证层数达标
 ```
 
-collect 幂等，已收回执归档进 `inbox/ingested/`。
+collect 幂等，已收回执归档进 `inbox/ingested/`。collect 会打印**本批回执 model 分布**——入库同时向用户展示这一行，让作者确认记录的模型与实际派发一致。
 
 ## 6. 汇报口径
 

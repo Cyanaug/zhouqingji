@@ -35,3 +35,6 @@ collect_tmp.log
 
 # Internal fork-audit working doc — not meant for the public repo
 /FORK_REPORT.md
+
+# Sanitizer audit report - local only
+/SANITIZATION_REPORT.md
