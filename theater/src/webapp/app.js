@@ -495,6 +495,8 @@ function readerReadRow(r) {
 
 /* ---------- 全部作品 ---------- */
 
+const POETRY_GENRES = ["现代诗", "词", "歌词"];   // 永远在读者池的文体（与 server/runner 同一份口径）
+
 let allFilter = { genre: "全部", showPrivate: false };
 
 function renderAll() {
@@ -788,14 +790,14 @@ function wirePoemTools(p) {
       <input id="genre-in" value="${esc(p.genre)}" placeholder="或自定义文体"
         style="font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel)">
       <button class="btn primary" id="genre-save">保存</button>
-      <div style="font-size:.75rem;color:var(--ink-3);margin-top:.4rem">设为「杂文」或「草稿」将退出读者池（不再被 AI 读）；其余文体自动进入读者池。</div></div>`;
+      <div style="font-size:.75rem;color:var(--ink-3);margin-top:.4rem">只有 现代诗 / 词 / 歌词 默认在读者池；设为其他文体即退出，可在「设置 · 阅读文体」里勾选让 AI 以该文体的眼光继续读。</div></div>`;
     panel.querySelectorAll(".genre-pick").forEach(b => b.onclick = () => {
       document.getElementById("genre-in").value = b.dataset.g;
     });
     document.getElementById("genre-save").onclick = () => {
       const v = document.getElementById("genre-in").value.trim();
       doAction({ id: p.id, action: "set_genre", value: v },
-        `文体已改为「${v}」` + (["杂文", "草稿"].includes(v) ? "，已退出读者池" : ""));
+        `文体已改为「${v}」` + (POETRY_GENRES.includes(v) ? "" : "，已退出读者池（可在设置里勾选文体重新加入）"));
     };
   };
   document.getElementById("btn-edit").onclick = () => renderEditMode(p);
@@ -1455,6 +1457,21 @@ function renderSettings() {
     <div style="font-size:.85rem;color:var(--ink-2);margin-bottom:.35rem">${label}</div>${inner}
     ${hint ? `<div style="font-size:.72rem;color:var(--ink-3);margin-top:.3rem;line-height:1.6">${hint}</div>` : ""}</div>`;
   const views = [["boards", "榜单"], ["readers", "读者"], ["timeline", "时间轴"], ["stats", "统计"], ["all", "全部作品"]];
+  const rg = st.read_genres || [];
+  const gn = st.genre_notes || {};
+  // 候选文体 = 常见建议 + corpus 里实际出现的 + 已勾选的，去掉诗类与草稿（草稿永远不读）
+  const genreCands = [...new Set(["散文", "小说", "杂文",
+    ...S.poems.map(p => p.genre), ...rg, ...Object.keys(gn)])]
+    .filter(g => g && !POETRY_GENRES.includes(g) && g !== "草稿");
+  const genreRows = genreCands.map(g => `
+    <div style="margin-bottom:.9rem">
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" class="set-genre" data-g="${esc(g)}"${rg.includes(g) ? " checked" : ""}> ${esc(g)}
+      </label>
+      <input class="set-gnote" data-g="${esc(g)}" style="${ic};margin-top:.35rem"
+        placeholder="（可选）给读者的补充评判要求，一两句即可"
+        value="${esc(gn[g] || "")}">
+    </div>`).join("");
   app.innerHTML = `
     <h1 class="page-title">设置</h1>
     <p class="page-hint">偏好存在 corpus/settings.json（作者资产层侧车，不碰任何冻结 schema）；清空某项即恢复默认。派发 agent 读的也是这一份。</p>
@@ -1471,6 +1488,12 @@ function renderSettings() {
           <option value="raw"${(st.score_badge || "cal") === "raw" ? " selected" : ""}>只看原始均分</option></select>`,
         "影响榜单排序与各处分数徽章；统计页另有自己的口径开关。")}
       ${row("端口", `<input id="set-port" style="${ic}" type="number" min="1024" max="65535" value="${st.port || 8737}">`, "重启服务器后生效。")}
+      <h2 style="font-size:1rem;margin-top:1.8rem">阅读文体</h2>
+      <div style="font-size:.75rem;color:var(--ink-3);line-height:1.7;margin-bottom:1rem">
+        诗（现代诗 / 词 / 歌词）总是会被读。勾选的其他文体也进读者池——同一批读者、同样欣赏的眼光，
+        读者的 prompt 会自动声明「这不是诗」并换用该文体的判据；每个文体下可以写一两句你自己的评判要求（留空只用通用转换）。</div>
+      ${genreRows}
+      ${row("添加文体", `<input id="set-newgenre" style="${ic}" placeholder="如：剧本（保存后出现在上方，已勾选，可再补要求）">`)}
       <h2 style="font-size:1rem;margin-top:1.8rem">派发（agent 读这里）</h2>
       ${row("默认盲读模型", `<input id="set-model" style="${ic}" value="${esc(d.default_model || "")}">`, "填真实模型 ID，不是工具/平台名。")}
       ${row("默认通道", `<input id="set-transport" style="${ic}" value="${esc(d.default_transport || "")}">`)}
@@ -1481,10 +1504,19 @@ function renderSettings() {
   document.getElementById("set-save").onclick = async () => {
     const gv = id => document.getElementById(id).value.trim();
     const num = id => { const v = gv(id); return v === "" ? null : +v; };
+    const read_genres = [...document.querySelectorAll(".set-genre")]
+      .filter(x => x.checked).map(x => x.dataset.g);
+    const ng = gv("set-newgenre");
+    if (ng) read_genres.push(...ng.split(/[,，、\s]+/).filter(Boolean));
+    const genre_notes = {};
+    document.querySelectorAll(".set-gnote").forEach(x => {
+      if (x.value.trim()) genre_notes[x.dataset.g] = x.value.trim();
+    });
     try {
       await post("/api/settings", {
         site_title: gv("set-title"), site_subtitle: gv("set-sub"), footer_text: gv("set-foot"),
         default_view: gv("set-view"), score_badge: gv("set-score"), port: num("set-port"),
+        read_genres, genre_notes,
         dispatch: { default_model: gv("set-model"), default_transport: gv("set-transport"),
           target_depth: num("set-depth") } });
       await loadState();

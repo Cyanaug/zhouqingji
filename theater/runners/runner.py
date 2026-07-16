@@ -61,13 +61,38 @@ def load_reads():
     return out
 
 
-def pool():
-    """读者池：public 且 ai_read 的作品。"""
-    return [p for p in load_json(CORPUS)
-            if p["visibility"] == "public" and p["ai_read"]]
-
-
 STANZAS = ROOT / "corpus" / "分段.json"
+SETTINGS = ROOT / "corpus" / "settings.json"
+
+POETRY_GENRES = ("现代诗", "词", "歌词")
+
+GENRE_SWITCH = """—— 体裁转换 ——
+上面的读者底线是为读诗写的；你现在拿到的不是诗，是一篇{genre}。
+四条底线原样适用：说真话、情绪暗不等于写得差、只读眼前这一篇、评分是你的真实反应。
+只是把诗的判据（断行、意象密度、节奏这些）换成{genre}应有的判据去感受。
+仍然用欣赏的眼光，按你自己的性格与偏好来读，不必比读诗时更苛刻，也不必更宽容。"""
+
+
+def load_settings_file():
+    """corpus/settings.json 侧车（GUI 设置页写入）。runner 只关心
+    read_genres（勾选进读者池的非诗文体）与 genre_notes（作者补充的评判要求）。"""
+    if SETTINGS.exists():
+        try:
+            d = json.loads(SETTINGS.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+        except json.JSONDecodeError:
+            pass
+    return {}
+
+
+def pool():
+    """读者池：public 且（ai_read，或文体被设置页勾选进 read_genres）。
+    诗类（POETRY_GENRES）走 ai_read 老规则；其他文体默认在池外，作者勾选才读。"""
+    extra = set(load_settings_file().get("read_genres") or [])
+    return [p for p in load_json(CORPUS)
+            if p["visibility"] == "public"
+            and (p["ai_read"] or p.get("genre") in extra)]
 
 
 def load_stanzas():
@@ -92,22 +117,34 @@ def poem_text(poem, stanzas):
     return "\n".join(out)
 
 
-def build_prompt(poem, persona, stanzas=None, with_note=False):
+def build_prompt(poem, persona, stanzas=None, with_note=False, genre_notes=None):
     if persona.get("superseded_by"):
         sys.exit(f"{persona['persona_id']} 已被 {persona['superseded_by']} 取代，"
                   f"不应再派发新任务（2026-07-13 poetry-editor 误派发事故后加的硬闸门）。"
                   f"如果确实要读旧版历史用途，直接改这行代码绕过，不要静默继续。")
-    parts = [BASELINE, "", "—— 你是谁 ——", persona["persona"]]
+    genre = (poem.get("genre") or "").strip() or "文章"
+    is_poetry = genre in POETRY_GENRES
+    parts = [BASELINE]
+    if not is_poetry:
+        # 体裁转换：底线与人设一个字不动，只声明"这不是诗"并换判据——
+        # 同一批读者以自己的性格读散文/小说，而不是拿诗的标准压别的文体。
+        parts += ["", GENRE_SWITCH.format(genre=genre)]
+        note = ((genre_notes or {}).get(genre) or "").strip()
+        if note:
+            parts += ["", f"作者对{genre}的补充评判要求：{note}"]
+    parts += ["", "—— 你是谁 ——", persona["persona"]]
     if persona.get("knows_诠释") and INTERP.exists():
         parts += ["", "—— 你读过作者的自述档案《昼青·诠释》（背景，不是标准答案）——",
                   INTERP.read_text(encoding="utf-8")]
-    parts += ["", "—— 现在，读这首诗 ——", f"《{poem['title']}》"]
+    head = "—— 现在，读这首诗 ——" if is_poetry else f"—— 现在，读这篇{genre} ——"
+    parts += ["", head, f"《{poem['title']}》"]
     if persona.get("knows_date"):
         when = poem.get("date_written") or poem.get("created", "")[:7]
         parts += [f"（写于 {when}）"]
     if persona.get("reads_background") and poem.get("background"):
         parts += [f"（背景小注：{poem['background']}）"]
-    parts += ["", poem_text(poem, stanzas), "", "—— 诗歌正文到此为止 ——"]
+    tail = "—— 诗歌正文到此为止 ——" if is_poetry else "—— 正文到此为止 ——"
+    parts += ["", poem_text(poem, stanzas), "", tail]
     if with_note and (poem.get("note") or "").strip():
         parts += ["", "—— 作者眉批 ——",
                   "你拿到的不是净本，是作者的手稿批注本：下面的眉批是这份文档的一部分，"
@@ -160,6 +197,7 @@ def cmd_plan(args):
                   f"{', '.join(skipped)}", file=sys.stderr)
         chosen_poems = [p for p in chosen_poems if (p.get("note") or "").strip()]
 
+    genre_notes = load_settings_file().get("genre_notes") or {}
     tasks = []
     for poem in chosen_poems:
         ps = sorted(personas,
@@ -177,7 +215,8 @@ def cmd_plan(args):
                     "knows_date": persona["knows_date"],
                 },
                 "content_hash": poem["content_hash"],
-                "prompt": build_prompt(poem, persona, stanzas, with_note=with_note),
+                "prompt": build_prompt(poem, persona, stanzas, with_note=with_note,
+                                       genre_notes=genre_notes),
             }
             tasks.append(t)
 
@@ -188,6 +227,11 @@ def cmd_plan(args):
                    encoding="utf-8")
     kind = "批注本" if with_note else "盲读"
     print(f"{len(tasks)} 个{kind}任务（{len(chosen_poems)} 首 × ≤{args.readers} 读者）→ {out}")
+    nonp = Counter(p.get("genre") or "未分类" for p in chosen_poems
+                   if (p.get("genre") or "") not in POETRY_GENRES)
+    if nonp:
+        print("本批含非诗文体：" + "，".join(f"{g} ×{n}" for g, n in sorted(nonp.items()))
+              + "（prompt 已带体裁转换段）")
     if with_note:
         print("注意：批注本批次 collect 时必须带 --context-mode annotated，否则会混进盲读统计")
 

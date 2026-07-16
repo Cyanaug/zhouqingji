@@ -9,6 +9,8 @@ description: 昼青集盲读批量派发。计算覆盖缺口 → plan 生成任
 
 **开工前确认**：若用户没有明确给出（a）要读哪些诗 / 目标层数、（b）用什么模型，先算好缺口后**向用户报告缺口并确认范围与模型**，再动手派发。用户已明确给全的，直接执行。默认值先看 `corpus/settings.json` 的 `dispatch` 段（`default_model` / `default_transport` / `target_depth`，作者在网页设置页维护；文件或字段缺失才用本 SOP 里写的默认）；用户当场说的永远优先。
 
+**文体（v1.3 起）**：读者池 = 诗类（现代诗/词/歌词）+ 设置页勾选的 `read_genres` 文体，runner 的 `pool()` 自动生效，派发方不用做任何额外处理。非诗任务的 prompt 已自带「体裁转换」段（同一批读者换该文体的判据读）与作者写在 `genre_notes` 里的补充要求；plan 会打印本批非诗文体构成，照常派发即可。
+
 ## 0. 铁律（FROZEN，违反即事故）
 
 - `reads.jsonl` 只允许 `runner.py collect` 追加，**永不手编、永不删行**。诗被改动时靠 `content_hash` 标记旧读为过时，不删除。

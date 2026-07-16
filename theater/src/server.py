@@ -37,6 +37,8 @@ DEFAULT_SETTINGS = {
     "footer_text": "由世间所有的所见将它命名。",
     "default_view": "boards",    # boards | readers | timeline | stats | all
     "score_badge": "cal",        # cal = 质分优先；raw = 只看原始均分
+    "read_genres": [],           # 诗（现代诗/词/歌词）永远在读者池；其他文体勾选才读
+    "genre_notes": {},           # 文体 → 作者补充的评判要求（附进读者 prompt）
     "port": 8737,                # 重启后生效
     "dispatch": {                # 派发 agent 的默认偏好
         "default_model": "claude-haiku-4-5",
@@ -162,16 +164,18 @@ def act_edit(poem, payload, _corpus):
         poem["modified"] = now_iso()
 
 
-NON_READER_GENRES = {"杂文", "草稿"}
+POETRY_GENRES = ("现代诗", "词", "歌词")
 
 
 def act_set_genre(poem, payload, _corpus):
-    """改文体；设为 杂文/草稿 即退出读者池（ai_read 联动）。"""
+    """改文体；非诗文体一律默认退出读者池（ai_read 联动）——否则自定义文体
+    （剧本之类）会带着诗歌标准被读。作者可在设置页 read_genres 勾选让某文体
+    重新入池，届时 runner 的读者 prompt 自动带体裁转换段。"""
     v = str(payload.get("value", "")).strip()
     if not v:
         raise ValueError("文体不能为空")
     poem["genre"] = v
-    poem["ai_read"] = v not in NON_READER_GENRES
+    poem["ai_read"] = v in POETRY_GENRES
 
 
 ACTIONS = {"set_visibility": act_set_visibility,
@@ -314,6 +318,25 @@ def set_settings(payload):
         if v and v not in ("cal", "raw"):
             raise ValueError("score_badge 只能是 cal/raw")
         put(cur, "score_badge", v)
+    if "read_genres" in payload:
+        v = payload["read_genres"] or []
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ValueError("read_genres 必须是字符串数组")
+        v = sorted({x.strip() for x in v if x.strip()})
+        if v:
+            cur["read_genres"] = v
+        else:
+            cur.pop("read_genres", None)
+    if "genre_notes" in payload:
+        v = payload["genre_notes"] or {}
+        if not isinstance(v, dict) or not all(
+                isinstance(k, str) and isinstance(x, str) for k, x in v.items()):
+            raise ValueError("genre_notes 必须是 {文体: 要求} 对象")
+        v = {k.strip(): x.strip() for k, x in v.items() if k.strip() and x.strip()}
+        if v:
+            cur["genre_notes"] = v
+        else:
+            cur.pop("genre_notes", None)
     if "port" in payload:
         v = payload["port"]
         if v in (None, ""):

@@ -51,6 +51,14 @@ MODEL_ALIASES = {
     "gemini-2.5-flash": "gemini-2.5-pro",
 }
 
+# —— 校准池按"评判标准"分界，不按作品当前文体 ——
+# v1.3（2026-07-17）起，非诗文体经设置页勾选后可被读，读者 prompt 带「体裁转换」段，
+# 评判尺度已不是诗歌底线，这些读数不进诗的校准池（前端对无校准分的作品自动回退原始均分）。
+# 分界日之前的全部读数都产生于诗歌底线（含后来被作者改标为杂文/草稿的作品），保留——
+# 它们是合法的 rater 松紧原料，剔除反而让校准漂移。
+POETRY_GENRES = {"现代诗", "词", "歌词"}
+STANDARD_SPLIT = "2026-07-17"
+
 K_CELL = 10     # 单元层收缩常数：单元读数≈K_CELL 时，单元自身分位占一半权重
 K_MODEL = 20    # 模型层收缩常数（对模型全体读数）
 C_PRIOR = 5     # 诗级贝叶斯平均的先验读数条数
@@ -65,11 +73,14 @@ def canon_model(m):
 
 
 def load_reads():
-    """与网页榜单同口径：只用 blind 读，剔除作者折叠（curation）的记录。"""
+    """与网页榜单同口径：只用 blind 读，剔除作者折叠（curation）的记录；
+    另按 STANDARD_SPLIT 剔除体裁转换标准下产生的非诗读数（见顶部注释）。"""
     hidden = set()
     if CURATION.exists():
         cur = json.loads(CURATION.read_text(encoding="utf-8"))
         hidden = {k for k, v in cur.items() if v.get("hidden")}
+    genres = {p["id"]: (p.get("genre") or "")
+              for p in json.loads(CORPUS.read_text(encoding="utf-8"))}
     rows = []
     with READS.open(encoding="utf-8") as f:
         for line in f:
@@ -80,6 +91,9 @@ def load_reads():
             if r.get("score") is None:
                 continue
             if r.get("context_mode") != "blind" or r.get("read_id") in hidden:
+                continue
+            if genres.get(r["poem_id"]) not in POETRY_GENRES and \
+                    (r.get("ts") or "") >= STANDARD_SPLIT:
                 continue
             reader = r.get("reader") or {}
             rows.append({
