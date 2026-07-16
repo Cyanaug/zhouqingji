@@ -39,6 +39,8 @@ async function loadState() {
   S.favs = S.favs || {};
   S.stanzas = S.stanzas || {};
   S.calibration = S.calibration || {};
+  S.settings = S.settings || {};
+  applyBranding();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
   maps._primary = null;
   maps.persona = new Map(S.personas.map(p => [p.persona_id, p]));
@@ -97,8 +99,10 @@ function statReads(poemId) {
 function stats(poemId) {
   const rs = statReads(poemId);
   const c = (S.calibration.poems || {})[poemId];
-  // 质分优先取 display（方差匹配拉伸后的展示分），旧文件只有 cal 时回退；都没有回退均分
-  const cal = c ? (c.display != null ? c.display : c.cal) : null;
+  // 质分优先取 display（方差匹配拉伸后的展示分），旧文件只有 cal 时回退；都没有回退均分。
+  // 作者在设置里选「只看原始均分」时整体退回均分口径（统计页的口径开关独立于此）。
+  const useCal = ((S.settings || {}).score_badge || "cal") !== "raw";
+  const cal = useCal && c ? (c.display != null ? c.display : c.cal) : null;
   if (!rs.length) return { n: 0, mean: null, sd: null, cal };
   const scores = rs.map(r => r.score);
   const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
@@ -195,7 +199,9 @@ async function route() {
   const h = location.hash.replace(/^#/, "") || "/";
   const seg = h.split("/").filter(Boolean);
   window.scrollTo(0, 0);
-  if (seg.length === 0) return renderBoards();
+  if (seg.length === 0) return renderHome();
+  if (seg[0] === "boards") return renderBoards();
+  if (seg[0] === "settings") return renderSettings();
   if (seg[0] === "all") return renderAll();
   if (seg[0] === "timeline") return renderTimeline();
   if (seg[0] === "stats") return renderStats();
@@ -205,6 +211,24 @@ async function route() {
   if (seg[0] === "board" && seg[1]) return renderBoardFull(seg[1]);
   if (seg[0] === "reader" && seg[1]) return renderReader(seg[1]);
   renderBoards();
+}
+
+/* 首页（#/）落地到作者偏好的那一页；顶栏「榜单」固定走 #/boards */
+function renderHome() {
+  const map = { boards: renderBoards, readers: renderReaders,
+    timeline: renderTimeline, stats: renderStats, all: renderAll };
+  return (map[(S.settings || {}).default_view] || renderBoards)();
+}
+
+/* 站点身份（集名/副题/页脚句）从设置应用到静态骨架；默认值由服务端合并下发 */
+function applyBranding() {
+  const st = S.settings || {};
+  const t = st.site_title || "昼青集", sub = st.site_subtitle || "";
+  document.title = sub ? `${t} · ${sub}` : t;
+  const brand = document.querySelector(".brand");
+  if (brand) brand.innerHTML = `${esc(t)}${sub ? `<span class="brand-sub">${esc(sub)}</span>` : ""}`;
+  const foot = document.querySelector(".site-foot");
+  if (foot) foot.textContent = st.footer_text || "";
 }
 
 /* ---------- 榜单页 ---------- */
@@ -336,7 +360,7 @@ function renderBoardFull(key) {
   if (key === "readers") {
     const rows = readerRanking();
     app.innerHTML = `
-      <p><a class="back" href="#/">← 榜单</a></p>
+      <p><a class="back" href="#/boards">← 榜单</a></p>
       <h1 class="page-title">读者的手</h1>
       <p class="page-hint">每位读者给分的均值与松紧；点名字进读者页看其偏好与全部评语。</p>
       <div class="board">${readerBoardHTML(rows)}</div>`;
@@ -345,7 +369,7 @@ function renderBoardFull(key) {
   const d = boardDefs()[key];
   if (!d) { renderBoards(); return; }
   app.innerHTML = `
-    <p><a class="back" href="#/">← 榜单</a></p>
+    <p><a class="back" href="#/boards">← 榜单</a></p>
     <h1 class="page-title">${d.title} · 完整</h1>
     <p class="page-hint">${d.note} · 共 ${d.items.length} 首</p>
     <div class="board">${boardList(d.items, d.meta, true)}</div>`;
@@ -1417,6 +1441,56 @@ function renderDeepRead(rid) {
     if (!armed) { armed = true; btn.textContent = "确认升格？再点一次"; btn.classList.add("primary"); return; }
     try { await post("/api/promote", { read_id: rid }); toast("已升格进诠释册"); btn.disabled = true; btn.textContent = "已升格"; }
     catch (e) { toast("失败：" + e.message); }
+  };
+}
+
+/* ---------- 设置页：作者偏好（corpus/settings.json 侧车，GUI 与派发 agent 共用） ---------- */
+
+function renderSettings() {
+  app.className = "";
+  const st = S.settings || {};
+  const d = st.dispatch || {};
+  const ic = "font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel);width:100%;box-sizing:border-box";
+  const row = (label, inner, hint) => `<div style="margin-bottom:1.15rem">
+    <div style="font-size:.85rem;color:var(--ink-2);margin-bottom:.35rem">${label}</div>${inner}
+    ${hint ? `<div style="font-size:.72rem;color:var(--ink-3);margin-top:.3rem;line-height:1.6">${hint}</div>` : ""}</div>`;
+  const views = [["boards", "榜单"], ["readers", "读者"], ["timeline", "时间轴"], ["stats", "统计"], ["all", "全部作品"]];
+  app.innerHTML = `
+    <h1 class="page-title">设置</h1>
+    <p class="page-hint">偏好存在 corpus/settings.json（作者资产层侧车，不碰任何冻结 schema）；清空某项即恢复默认。派发 agent 读的也是这一份。</p>
+    <section class="board" style="text-align:left">
+      <h2 style="font-size:1rem">站点</h2>
+      ${row("集名", `<input id="set-title" style="${ic}" value="${esc(st.site_title || "")}">`, "顶栏与浏览器标签页的主名。")}
+      ${row("副题", `<input id="set-sub" style="${ic}" value="${esc(st.site_subtitle || "")}">`)}
+      ${row("页脚句", `<input id="set-foot" style="${ic}" value="${esc(st.footer_text || "")}">`, "页面底部那一行字——换成你自己的句子。")}
+      ${row("打开时先看", `<select id="set-view" style="${ic}">${views.map(([v, n]) =>
+        `<option value="${v}"${(st.default_view || "boards") === v ? " selected" : ""}>${n}</option>`).join("")}</select>`,
+        "首页（点集名）落地到哪一页；顶栏各入口不受影响。")}
+      ${row("评分口径", `<select id="set-score" style="${ic}">
+          <option value="cal"${(st.score_badge || "cal") !== "raw" ? " selected" : ""}>质分优先（按各读者松紧校准归一）</option>
+          <option value="raw"${(st.score_badge || "cal") === "raw" ? " selected" : ""}>只看原始均分</option></select>`,
+        "影响榜单排序与各处分数徽章；统计页另有自己的口径开关。")}
+      ${row("端口", `<input id="set-port" style="${ic}" type="number" min="1024" max="65535" value="${st.port || 8737}">`, "重启服务器后生效。")}
+      <h2 style="font-size:1rem;margin-top:1.8rem">派发（agent 读这里）</h2>
+      ${row("默认盲读模型", `<input id="set-model" style="${ic}" value="${esc(d.default_model || "")}">`, "填真实模型 ID，不是工具/平台名。")}
+      ${row("默认通道", `<input id="set-transport" style="${ic}" value="${esc(d.default_transport || "")}">`)}
+      ${row("目标覆盖层数", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth || 4}">`,
+        "每首诗希望被盲读到的层数——agent 算缺口时的默认目标。")}
+      <div style="margin-top:1.4rem"><button class="btn primary" id="set-save">保存</button></div>
+    </section>`;
+  document.getElementById("set-save").onclick = async () => {
+    const gv = id => document.getElementById(id).value.trim();
+    const num = id => { const v = gv(id); return v === "" ? null : +v; };
+    try {
+      await post("/api/settings", {
+        site_title: gv("set-title"), site_subtitle: gv("set-sub"), footer_text: gv("set-foot"),
+        default_view: gv("set-view"), score_badge: gv("set-score"), port: num("set-port"),
+        dispatch: { default_model: gv("set-model"), default_transport: gv("set-transport"),
+          target_depth: num("set-depth") } });
+      await loadState();
+      renderSettings();
+      toast("已保存（端口改动需重启服务器后生效）");
+    } catch (e) { toast("失败：" + e.message); }
   };
 }
 

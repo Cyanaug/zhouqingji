@@ -29,7 +29,23 @@ STANZAS = ROOT / "corpus" / "分段.json"
 PERSONAS = ROOT / "theater" / "personas" / "personas.json"
 WEBAPP = Path(__file__).resolve().parent / "webapp"
 
-PORT = 8737
+# 作者偏好（corpus/settings.json 侧车）：缺文件/缺字段一律回退这里的默认值。
+# GUI 设置页与派发 agent 读写同一份文件——所有"可以换成你自己的"都收口在这里。
+DEFAULT_SETTINGS = {
+    "site_title": "昼青集",
+    "site_subtitle": "读诗剧场",
+    "footer_text": "由世间所有的所见将它命名。",
+    "default_view": "boards",    # boards | readers | timeline | stats | all
+    "score_badge": "cal",        # cal = 质分优先；raw = 只看原始均分
+    "port": 8737,                # 重启后生效
+    "dispatch": {                # 派发 agent 的默认偏好
+        "default_model": "claude-haiku-4-5",
+        "default_transport": "cc-subagent",
+        "target_depth": 4,
+    },
+}
+VIEW_CHOICES = ("boards", "readers", "timeline", "stats", "all")
+SETTINGS = ROOT / "corpus" / "settings.json"
 
 MIME = {".html": "text/html; charset=utf-8",
         ".css": "text/css; charset=utf-8",
@@ -247,6 +263,99 @@ def set_stanzas(payload):
                        encoding="utf-8")
 
 
+def load_settings_file():
+    """settings.json 的原始内容（只含作者显式设置过的项）。"""
+    if SETTINGS.exists():
+        try:
+            d = json.loads(SETTINGS.read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                return d
+        except json.JSONDecodeError:
+            print("[settings] settings.json 解析失败，按全默认处理")
+    return {}
+
+
+def load_settings():
+    """默认值 + 作者设置的合并视图（下发给前端与 agent 的口径）。"""
+    merged = json.loads(json.dumps(DEFAULT_SETTINGS))
+    user = load_settings_file()
+    disp = user.get("dispatch")
+    merged.update({k: v for k, v in user.items()
+                   if k in DEFAULT_SETTINGS and k != "dispatch"})
+    if isinstance(disp, dict):
+        merged["dispatch"].update({k: v for k, v in disp.items()
+                                   if k in DEFAULT_SETTINGS["dispatch"]})
+    return merged
+
+
+def set_settings(payload):
+    """作者偏好（侧车文件，不碰任何冻结 schema）。只收白名单字段；
+    空字符串/None = 恢复该项默认（从文件里删掉，而不是把默认值固化进文件）。"""
+    cur = load_settings_file()
+
+    def put(d, key, val):
+        if val is None or (isinstance(val, str) and not val.strip()):
+            d.pop(key, None)
+        else:
+            d[key] = val.strip() if isinstance(val, str) else val
+
+    for k in ("site_title", "site_subtitle", "footer_text"):
+        if k in payload:
+            if payload[k] is not None and not isinstance(payload[k], str):
+                raise ValueError(f"{k} 必须是字符串")
+            put(cur, k, payload[k])
+    if "default_view" in payload:
+        v = payload["default_view"]
+        if v and v not in VIEW_CHOICES:
+            raise ValueError(f"default_view 只能是 {'/'.join(VIEW_CHOICES)}")
+        put(cur, "default_view", v)
+    if "score_badge" in payload:
+        v = payload["score_badge"]
+        if v and v not in ("cal", "raw"):
+            raise ValueError("score_badge 只能是 cal/raw")
+        put(cur, "score_badge", v)
+    if "port" in payload:
+        v = payload["port"]
+        if v in (None, ""):
+            cur.pop("port", None)
+        elif not isinstance(v, int) or not 1024 <= v <= 65535:
+            raise ValueError("port 需为 1024–65535 的整数")
+        else:
+            cur["port"] = v
+    if "dispatch" in payload:
+        dp = payload["dispatch"]
+        if not isinstance(dp, dict):
+            raise ValueError("dispatch 必须是对象")
+        cd = cur.get("dispatch", {})
+        for k in ("default_model", "default_transport"):
+            if k in dp:
+                if dp[k] is not None and not isinstance(dp[k], str):
+                    raise ValueError(f"{k} 必须是字符串")
+                put(cd, k, dp[k])
+        if "target_depth" in dp:
+            v = dp["target_depth"]
+            if v in (None, ""):
+                cd.pop("target_depth", None)
+            elif not isinstance(v, int) or not 1 <= v <= 99:
+                raise ValueError("target_depth 需为 1–99 的整数")
+            else:
+                cd["target_depth"] = v
+        if cd:
+            cur["dispatch"] = cd
+        else:
+            cur.pop("dispatch", None)
+
+    if not cur:
+        if SETTINGS.exists():
+            SETTINGS.unlink()
+        return
+    SETTINGS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SETTINGS.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
+                   encoding="utf-8")
+    tmp.replace(SETTINGS)
+
+
 def curate(payload):
     """作者折叠/恢复某条阅读记录（侧车文件，绝不改 reads.jsonl）。"""
     read_id = payload.get("read_id")
@@ -305,6 +414,7 @@ class Handler(BaseHTTPRequestHandler):
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),
                 "calibration": load_calibration(),
+                "settings": load_settings(),
             })
         # 静态文件
         if path == "/":
@@ -326,6 +436,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/promote":
                 promote_interpretation(payload)
                 return self._send(200, {"ok": True})
+            if self.path == "/api/settings":
+                set_settings(payload)
+                return self._send(200, {"ok": True, "settings": load_settings()})
             if self.path == "/api/curate":
                 curate(payload)
                 return self._send(200, {"ok": True})
@@ -352,5 +465,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"昼青集·读诗剧场  →  http://localhost:{PORT}")
-    ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
+    st = load_settings()
+    print(f"{st['site_title']}·{st['site_subtitle']}  →  http://localhost:{st['port']}")
+    ThreadingHTTPServer(("127.0.0.1", st["port"]), Handler).serve_forever()
