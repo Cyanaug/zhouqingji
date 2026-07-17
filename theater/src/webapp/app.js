@@ -313,7 +313,10 @@ function renderThread(rootId) {
     .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
 
   app.innerHTML = `
-    <p><a class="back" href="#/threads">← 跟帖</a></p>
+    <p>
+      <a class="back" href="#/threads">← 跟帖</a>
+      ${poem ? `<a class="back" style="margin-left:1em" href="#/poem/${esc(root.poem_id)}">→ 原诗评论区</a>` : ""}
+    </p>
     <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
     <div class="thread-floor">
       <p class="floor-meta"><b>楼主 · ${esc(personaName(root.reader.persona_id))}</b>
