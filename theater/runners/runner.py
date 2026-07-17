@@ -432,19 +432,28 @@ def vote_tally(read_id, votes=None):
     return tally
 
 
-VOTE_BASELINE = """你是「昼青集·读诗剧场」的一位读者。这次不是去读一首新诗写反应，而是给别人已经写下的一条短评做个判断——你认不认同这条短评说的？
+VOTE_BASELINE = """你是「昼青集·读诗剧场」的一位读者。这次不是去读一首新诗写反应，而是判断别人写的评论——它的论证，有没有撑起它给出的分数？
 
-底线：
-1. 判断这条短评有没有说到点子上，不是判断你自己会不会给同样的分。
-2. 拿不准就跳过，不要为了"给个答案"硬凑判断。
-3. 只看这一条短评、这一首诗，不牵涉别的。"""
+判断框架：
+你的 up/down 不是「你同不同意这个分」，而是：这条评论写得够不够清楚，
+让你看完之后能够理解（哪怕暂时接受）他为什么给这个分？
+「我自己不会给同样的分，但我理解他为什么这么判断」= 可以投 up。
+拿不准就 skip，不要为了给个答案硬凑。只看这一条评论和这一首诗，不牵涉别的。"""
 
 VOTE_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象：
 {
   "vote": "up",
-  "reason": "一句话，可选——尤其是 down 的时候说清哪里不认同，帮作者判断要不要撤下这条评论"
+  "reason": "可选——尤其是 down 时说清楚：论证哪里没撑住这个分"
 }
-vote 只能是 "up"（认同，这条短评抓住了这首诗真实的样子）/ "down"（不认同，没读懂或理由站不住）/ "skip"（读完没把握判断，不勉强）。"""
+up   = 读完之后能理解这个判断从哪里来，论证撑得住
+down = 评论没说清楚为什么这个分，或说的东西对不上诗本身
+skip = 说了什么，但拿不准够不够撑这个结论"""
+
+
+def _score_label(score):
+    if score is None:
+        return ""
+    return f"，打了 {score:.1f} 分"
 
 
 def build_vote_prompt(poem, persona, target_read, stanzas=None):
@@ -453,7 +462,8 @@ def build_vote_prompt(poem, persona, target_read, stanzas=None):
     is_long = bool((target_read.get("long_form") or "").strip())
     label = "长评" if is_long else "短评"
     body = target_read.get("long_form") if is_long else target_read.get("reaction")
-    parts += [f"—— 这条{label}（{target_read['reader']['persona_id']} 写的）——", body or ""]
+    score_str = _score_label(target_read.get("score"))
+    parts += [f"—— 这条{label}（{target_read['reader']['persona_id']} 写的{score_str}）——", body or ""]
     parts += ["", VOTE_RESPONSE_FORMAT]
     return "\n".join(parts)
 
@@ -462,11 +472,13 @@ BATCH_VOTE_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象，votes 
 {
   "votes": [
     {"read_id": "r-xxxxxx", "vote": "up",   "reason": "可选"},
-    {"read_id": "r-yyyyyy", "vote": "down",  "reason": "哪里不认同"},
+    {"read_id": "r-yyyyyy", "vote": "down",  "reason": "论证哪里没撑住这个分"},
     {"read_id": "r-zzzzzz", "vote": "skip",  "reason": ""}
   ]
 }
-vote 只能是 "up"（认同，抓住了这首诗真实的样子）/ "down"（不认同，没读懂或理由站不住）/ "skip"（拿不准，不勉强）。
+up   = 读完之后能理解这个判断从哪里来，论证撑得住
+down = 评论没说清楚为什么这个分，或说的东西对不上诗本身
+skip = 说了什么，但拿不准够不够撑这个结论
 read_id 必须原样照抄，不能省略或改写。"""
 
 
@@ -479,7 +491,8 @@ def build_batch_vote_prompt(poem, persona, target_reads, stanzas=None):
         is_long = bool((tr.get("long_form") or "").strip())
         label = "长评" if is_long else "短评"
         body = (tr.get("long_form") if is_long else tr.get("reaction")) or ""
-        parts += [f"\n【{i}】{label}（read_id: {tr['read_id']}）", body]
+        score_str = _score_label(tr.get("score"))
+        parts += [f"\n【{i}】{label}（read_id: {tr['read_id']}{score_str}）", body]
     parts += ["", BATCH_VOTE_RESPONSE_FORMAT]
     return "\n".join(parts)
 
