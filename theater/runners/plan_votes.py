@@ -32,12 +32,15 @@ BATCHES = R.BATCHES
 
 
 def _votable_reads_for(poem_ids, reads):
-    """挑盲读评论（短评+长评都算）作为投票目标；thread 楼层不走这条批量路径
-    ——它们已经在 plan_thread.py 的回复流程里顺势收过票了，避免重复邀请。"""
+    """挑盲读评论（短评+长评都算）作为投票目标。
+    排除：thread 楼层（顺势带票）、用户已折叠的评论（curation.json hidden=True）。"""
     want = set(poem_ids) if poem_ids else None
+    hidden = R.hidden_read_ids()
     out = []
     for r in reads:
         if r.get("context_mode") != "blind":
+            continue
+        if r["read_id"] in hidden:
             continue
         if want is not None and r["poem_id"] not in want:
             continue

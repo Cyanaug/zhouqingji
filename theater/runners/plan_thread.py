@@ -41,8 +41,14 @@ def cmd_invite(args):
     if parent is None:
         sys.exit(f"找不到 read_id：{args.parent}")
 
+    hidden = R.hidden_read_ids()
+    if args.parent in hidden:
+        sys.exit(f"目标楼层 {args.parent} 已被折叠（hidden），不开跟帖。")
+
     root_id = R.thread_root_id(args.parent, reads)
     root = reads[root_id]
+    if root_id != args.parent and root_id in hidden:
+        sys.exit(f"根楼 {root_id} 已被折叠（hidden），不开跟帖。")
     if not (root.get("long_form") or "").strip():
         sys.exit(f"根楼 {root_id} 没有长评（long_form 为空），不能作为开楼帖——"
                   f"v0 规定开楼必须绑定已有长评，不是随便一条盲读短评。")
