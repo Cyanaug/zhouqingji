@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "corpus" / "诗稿.json"
 INTERP = ROOT / "corpus" / "昼青·诠释.md"
 PERSONAS = ROOT / "theater" / "personas" / "personas.json"
+PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
 BATCHES = ROOT / "theater" / "runners" / "batches"
 
@@ -84,6 +85,32 @@ def load_settings_file():
         except json.JSONDecodeError:
             pass
     return {}
+
+
+def load_personas():
+    """默认人设（theater/personas/personas.json，git 跟踪、随更新可覆盖）
+    ＋ 读者侧车（corpus/personas.json，已 gitignore、pull 永不覆盖）合并。
+    按 persona_id：侧车同 id 部分覆盖字段、新 id 追加、hidden=true 撤下某默认。
+    无侧车文件时行为与旧版一致。与 server.load_personas 同一套口径。"""
+    base = load_json(PERSONAS)
+    order = [p["persona_id"] for p in base]
+    merged = {p["persona_id"]: p for p in base}
+    if PERSONAS_SIDECAR.exists():
+        try:
+            side = json.loads(PERSONAS_SIDECAR.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            side = []
+        if isinstance(side, list):
+            for p in side:
+                pid = (p or {}).get("persona_id")
+                if not pid:
+                    continue
+                if pid in merged:
+                    merged[pid] = {**merged[pid], **p}
+                else:
+                    merged[pid] = p
+                    order.append(pid)
+    return [merged[pid] for pid in order if not merged[pid].get("hidden")]
 
 
 def pool():
@@ -176,7 +203,7 @@ def cmd_coverage(args):
 
 def cmd_plan(args):
     poems = pool()
-    personas = [p for p in load_json(PERSONAS) if not p.get("superseded_by")]
+    personas = [p for p in load_personas() if not p.get("superseded_by")]
     stanzas = load_stanzas()
     reads = [r for r in load_reads() if r.get("context_mode") == "blind"]
     per_poem = Counter(r["poem_id"] for r in reads)

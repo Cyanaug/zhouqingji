@@ -37,7 +37,7 @@ def main():
 
     exclude = {x for x in args.exclude.split(",") if x}
     poems = [p for p in R.pool() if p["id"] not in exclude]
-    personas = [p for p in R.load_json(R.PERSONAS) if not p.get("superseded_by")]
+    personas = [p for p in R.load_personas() if not p.get("superseded_by")]
     stanzas = R.load_stanzas()
     reads = [r for r in R.load_reads() if r.get("context_mode") == "blind"]
     per_pair = Counter((r["poem_id"], r["reader"]["persona_id"]) for r in reads)

@@ -27,6 +27,7 @@ CALIBRATION = ROOT / "results" / "calibration" / "scores.json"
 FAVS = ROOT / "corpus" / "作者偏爱.json"
 STANZAS = ROOT / "corpus" / "分段.json"
 PERSONAS = ROOT / "theater" / "personas" / "personas.json"
+PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 WEBAPP = Path(__file__).resolve().parent / "webapp"
 
 # 作者偏好（corpus/settings.json 侧车）：缺文件/缺字段一律回退这里的默认值。
@@ -279,6 +280,33 @@ def load_settings_file():
     return {}
 
 
+def load_personas():
+    """默认人设（theater/personas/personas.json，git 跟踪、随更新可覆盖）
+    ＋ 读者侧车（corpus/personas.json，已 gitignore、pull 永不覆盖）合并。
+    按 persona_id：侧车同 id 部分覆盖字段、新 id 追加、hidden=true 撤下某默认。
+    没有侧车文件时，返回与旧行为完全一致。"""
+    base = json.loads(PERSONAS.read_text(encoding="utf-8"))
+    order = [p["persona_id"] for p in base]
+    merged = {p["persona_id"]: p for p in base}
+    if PERSONAS_SIDECAR.exists():
+        try:
+            side = json.loads(PERSONAS_SIDECAR.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            print("[personas] corpus/personas.json 解析失败，忽略侧车")
+            side = []
+        if isinstance(side, list):
+            for p in side:
+                pid = (p or {}).get("persona_id")
+                if not pid:
+                    continue
+                if pid in merged:
+                    merged[pid] = {**merged[pid], **p}   # 部分覆盖：只改给出的字段
+                else:
+                    merged[pid] = p
+                    order.append(pid)
+    return [merged[pid] for pid in order if not merged[pid].get("hidden")]
+
+
 def load_settings():
     """默认值 + 作者设置的合并视图（下发给前端与 agent 的口径）。"""
     merged = json.loads(json.dumps(DEFAULT_SETTINGS))
@@ -432,7 +460,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {
                 "poems": load_corpus(),
                 "reads": load_reads(),
-                "personas": json.loads(PERSONAS.read_text(encoding="utf-8")),
+                "personas": load_personas(),
                 "curation": load_curation(),
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),
