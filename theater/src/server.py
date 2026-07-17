@@ -407,6 +407,59 @@ def set_settings(payload):
     tmp.replace(SETTINGS)
 
 
+PERSONA_STR_FIELDS = ("name", "generation", "native_lang", "orientation",
+                      "persona", "superseded_by")
+PERSONA_BOOL_FIELDS = ("knows_诠释", "knows_date", "reads_background", "hidden")
+
+
+def set_personas(payload):
+    """读者自建/覆盖人设（侧车 corpus/personas.json，绝不动随附的 personas.json）。
+    payload = {"personas": [ {persona_id, ...}, ... ]}，整份替换侧车；空列表 → 删文件。
+    随附 id 的条目可只给要改的字段（合并时部分覆盖，其余保留随附值）；
+    全新 id 必须含 name 与 persona（否则无法展示/派发），knows_* 缺省补 False。"""
+    items = payload.get("personas")
+    if not isinstance(items, list):
+        raise ValueError("personas 必须是数组")
+    default_ids = {p["persona_id"]
+                   for p in json.loads(PERSONAS.read_text(encoding="utf-8"))}
+    clean, seen = [], set()
+    for raw in items:
+        if not isinstance(raw, dict):
+            raise ValueError("每个人设必须是对象")
+        pid = (raw.get("persona_id") or "").strip()
+        if not pid:
+            raise ValueError("persona_id 不能为空")
+        if pid in seen:
+            raise ValueError(f"persona_id 重复：{pid}")
+        seen.add(pid)
+        e = {"persona_id": pid}
+        for k in PERSONA_STR_FIELDS:
+            if raw.get(k) is not None:
+                if not isinstance(raw[k], str):
+                    raise ValueError(f"{k} 必须是字符串")
+                if raw[k].strip():
+                    e[k] = raw[k].strip()
+        for k in PERSONA_BOOL_FIELDS:
+            if raw.get(k) is not None:
+                if not isinstance(raw[k], bool):
+                    raise ValueError(f"{k} 必须是布尔值")
+                e[k] = raw[k]
+        if pid not in default_ids:
+            if not e.get("name") or not e.get("persona"):
+                raise ValueError(f"新人设 {pid} 必须含 name 与 persona")
+            for k in ("knows_诠释", "knows_date", "reads_background"):
+                e.setdefault(k, False)
+        clean.append(e)
+    if not clean:
+        if PERSONAS_SIDECAR.exists():
+            PERSONAS_SIDECAR.unlink()
+        return
+    PERSONAS_SIDECAR.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PERSONAS_SIDECAR.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(PERSONAS_SIDECAR)
+
+
 def curate(payload):
     """作者折叠/恢复某条阅读记录（侧车文件，绝不改 reads.jsonl）。"""
     read_id = payload.get("read_id")
@@ -490,6 +543,9 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/settings":
                 set_settings(payload)
                 return self._send(200, {"ok": True, "settings": load_settings()})
+            if self.path == "/api/personas":
+                set_personas(payload)
+                return self._send(200, {"ok": True, "personas": load_personas()})
             if self.path == "/api/curate":
                 curate(payload)
                 return self._send(200, {"ok": True})

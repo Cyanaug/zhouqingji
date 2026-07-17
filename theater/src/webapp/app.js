@@ -249,6 +249,7 @@ const sMeta = p => { const s = stats(p.id); return `${qm(s)} · ${s.n} 读`; };
 const dMeta = p => { const s = stats(p.id); return `σ ${fmt1(s.sd)} · ${qm(s)} · ${s.n} 读`; };
 const rMeta = p => { const s = stats(p.id); return s.n ? `${qm(s)} · ${s.n} 读` : "未读"; };
 const zMeta = p => `${poemSize(p)} 字`;
+const gMeta = p => { const s = stats(p.id); return s.n ? `均 ${fmt1(s.mean)} · ${s.n} 读` : "未读"; };
 
 /* 榜单的唯一定义处：预览（前 10）与完整榜共用，保证两边永远一致 */
 function boardDefs() {
@@ -288,6 +289,25 @@ function boardDefs() {
   };
 }
 
+/* 非诗文体榜：散文/杂文/小说等判据不同，不与诗同榜（它们 ai_read=false、不进 pool()，
+   也不进诗的校准）；这里单独按各自文体的原始均分排，给非诗作品一个可发现的入口。
+   只收 public、非诗类、非草稿、且至少被读过一次的作品。 */
+function nonPoetryGenreBoards() {
+  const cand = S.poems.filter(p => p.visibility === "public" &&
+    !POETRY_GENRES.includes(p.genre) && p.genre && p.genre !== "草稿");
+  const genres = [...new Set(cand.map(p => p.genre))];
+  const boards = [];
+  for (const g of genres) {
+    const items = cand.filter(p => p.genre === g)
+      .map(p => ({ p, s: stats(p.id) }))
+      .filter(x => x.s.n >= 1)
+      .sort((a, b) => b.s.mean - a.s.mean || b.s.n - a.s.n)
+      .map(x => x.p);
+    if (items.length) boards.push({ genre: g, items });
+  }
+  return boards;
+}
+
 /* 读者的手：每个人设给分的偏好统计 */
 function readerRanking() {
   const rows = [];
@@ -325,6 +345,14 @@ function renderBoards() {
   app.className = "wide";
   const defs = boardDefs();
   const readers = readerRanking();
+  const gbs = nonPoetryGenreBoards();
+  const gbsHTML = gbs.length ? `
+      <details class="board more-boards"><summary>更多榜单 · 非诗文体</summary>
+        <p class="board-note" style="margin-top:.8rem">散文 / 杂文 / 小说这类非诗文体判据不同，不与诗同榜；下面按各自文体的原始均分排（诗的校准量表不适用于它们）。</p>
+        <div class="boards" style="margin-top:1rem">
+          ${gbs.map(b => `<section><h2>${esc(b.genre)}榜</h2>${boardList(b.items.slice(0, 10), gMeta, true)}</section>`).join("")}
+        </div>
+      </details>` : "";
   app.innerHTML = `
     <h1 class="page-title">榜单</h1>
     <p class="page-hint">全部从诚实的单篇盲读里事后派生；从不让模型排名。评分只是浅层信号，形状在每首诗自己的页面里。
@@ -345,6 +373,7 @@ function renderBoards() {
           <section><h2>最短<a class="full-link" href="#/board/shortest">完整 →</a></h2>${boardList(defs.shortest.items.slice(0, 10), zMeta, true)}</section>
         </div>
       </details>
+      ${gbsHTML}
     </div>
     <section class="board hero" id="recent-reads" style="margin-top:2.5rem">
       <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '缓存最近 ' + recentReads().length + ' 条' : ''}</span></h2>

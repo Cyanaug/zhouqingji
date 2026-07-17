@@ -1,0 +1,13 @@
+[
+  {
+    "persona_id": "my-first-reader",
+    "name": "我的第一位读者",
+    "generation": "90后",
+    "native_lang": "zh",
+    "orientation": "重感觉",
+    "knows_诠释": false,
+    "knows_date": false,
+    "reads_background": true,
+    "persona": "在这里写这位读者是谁、带着怎样的经历与偏好读诗、说话什么口吻。像写一个人，而不是写一条规则。"
+  }
+]
