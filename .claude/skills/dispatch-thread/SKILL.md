@@ -51,7 +51,21 @@ python plan_thread.py invite --parent <子楼的read_id> --fraction 0.5 \
 
 ## 3. 派发
 
-每个 task-NNN.prompt.txt 原样喂给子代理或 hy3（不要改写、不要摘要）。
+`poem-reader` 子代理专为盲读设计，**不适用于跟帖任务**。用以下两种方式之一：
+
+### 方式 A：CC 通用子代理（推荐）
+
+用 Agent 工具，`subagent_type: "claude"`，`model: "haiku"`，并行 15–20 个为一波：
+
+```
+读 <仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt 的全部内容，
+按其中指示产出 JSON，写入 <仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json。
+model 字段填 claude-haiku-4-5。
+```
+
+### 方式 B：hy3 / CodeBuddy 等外部工具
+
+每个 task-NNN.prompt.txt 原样喂给 hy3（不要改写、不要摘要）。
 
 **正常回复回执格式**：
 ```json

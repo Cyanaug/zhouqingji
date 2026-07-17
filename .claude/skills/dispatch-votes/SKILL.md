@@ -34,17 +34,17 @@ python plan_votes.py invite --targets r-000123,r-000456 --fraction 0.5 \
 
 ## 2. 派发
 
-### 方式 A：CC 子代理（推荐，成本最低）
+`poem-reader` 子代理专为盲读设计，输出格式固定为 score/reaction，**不适用于点赞任务**。点赞模式用以下两种方式之一：
 
-用 Agent 工具，`subagent_type: "poem-reader"`，`model: "haiku"`，派发指令：
+### 方式 A：CC 通用子代理（推荐）
+
+用 Agent 工具，`subagent_type: "claude"`，`model: "haiku"`，每个任务一个 agent，并行 15–20 个为一波：
 
 ```
-PROMPT 文件：<仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt
-RESPONSE 输出文件：<仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json
-回执 model 字段填：claude-haiku-4-5
+读 <仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt 的全部内容，
+按其中指示产出 JSON，写入 <仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json。
+model 字段填 claude-haiku-4-5。
 ```
-
-并行发 15–20 个为一波，等通知。
 
 ### 方式 B：hy3 / CodeBuddy 等外部工具
 
