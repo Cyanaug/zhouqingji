@@ -27,7 +27,11 @@
 
 ## 怎么用
 
-**第一次用、corpus 还是空的**：先看 `01_corpus_schema.md` 里 `诗稿.json` 的字段格式，把你自己的诗整理成同样结构的 JSON 数组存到 `corpus/诗稿.json`（`corpus/`、`results/` 默认不存在，需要你自己建）。手写几条起步即可；也可以参照 `theater/src/build_corpus_huawei.py`、`theater/src/merge_corpus_xiaomi.py` 的模式给自己的诗歌来源写一份转换脚本——这两个文件是历史脚本、设备专属，不能直接跑，照抄模式就好（记得把里面的 `author` 换成你自己的笔名）。原始素材如果不是设备导出的 JSON，而是一堆 Word/txt 之类的本地文件，按 `.claude/skills/import-corpus/SKILL.md` 的思路让你的 AI 编程工具帮你整理——不挑具体格式，靠读 schema 和现有语料自己判断，遇到分不清的地方会先跟你确认。另外，`build_corpus_huawei.py`/`merge_corpus_xiaomi.py` 这两个脚本背后其实有一步没写出来的手工准备：浏览器 F12 打开开发者工具、复制一个真实请求，带着登录态直接调用该云笔记服务的接口把原始数据导出来——如果你的诗还锁在别的云笔记里，这个手法大概率也适用，没有通用脚本，去搜"F12 抓包"相关教程，或者问你的 AI 工具怎么在你那个服务上试一次。但这步只解决"数据弄出来"，云笔记里往往还混着账单、待办这类无关内容——弄出来之后同样要走一遍 `import-corpus` 的清理确认，不是抓下来就自动进 corpus。
+**第一次用、corpus 还是空的**：先看 `01_corpus_schema.md` 里 `诗稿.json` 的字段格式，把你自己的诗整理成同样结构的 JSON 数组存到 `corpus/诗稿.json`（`corpus/`、`results/` 默认不存在，需要你自己建）。手写几条起步即可，也可以按素材来源挑一条路走：
+
+- **设备云笔记已经导出过 JSON**：参照 `theater/src/build_corpus_huawei.py`、`theater/src/merge_corpus_xiaomi.py` 的模式给自己的来源写一份转换脚本——这两个文件是历史脚本、设备专属，不能直接跑，照抄模式就好（记得把里面的 `author` 换成你自己的笔名）。
+- **本地一堆 Word/txt/表格之类的文件，没导出过**：按 `.claude/skills/import-corpus/SKILL.md` 的思路让你的 AI 编程工具帮你整理——不挑具体格式，靠读 schema 和现有语料自己判断，遇到分不清的地方会先跟你确认。
+- **诗还锁在别的云笔记里，连导出都没做过**：`build_corpus_huawei.py`/`merge_corpus_xiaomi.py` 背后其实有一步没写出来的手工准备——浏览器 F12 打开开发者工具、复制一个真实请求，带着登录态直接调用该云笔记服务的接口把原始数据导出来；这个手法大概率也适用于其他云笔记服务，没有通用脚本，去搜"F12 抓包"相关教程，或者问你的 AI 工具怎么在你那个服务上试一次。但这步只解决"数据弄出来"，笔记里往往还混着账单、待办这类无关内容——弄出来之后同样要走一遍 `import-corpus` 的清理确认，不是抓下来就自动进 corpus。
 
 1. 启动应用：`python theater/src/server.py`，浏览器开 http://localhost:8737 —— corpus 为空也能正常打开，只是榜单/时间轴是空的。集名、页脚句、默认落地页、评分口径、端口、派发默认模型这些"可以换成你自己的"，都在顶栏「设置」里改（存 `corpus/settings.json` 侧车，清空某项即恢复默认；派发 agent 读的也是这一份）。想让 AI 也读散文/小说/剧本这类非诗文体：在「设置 · 阅读文体」里勾选、可附一两句你自己的评判要求——读者会带着"体裁转换"提示按该文体的判据读（诗永远在读者池，草稿永远不读）。读者人设也可持久化：随附的那批读者随更新走，你自己新增或改写的读者写进 `corpus/personas.json` 侧车（`git pull` 永不覆盖）。最顺手的路是在「读者」页里直接点——底部「你的读者」区「＋ 新建读者」，或点进任何一位读者「编辑 / 撤下 / 还原」；也可手改侧车文件（复制 `theater/personas/personas.sidecar.example.json` 起步；同 persona_id 只覆盖你改的字段，加 `"hidden": true` 可撤下某个随附读者）。
 2. 推进一轮盲读（"加厚"覆盖）：按 `.claude/skills/dispatch-reads/SKILL.md` 的流程走（用 Claude Code 就说一声「跑一轮」；用其他 AI 编程工具参考技能文档里附的通用 prompt 模板），会按覆盖账自动补最薄的 (诗 × 读者) 组合。
