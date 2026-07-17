@@ -216,6 +216,7 @@ def cmd_collect(args):
                 "persona_hash": m["persona_hash"],
                 "depth": m["depth"],
                 "stance_changed": m["stance_changed"],
+                "parent_vote": m.get("vote"),   # up/down/null：对 parent 楼层的顺势投票方向
                 "void": False,
                 "void_reason": None,
             }

@@ -295,9 +295,10 @@ function renderThread(rootId) {
     if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
     const kids = (childrenMap.get(r.read_id) || []).slice()
       .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+    const lean = m.parent_vote === "up" ? "·认同" : m.parent_vote === "down" ? "·不认同" : "";
     const stanceTag = m.stance_changed === true
-      ? `<span class="chip warm">改变了判断</span>`
-      : m.stance_changed === false ? `<span class="chip">立场未变</span>` : "";
+      ? `<span class="chip warm">改变了判断${lean}</span>`
+      : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
     return `
       <div class="thread-floor" style="margin-left:${depth * 1.5}em">
         <p class="floor-meta"><b>${esc(personaName(r.reader.persona_id))}</b>
