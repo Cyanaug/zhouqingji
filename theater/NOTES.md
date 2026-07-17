@@ -100,6 +100,12 @@
 
 **2026-07-17 晚 · 已施工（v0）**：`theater/runners/runner.py` 加了 `ancestor_chain`/`own_floor_history`/`thread_root_id`（祖先链组装+token 预算封顶+自身楼层历史）、`persona_sha1`、`build_thread_prompt`（含沉默基准线/立场惯性/复述格式三块提示词）、`load_thread_meta`/`save_thread_meta`/`append_thread_silence`/`void_floor`（`results/threads/meta.json` + `silences.jsonl` 侧车），`cmd_ingest` 已支持 `context_mode=="thread"`（score 落 null、校验 thread_ref 存在）。新文件 `theater/runners/plan_thread.py` 是派发入口：`invite`（派发方指定接楼、楼主优先在邀请名单、随机抽样+乱序派发）、`collect`（引用校验+静默重roll+沉默分流+落盘+侧车元数据）、`void`（级联标记）。`personas.json` 里 6 位缺"审美优先级"颗粒度的读者已各补一句"什么论证说服不了你"。`server.py`/`webapp` 加了只读的 `#/threads` 列表页与 `#/thread/<root_id>` 楼层树页（跳过 void 楼层，不进任何榜单/校准）。测试见 `theater/tests/test_thread.py`。**下一步**：拿 2 首已有长评的诗跑一次真实试点，校准 token 预算数字与沉默终止阈值。
 
+**2026-07-17 深夜 · 用户复盘发现的问题 + 顺带立项「点赞模式」**：
+- **persona 惯性会污染盲读**——`thread_priors`（6 位读者"什么论证说服不了你"那句）原来写在 `persona` 正文里，`build_prompt`（盲读）和 `build_thread_prompt`（跟帖）都会读到，等于把跟帖专属的立场惯性偷偷带进盲读打分。**已修**：这 6 句话挪进独立字段 `thread_priors`，`build_prompt` 不读它，只有 `build_thread_prompt` 会拼进"—— 你在讨论时的脾气 ——"这一段。
+- **跟帖要不要开在短评下面**——讨论后维持"跟帖只长在长评下面"：祖先链+引用+转述+立场这套脚手架是给长评设计的，短评两三句话接不住这套机制，容易变成走形式。短评自己的"是否值得判断"需求，另开一个更轻的机制解决（见下）。
+- **点赞模式（v0，新立项，与 thread 并列、互不影响）**：给已有的、无长评的盲读短评办一场"认同/不认同/跳过"投票，目的是给作者一个信号：哪些短评没读懂/没说到点子上，值得手删腾位置给新读者（争取诗从只有短评变成有长评）。不是排名指标，数据独立存 `results/votes/votes.jsonl`，永不进 reads.jsonl、永不进校准。新文件 `theater/runners/plan_votes.py`：`invite --poem-ids`/`--targets`（排除评论作者本人、跳过已投过的 voter-target 对）、`collect`（合法 vote 落盘，非法值拒收）、`tally`（打印某诗下每条短评的赞/踩/跳过计数，供作者人工决定要不要删）。`server.py`/`webapp` 只加了只读的赞踩徽标（`read-card` 头部）。要不要按票数自动降权：不做，先看数据攒起来什么样再说。测试见 `theater/tests/test_votes.py`。
+- **批次跑多大范围（全部 vs 只长评/只指定诗）**：暂定默认"只覆盖你明确圈定的范围"（显式给 `--poem-ids`/`--targets`/`--parent`），不默认"全部诗"；要扩大范围时你直接说，不需要我每次批次前都反过来确认。
+
 ## 已知留待作者/后续
 
 - 有一首诗的标注时间与诠释册记载不一致：备忘录 created 时间与诠释册所记的写作时间差了一年左右。首轮全知档案员读出了这个矛盾（好读者！）。建议作者在详情页用「写作时间」按钮核对、标成真实日期，并以系统记录的时间为准。

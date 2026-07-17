@@ -2,6 +2,12 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-17 更深夜 · 修 persona 惯性污染盲读 + 点赞模式（votes）v0
+
+**做了什么：** 用户复盘发现两个问题：(1) 跟帖用的"什么论证说服不了你"那 6 句 persona 补充，因为写在共享的 `persona` 字段里，盲读的 `build_prompt` 也会读到——已修，挪进独立字段 `thread_priors`，只有 `build_thread_prompt` 拼这段。(2) 跟帖要不要也开在短评下面：讨论后维持"只长在长评下面"，短评的判断需求另开轻量机制。**新立项「点赞模式」**：新文件 `theater/runners/plan_votes.py`（`invite`/`collect`/`tally`），让读者对已有的、无长评的短评投 认同/不认同/跳过，数据独立存 `results/votes/votes.jsonl`（不进 reads.jsonl、不进校准），给作者一个"哪些短评该手删腾位置"的信号。`runner.py` 加 `load_comment_votes`/`append_comment_votes`/`vote_tally`/`build_vote_prompt`；`server.py` `/api/state` 新发 `votes`；`webapp` 的 `read-card` 头部加只读赞踩徽标。新测试 `theater/tests/test_votes.py`（append/tally、短评过滤、invite 排除作者本人+去重、collect 合法/非法值，ALL PASS）。两仓 `py_compile`/`node --check`/三份测试全绿，已同步。
+
+**下一步：** 点赞模式还没跑过真实批次，找几首"只有短评没有长评"的诗试一轮，看赞踩分布是否真的有区分度；跟帖的 2 首诗试点仍待跑。
+
 ## 2026-07-17 深夜 · 跟帖模式（thread）v0 施工完成
 
 **做了什么：** 把上一条的设计落成代码。`theater/runners/runner.py` 新增祖先链组装（`ancestor_chain`，token 预算封顶，根+parent 永远保留、中间楼层不够预算先丢）、自身楼层历史（`own_floor_history`，防自我打脸）、`persona_sha1`（比照 `content_hash`）、`build_thread_prompt`（沉默基准线/立场惯性/复述格式三块提示词落成实字）、thread 侧车读写（`results/threads/meta.json` + `silences.jsonl`）、`void_floor`（级联标记，隐藏不删除）；`cmd_ingest` 支持 `context_mode=="thread"`（score 落 null、必须有真实存在的 thread_ref）。新文件 `theater/runners/plan_thread.py`：`invite`（派发方指定接楼、楼主默认在邀请名单、随机抽样+乱序派发+记录）、`collect`（引用字符串匹配校验+不匹配静默重roll、沉默响应分流进 silences.jsonl、通过的落盘+写侧车元数据）、`void`（CLI 手动标记）。`personas.json` 里 6 位（midnight-peer/felt-first/teen-reader/silent-reader/translator-eyes/informed-chronologist）缺"审美优先级"颗粒度的读者各补一句"什么论证说服不了你"。`server.py` `/api/state` 新发 `thread_meta`；`webapp` 加只读的 `#/threads` 列表页与 `#/thread/<root_id>` 楼层树页（跳过 void，不进任何榜单/校准）。新测试 `theater/tests/test_thread.py`（祖先链/token封顶/own_history/persona_hash/ingest校验/void级联/collect全链路，ALL PASS）。两仓 `py_compile`/`node --check`/两份测试全绿，代码已同步主仓。

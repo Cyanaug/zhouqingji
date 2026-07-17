@@ -31,6 +31,8 @@ THREAD_DIR = ROOT / "results" / "threads"
 THREAD_META = THREAD_DIR / "meta.json"          # 侧车：{read_id: {persona_hash, depth, stance_changed, void, void_reason}}
 THREAD_SILENCES = THREAD_DIR / "silences.jsonl"  # 侧车：append-only 沉默事件日志
 THREAD_TOKEN_BUDGET = 6000  # 祖先链原文字符预算（无分词器，字符数近似；具体数字待 2 首诗试点后校准）
+VOTES_DIR = ROOT / "results" / "votes"
+VOTES = VOTES_DIR / "votes.jsonl"  # 侧车：读者对既有短评的 认同/不认同/跳过，独立于 reads.jsonl
 
 REQUIRED_FIELDS = ["poem_id", "reader", "context_mode", "transport",
                    "score", "reaction", "content_hash"]
@@ -348,6 +350,10 @@ def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floo
     """ancestor_floors 是 ancestor_chain() 的返回值（[root, ..., parent]，已含 parent）。
     own_history 是 own_floor_history() 的返回值。"""
     parts = [THREAD_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
+    if persona.get("thread_priors"):
+        # 立场惯性的真实来源：只在跟帖 prompt 里拼，盲读的 build_prompt 不读这个字段，
+        # 避免"什么论证说服不了你"这类跟帖专属的价值倾向渗进盲读打分（2026-07-17 用户指出）。
+        parts += ["", "—— 你在讨论时的脾气 ——", persona["thread_priors"]]
     parts += ["", "—— 这首诗（讨论背景）——", f"《{poem['title']}》"]
     root = ancestor_floors[0]
     parts += ["", "—— 楼主长评（开楼帖）——", floor_text(root)]
@@ -363,6 +369,80 @@ def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floo
                   f"{parent_floor['reader']['persona_id']}] ——", floor_text(parent_floor)]
     parts += ["", SILENCE_BLOCK, "", POSITION_INERTIA_BLOCK, "", QUOTE_BLOCK,
               "", THREAD_RESPONSE_FORMAT]
+    return "\n".join(parts)
+
+
+def load_comment_votes():
+    if not VOTES.exists():
+        return []
+    out = []
+    for line in VOTES.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            out.append(json.loads(line))
+    return out
+
+
+def next_vote_id(existing):
+    mx = 0
+    for v in existing:
+        vid = v.get("vote_id", "")
+        if vid.startswith("v-"):
+            try:
+                mx = max(mx, int(vid[2:]))
+            except ValueError:
+                pass
+    return mx
+
+
+def append_comment_votes(new_votes):
+    """append-only，同 reads.jsonl 的精神；vote_id/ts 落盘时补。"""
+    existing = load_comment_votes()
+    counter = next_vote_id(existing)
+    lines = []
+    for v in new_votes:
+        counter += 1
+        rec = dict(v)
+        rec["vote_id"] = f"v-{counter:06d}"
+        rec.setdefault("ts", time.strftime("%Y-%m-%dT%H:%M:%S%z"))
+        lines.append(json.dumps(rec, ensure_ascii=False))
+    if lines:
+        VOTES_DIR.mkdir(parents=True, exist_ok=True)
+        with VOTES.open("a", encoding="utf-8") as f:
+            for ln in lines:
+                f.write(ln + "\n")
+    return len(lines)
+
+
+def vote_tally(read_id, votes=None):
+    votes = votes if votes is not None else load_comment_votes()
+    tally = {"up": 0, "down": 0, "skip": 0}
+    for v in votes:
+        if v.get("target_read_id") == read_id and v.get("vote") in tally:
+            tally[v["vote"]] += 1
+    return tally
+
+
+VOTE_BASELINE = """你是「昼青集·读诗剧场」的一位读者。这次不是去读一首新诗写反应，而是给别人已经写下的一条短评做个判断——你认不认同这条短评说的？
+
+底线：
+1. 判断这条短评有没有说到点子上，不是判断你自己会不会给同样的分。
+2. 拿不准就跳过，不要为了"给个答案"硬凑判断。
+3. 只看这一条短评、这一首诗，不牵涉别的。"""
+
+VOTE_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象：
+{
+  "vote": "up",
+  "reason": "一句话，可选——尤其是 down 的时候说清哪里不认同，帮作者判断要不要撤下这条评论"
+}
+vote 只能是 "up"（认同，这条短评抓住了这首诗真实的样子）/ "down"（不认同，没读懂或理由站不住）/ "skip"（读完没把握判断，不勉强）。"""
+
+
+def build_vote_prompt(poem, persona, target_read, stanzas=None):
+    parts = [VOTE_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
+    parts += ["", "—— 这首诗 ——", f"《{poem['title']}》", "", poem_text(poem, stanzas), ""]
+    parts += ["—— 这条短评（" + target_read["reader"]["persona_id"] + " 写的）——",
+              target_read.get("reaction") or ""]
+    parts += ["", VOTE_RESPONSE_FORMAT]
     return "\n".join(parts)
 
 

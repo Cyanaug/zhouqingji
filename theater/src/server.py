@@ -24,6 +24,7 @@ BACKUPS = ROOT / "corpus" / ".backups"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
 CURATION = ROOT / "results" / "curation.json"
 THREAD_META = ROOT / "results" / "threads" / "meta.json"
+VOTES = ROOT / "results" / "votes" / "votes.jsonl"
 CALIBRATION = ROOT / "results" / "calibration" / "scores.json"
 FAVS = ROOT / "corpus" / "作者偏爱.json"
 STANZAS = ROOT / "corpus" / "分段.json"
@@ -201,6 +202,21 @@ def load_thread_meta():
     if THREAD_META.exists():
         return json.loads(THREAD_META.read_text(encoding="utf-8"))
     return {}
+
+
+def load_vote_tally():
+    """点赞模式（plan_votes.py 写）的只读聚合视图：{read_id: {up, down, skip}}。
+    不是排名指标，纯展示，帮作者判断要不要手删某条短评。"""
+    tally = {}
+    if VOTES.exists():
+        for line in VOTES.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            v = json.loads(line)
+            t = tally.setdefault(v["target_read_id"], {"up": 0, "down": 0, "skip": 0})
+            if v.get("vote") in t:
+                t[v["vote"]] += 1
+    return tally
 
 
 _calib_lock = threading.Lock()
@@ -540,6 +556,7 @@ class Handler(BaseHTTPRequestHandler):
                 "personas_sidecar": load_personas_sidecar(),
                 "curation": load_curation(),
                 "thread_meta": load_thread_meta(),
+                "votes": load_vote_tally(),
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),
                 "calibration": load_calibration(),

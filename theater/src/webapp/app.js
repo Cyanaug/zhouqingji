@@ -41,6 +41,7 @@ async function loadState() {
   S.calibration = S.calibration || {};
   S.settings = S.settings || {};
   S.thread_meta = S.thread_meta || {};
+  S.votes = S.votes || {};
   applyBranding();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
   maps._primary = null;
@@ -974,6 +975,9 @@ function renderPoem(id, goReads) {
 function readCard(r, p) {
   const stale = r.content_hash !== p.content_hash;
   const hid = isHidden(r.read_id);
+  const vt = S.votes[r.read_id];
+  const voteChip = vt && (vt.up || vt.down)
+    ? `<span class="chip" title="点赞模式：读者对这条短评的认同度，仅供参考，不进任何排名">👍${vt.up} 👎${vt.down}</span>` : "";
   return `<div class="read-card${hid ? " dim" : ""}" id="card-${r.read_id}">
     <div class="rc-head">
       <span class="rname"><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></span>
@@ -981,6 +985,7 @@ function readCard(r, p) {
       ${r.reader["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
       ${r.reader["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
       ${stale ? '<span class="chip warm">读的是旧版</span>' : ""}
+      ${voteChip}
       <span class="score-badge">${fmt1(r.score)}</span>
     </div>
     <div class="reaction">${esc(r.reaction)}</div>
