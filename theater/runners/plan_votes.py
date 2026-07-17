@@ -53,36 +53,66 @@ def cmd_invite(args):
         poem_ids = [x for x in args.poem_ids.split(",") if x]
         targets = _votable_reads_for(poem_ids, reads_by_id.values())
     if not targets:
-        sys.exit("没有符合条件的短评可投票")
+        sys.exit("没有符合条件的评论可投票")
 
     poems = {p["id"]: p for p in R.load_json(R.CORPUS)}
     personas = {p["persona_id"]: p for p in R.load_personas() if not p.get("superseded_by")}
     stanzas = R.load_stanzas()
-    voted = {(v["target_read_id"], v["voter"]["persona_id"])
-             for v in R.load_comment_votes()}
+    all_votes = R.load_comment_votes()
+    voted = {(v["target_read_id"], v["voter"]["persona_id"]) for v in all_votes}
 
     seed = args.seed if args.seed else int(time.time())
     random.seed(seed)
 
+    batch_size = getattr(args, "batch_size", 1)
     tasks = []
-    for t in targets:
-        poem = poems.get(t["poem_id"])
-        if poem is None:
-            continue
-        author_id = t["reader"]["persona_id"]
-        candidates = [pid for pid in personas if pid != author_id
-                      and (t["read_id"], pid) not in voted]
-        random.shuffle(candidates)
-        n = max(1, round(len(candidates) * args.fraction)) if candidates else 0
-        for pid in candidates[:n]:
-            persona = personas[pid]
-            prompt = R.build_vote_prompt(poem, persona, t, stanzas)
-            tasks.append({
-                "poem_id": t["poem_id"],
-                "target_read_id": t["read_id"],
-                "voter": {"persona_id": pid, "model": None},
-                "prompt": prompt,
-            })
+
+    if batch_size <= 1:
+        # 原有逻辑：每条评论独立一个任务
+        for t in targets:
+            poem = poems.get(t["poem_id"])
+            if poem is None:
+                continue
+            author_id = t["reader"]["persona_id"]
+            candidates = [pid for pid in personas if pid != author_id
+                          and (t["read_id"], pid) not in voted]
+            random.shuffle(candidates)
+            n = max(1, round(len(candidates) * args.fraction)) if candidates else 0
+            for pid in candidates[:n]:
+                persona = personas[pid]
+                prompt = R.build_vote_prompt(poem, persona, t, stanzas)
+                tasks.append({
+                    "poem_id": t["poem_id"],
+                    "target_read_id": t["read_id"],
+                    "voter": {"persona_id": pid, "model": None},
+                    "prompt": prompt,
+                })
+    else:
+        # 批量模式：同一首诗的评论分组后按 batch_size 切块，一个任务读 N 条
+        by_poem = defaultdict(list)
+        for t in targets:
+            if t["poem_id"] in poems:
+                by_poem[t["poem_id"]].append(t)
+        for poem_id, ptargets in by_poem.items():
+            poem = poems[poem_id]
+            for i in range(0, len(ptargets), batch_size):
+                chunk = ptargets[i:i + batch_size]
+                chunk_rids = {c["read_id"] for c in chunk}
+                excluded = {c["reader"]["persona_id"] for c in chunk}
+                already = {pid for (rid, pid) in voted if rid in chunk_rids}
+                candidates = [pid for pid in personas
+                              if pid not in excluded and pid not in already]
+                random.shuffle(candidates)
+                n = max(1, round(len(candidates) * args.fraction)) if candidates else 0
+                for pid in candidates[:n]:
+                    persona = personas[pid]
+                    prompt = R.build_batch_vote_prompt(poem, persona, chunk, stanzas)
+                    tasks.append({
+                        "poem_id": poem_id,
+                        "targets": [{"read_id": c["read_id"]} for c in chunk],
+                        "voter": {"persona_id": pid, "model": None},
+                        "prompt": prompt,
+                    })
 
     out = Path(args.out) if args.out else \
         BATCHES / f"votes-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -96,7 +126,8 @@ def cmd_invite(args):
                   ensure_ascii=False, indent=2)
         open(out / f"tasks/task-{n2}.prompt.txt", "w", encoding="utf-8").write(t2["prompt"])
 
-    print(f"{len(tasks)} 个投票任务（{len(targets)} 条短评）→ {out}  (seed={seed})")
+    mode = f"批量 batch_size={batch_size}" if batch_size > 1 else "逐条"
+    print(f"{len(tasks)} 个投票任务（{mode}，{len(targets)} 条评论）→ {out}  (seed={seed})")
 
 
 def cmd_collect(args):
@@ -109,17 +140,44 @@ def cmd_collect(args):
             missing.append(tf.stem); continue
         t = json.loads(tf.read_text(encoding="utf-8"))
         resp = json.loads(rf.read_text(encoding="utf-8"))
-        vote = resp.get("vote")
-        if vote not in ("up", "down", "skip"):
-            missing.append(tf.stem + "（vote 值非法）"); continue
-        new_votes.append({
-            "poem_id": t["poem_id"],
-            "target_read_id": t["target_read_id"],
-            "voter": {"persona_id": t["voter"]["persona_id"],
-                      "model": resp.get("model") or args.model},
-            "vote": vote,
-            "reason": str(resp.get("reason", "")),
-        })
+        model = resp.get("model") or args.model
+        voter_id = t["voter"]["persona_id"]
+
+        if "targets" in t:
+            # 批量模式：response 里有 votes 数组
+            valid_rids = {tgt["read_id"] for tgt in t["targets"]}
+            votes_list = resp.get("votes")
+            if not isinstance(votes_list, list):
+                missing.append(tf.stem + "（batch: votes 字段非列表）"); continue
+            bad = []
+            for v in votes_list:
+                rid = v.get("read_id", "")
+                vote = v.get("vote")
+                if rid not in valid_rids or vote not in ("up", "down", "skip"):
+                    bad.append(rid or "?"); continue
+                new_votes.append({
+                    "poem_id": t["poem_id"],
+                    "target_read_id": rid,
+                    "voter": {"persona_id": voter_id, "model": model},
+                    "vote": vote,
+                    "reason": str(v.get("reason", "")),
+                })
+            if bad:
+                print(f"  {tf.stem}: {len(bad)} 条无效（read_id 不对或 vote 非法）：{bad}",
+                      file=sys.stderr)
+        else:
+            # 逐条模式（原有）
+            vote = resp.get("vote")
+            if vote not in ("up", "down", "skip"):
+                missing.append(tf.stem + "（vote 值非法）"); continue
+            new_votes.append({
+                "poem_id": t["poem_id"],
+                "target_read_id": t["target_read_id"],
+                "voter": {"persona_id": voter_id, "model": model},
+                "vote": vote,
+                "reason": str(resp.get("reason", "")),
+            })
+
         done.mkdir(exist_ok=True)
         rf.rename(done / rf.name)
 
@@ -157,7 +215,9 @@ def main():
                     help="逗号分隔 poem_id：对这些诗「无长评」的短评发起投票")
     i.add_argument("--targets", default="",
                     help="逗号分隔 read_id：直接指定要投票的短评（优先于 --poem-ids）")
-    i.add_argument("--fraction", type=float, default=0.3, help="每条短评邀请的读者比例")
+    i.add_argument("--fraction", type=float, default=0.3, help="邀请的读者比例")
+    i.add_argument("--batch-size", dest="batch_size", type=int, default=1,
+                   help="批量模式：一个任务打包几条评论（默认 1=逐条，建议 3-5）")
     i.add_argument("--seed", type=int, default=0, help="0=用当前时间，其他值可复现")
     i.add_argument("--out", default="")
 

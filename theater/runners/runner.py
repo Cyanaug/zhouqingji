@@ -449,6 +449,32 @@ def build_vote_prompt(poem, persona, target_read, stanzas=None):
     return "\n".join(parts)
 
 
+BATCH_VOTE_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象，votes 数组长度必须等于上方评论数，顺序一一对应：
+{
+  "votes": [
+    {"read_id": "r-xxxxxx", "vote": "up",   "reason": "可选"},
+    {"read_id": "r-yyyyyy", "vote": "down",  "reason": "哪里不认同"},
+    {"read_id": "r-zzzzzz", "vote": "skip",  "reason": ""}
+  ]
+}
+vote 只能是 "up"（认同，抓住了这首诗真实的样子）/ "down"（不认同，没读懂或理由站不住）/ "skip"（拿不准，不勉强）。
+read_id 必须原样照抄，不能省略或改写。"""
+
+
+def build_batch_vote_prompt(poem, persona, target_reads, stanzas=None):
+    """批量投票：一次读 N 条评论，逐一判断——减少任务数，同时能做横向比较。"""
+    parts = [VOTE_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
+    parts += ["", "—— 这首诗 ——", f"《{poem['title']}》", "", poem_text(poem, stanzas), ""]
+    parts += [f"—— 需要你判断的 {len(target_reads)} 条评论（逐一给出判断）——"]
+    for i, tr in enumerate(target_reads, 1):
+        is_long = bool((tr.get("long_form") or "").strip())
+        label = "长评" if is_long else "短评"
+        body = (tr.get("long_form") if is_long else tr.get("reaction")) or ""
+        parts += [f"\n【{i}】{label}（read_id: {tr['read_id']}）", body]
+    parts += ["", BATCH_VOTE_RESPONSE_FORMAT]
+    return "\n".join(parts)
+
+
 def cmd_coverage(args):
     poems = pool()
     reads = [r for r in load_reads() if r.get("context_mode") == "blind"]
