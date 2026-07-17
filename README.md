@@ -35,7 +35,8 @@
 
 1. 启动应用：`python theater/src/server.py`，浏览器开 http://localhost:8737 —— corpus 为空也能正常打开，只是榜单/时间轴是空的。集名、页脚句、默认落地页、评分口径、端口、派发默认模型这些"可以换成你自己的"，都在顶栏「设置」里改（存 `corpus/settings.json` 侧车，清空某项即恢复默认；派发 agent 读的也是这一份）。想让 AI 也读散文/小说/剧本这类非诗文体：在「设置 · 阅读文体」里勾选、可附一两句你自己的评判要求——读者会带着"体裁转换"提示按该文体的判据读（诗永远在读者池，草稿永远不读）。读者人设也可持久化：随附的那批读者随更新走，你自己新增或改写的读者写进 `corpus/personas.json` 侧车（`git pull` 永不覆盖）。最顺手的路是在「读者」页里直接点——底部「你的读者」区「＋ 新建读者」，或点进任何一位读者「编辑 / 撤下 / 还原」；也可手改侧车文件（复制 `theater/personas/personas.sidecar.example.json` 起步；同 persona_id 只覆盖你改的字段，加 `"hidden": true` 可撤下某个随附读者）。
 2. 推进一轮盲读（"加厚"覆盖）：按 `.claude/skills/dispatch-reads/SKILL.md` 的流程走（用 Claude Code 就说一声「跑一轮」；用其他 AI 编程工具参考技能文档里附的通用 prompt 模板），会按覆盖账自动补最薄的 (诗 × 读者) 组合。
-3. 进度看根目录 `PROGRESS.md`；实现方的设计决定看 `theater/NOTES.md`。
+3. 盲读之外还有两个轻模式，都不评分、永不进榜单/校准：**跟帖**（对某篇长评开一场读者讨论，逐轮接楼，见 `.claude/skills/dispatch-thread/SKILL.md`，结果在顶栏「跟帖」页）；**点赞**（让读者对已有评论投 认同/不认同/跳过，帮你判断哪些短评没说到点子上、值得撤下腾位置，见 `.claude/skills/dispatch-votes/SKILL.md`，票数直接显示在评论卡上）。两者都是偶尔办的沙龙，不是日常。
+4. 进度看根目录 `PROGRESS.md`；实现方的设计决定看 `theater/NOTES.md`。
 
 ## 文档
 

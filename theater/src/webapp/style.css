@@ -382,3 +382,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 }
 .thread-floor .floor-meta { font-size: .82rem; color: var(--ink-3); margin-bottom: .3em; }
 .thread-floor .floor-text { line-height: 1.85; }
+
+/* 赞/踩：▲青绿=赞、▼赭红=踩，颜色+方向+字三重区分 */
+.vup { color: var(--accent-deep); font-weight: 600; }
+.vdown { color: var(--warm); font-weight: 600; }

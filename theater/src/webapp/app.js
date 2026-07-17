@@ -214,6 +214,12 @@ function renderRecentInto() {
 
 /* ---------- 跟帖（thread）：与盲读是两种信号，只读展示，不进榜单/校准 ---------- */
 
+/* 赞/踩统一视觉：▲青绿=赞、▼赭红=踩（方向+颜色+字三重区分，emoji 太难分辨） */
+function voteBadge(vt) {
+  if (!vt || (!vt.up && !vt.down)) return "";
+  return `<span class="chip"><span class="vup">▲${vt.up}</span> <span class="vdown">▼${vt.down}</span></span>`;
+}
+
 function threadChildrenMap() {
   const m = new Map();
   for (const r of S.reads) {
@@ -267,9 +273,7 @@ function renderThreads() {
       ${roots.map(r => {
         const poem = maps.poem.get(r.poem_id);
         const n = countDescendants(r.read_id, childrenMap);
-        const vt = S.votes[r.read_id];
-        const vc = vt && (vt.up || vt.down)
-          ? `<span class="chip">👍${vt.up} 👎${vt.down}</span>` : "";
+        const vc = voteBadge(S.votes[r.read_id]);
         return `<li><a href="#/thread/${r.read_id}">《${esc(poem ? poem.title : r.poem_id)}》</a>
           <span class="chip">楼主 ${esc(personaName(r.reader.persona_id))}</span>
           <span class="chip">${n} 层回复</span>${vc}</li>`;
@@ -286,9 +290,7 @@ function renderThread(rootId) {
   const meta = S.thread_meta || {};
 
   function floorVoteChip(readId) {
-    const vt = S.votes[readId];
-    return vt && (vt.up || vt.down)
-      ? `<span class="chip">👍${vt.up} 👎${vt.down}</span>` : "";
+    return voteBadge(S.votes[readId]);
   }
 
   function floorHtml(r, depth) {
@@ -297,13 +299,14 @@ function renderThread(rootId) {
     const kids = (childrenMap.get(r.read_id) || []).slice()
       .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
     const pv = (S.voter_votes[r.thread_ref] || {})[r.reader.persona_id];
-    const lean = pv === "up" ? "·认同" : pv === "down" ? "·不认同" : "";
+    const lean = pv === "up" ? ' <span class="vup">▲赞</span>'
+      : pv === "down" ? ' <span class="vdown">▼踩</span>' : "";
     const stanceTag = m.stance_changed === true
       ? `<span class="chip warm">改变了判断${lean}</span>`
       : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
     return `
       <div class="thread-floor" style="margin-left:${depth * 1.5}em">
-        <p class="floor-meta"><b>${esc(personaName(r.reader.persona_id))}</b>
+        <p class="floor-meta"><b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
           <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
           ${stanceTag} ${floorVoteChip(r.read_id)}</p>
         <p class="floor-text">${esc(r.reaction || r.long_form || "")}</p>
@@ -321,7 +324,7 @@ function renderThread(rootId) {
     </p>
     <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
     <div class="thread-floor">
-      <p class="floor-meta"><b>楼主 · ${esc(personaName(root.reader.persona_id))}</b>
+      <p class="floor-meta"><b>楼主 · <a href="#/reader/${esc(root.reader.persona_id)}">${esc(personaName(root.reader.persona_id))}</a></b>
         ${floorVoteChip(rootId)}</p>
       <p class="floor-text">${esc(root.long_form || root.reaction || "")}</p>
     </div>
@@ -994,7 +997,7 @@ function readCard(r, p) {
   const hid = isHidden(r.read_id);
   const vt = S.votes[r.read_id];
   const voteChip = vt && (vt.up || vt.down)
-    ? `<span class="chip" title="点赞模式：读者对这条评论的认同度，仅供参考，不进任何排名">👍${vt.up} 👎${vt.down}</span>` : "";
+    ? `<span class="chip" title="点赞模式：读者对这条评论的认同度，仅供参考，不进任何排名"><span class="vup">▲${vt.up}</span> <span class="vdown">▼${vt.down}</span></span>` : "";
   const threadKids = threadChildrenMap().get(r.read_id);
   const leftLinks = [
     r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : "",
