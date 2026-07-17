@@ -12,7 +12,10 @@
 
 有效性前提：各 rater 面对的诗池质量可比（派发大体随机）。本脚本每次运行
 输出均衡诊断，某模型读到的诗池代理均分偏离全局超过阈值时给出警告——
-届时分位换算会系统性偏袒/压制该模型，需检查派发逻辑而不是相信输出。
+届时分位换算会系统性偏袒/压制该模型。2026-07-17 起加入**偏差感知信任**：
+诊断出的偏离直接衰减该模型自身分布的收缩权重（trust = max(0, 1-|dev|/D_TRUST)），
+诗池失衡的模型（如只被派了好诗的低读数模型）自动滑向全局先验、近似恒等映射，
+而不是把"读的全是好诗"误译成"这个 rater 手松"。警告仍保留，供检查派发逻辑。
 
 用法：
   python calibrate.py            # 生成 results/calibration/report.md（参考分布不存在则先冻结）
@@ -65,6 +68,7 @@ C_PRIOR = 5     # 诗级贝叶斯平均的先验读数条数
 RHO = 0.1       # 同模型组内相关（实测 ICC≈0.089，见 bayes_avg 注释）
 P_CLIP = (0.005, 0.995)   # 分位截尾（≈参考分布 P99 封顶）
 BALANCE_WARN = 0.15       # 均衡诊断：诗池代理均分偏离全局超过此值则警告
+D_TRUST = 0.6             # 偏差感知信任半径：|proxy_dev| 达此值时该模型自身分布权重归零
 
 
 def canon_model(m):
@@ -122,7 +126,12 @@ def quantile(sorted_scores, p):
 
 
 class Calibrator:
-    def __init__(self, rows, reference_scores):
+    def __init__(self, rows, reference_scores, trust=None):
+        # trust: {model: 0..1}，来自 balance_check 的偏差感知信任。
+        # 诗池代理偏离越大，该模型自身分布越不可信，收缩权重按比例衰减；
+        # 未知模型（无跨模型重合诗、算不出代理）默认 1.0——它们本就读数极少，
+        # K_CELL/K_MODEL 已把权重压得很低，不再叠罚。
+        self.trust = trust or {}
         self.reference = sorted(reference_scores)
         self.by_cell = defaultdict(list)
         self.by_model = defaultdict(list)
@@ -142,8 +151,9 @@ class Calibrator:
         p_global = hazen_percentile(self.all_scores, s)
         p_model = hazen_percentile(mdl, s) if mdl else p_global
         p_cell = hazen_percentile(cell, s) if cell else p_model
-        w_cell = len(cell) / (len(cell) + K_CELL)
-        w_model = len(mdl) / (len(mdl) + K_MODEL)
+        t = self.trust.get(model, 1.0)
+        w_cell = t * len(cell) / (len(cell) + K_CELL)
+        w_model = t * len(mdl) / (len(mdl) + K_MODEL)
         p = w_cell * p_cell + (1 - w_cell) * (w_model * p_model + (1 - w_model) * p_global)
         return min(max(p, P_CLIP[0]), P_CLIP[1])
 
@@ -194,6 +204,7 @@ def balance_check(rows):
     for m, xs in sorted(by_model.items(), key=lambda kv: -len(kv[1])):
         dev = sum(xs) / len(xs) - global_proxy
         out.append({"model": m, "reads": len(xs), "proxy_dev": round(dev, 3),
+                    "trust": round(max(0.0, 1.0 - abs(dev) / D_TRUST), 3),
                     "warn": abs(dev) > BALANCE_WARN})
     return out
 
@@ -212,7 +223,10 @@ def generate(refreeze=False, top=20):
         print(f"reference frozen: n={ref['n']} -> {REFERENCE}")
     ref = json.loads(REFERENCE.read_text(encoding="utf-8"))
 
-    cal = Calibrator(rows, ref["scores"])
+    # 均衡诊断先行：它的 proxy_dev 直接变成 Calibrator 的偏差感知信任
+    balance = balance_check(rows)
+    trust = {b["model"]: b["trust"] for b in balance}
+    cal = Calibrator(rows, ref["scores"], trust)
     titles = {p["id"]: p["title"] for p in json.loads(CORPUS.read_text(encoding="utf-8"))}
 
     # 逐条校准，按诗聚合（raw/cal 都用两段式，名次变动才只反映校准本身）
@@ -259,21 +273,21 @@ def generate(refreeze=False, top=20):
         p["rank"] = i
         p["rank_delta"] = rank_raw[p["poem_id"]] - i   # 正 = 校准后升
 
-    balance = balance_check(rows)
-
     lines = []
     lines.append("# 校准报告\n")
     lines.append(f"- 生成时间：{time.strftime('%Y-%m-%d %H:%M')}；读数 {len(rows)} 条，"
                  f"诗 {len(poems)} 首；参考分布 v{ref['version']}（冻结于 {ref['frozen_at']}，n={ref['n']}）")
     lines.append(f"- 参数：K_CELL={K_CELL} K_MODEL={K_MODEL} C_PRIOR={C_PRIOR} "
-                 f"P_CLIP={P_CLIP} 全局均分 raw={g_raw:.3f} cal={g_cal:.3f}\n")
+                 f"P_CLIP={P_CLIP} D_TRUST={D_TRUST} 全局均分 raw={g_raw:.3f} cal={g_cal:.3f}\n")
 
     lines.append("## 均衡诊断（分位换算的有效性前提）\n")
-    lines.append("| 模型 | 读数 | 诗池代理偏离 | 警告 |")
-    lines.append("|---|---|---|---|")
+    lines.append("（信任 = max(0, 1-|偏离|/D_TRUST)，乘进该模型自身分布的收缩权重；"
+                 "0 = 诗池失衡到自身分布完全不可信，校准退回全局先验）\n")
+    lines.append("| 模型 | 读数 | 诗池代理偏离 | 信任 | 警告 |")
+    lines.append("|---|---|---|---|---|")
     for b in balance:
         lines.append(f"| {b['model']} | {b['reads']} | {b['proxy_dev']:+.3f} | "
-                     f"{'**YES**' if b['warn'] else '-'} |")
+                     f"{b['trust']:.2f} | {'**YES**' if b['warn'] else '-'} |")
 
     lines.append("\n## 模型换算示例（原始分 → 校准分）\n")
     lines.append("| 模型 | N | 7.0→ | 7.5→ | 8.0→ |")
@@ -308,6 +322,7 @@ def generate(refreeze=False, top=20):
         "meta": {"generated": time.strftime("%Y-%m-%dT%H:%M:%S"),
                  "reads": len(rows), "reference_version": ref["version"],
                  "rho": RHO, "c_prior": C_PRIOR, "stretch_k": round(stretch_k, 3),
+                 "d_trust": D_TRUST,
                  # 规范别名表随数据下发：前端展示层与校准口径用同一套归并
                  "aliases": MODEL_ALIASES},
         "poems": {p["poem_id"]: {"display": p["display"], "cal": p["cal_bayes"],

@@ -307,6 +307,18 @@ def load_personas():
     return [merged[pid] for pid in order if not merged[pid].get("hidden")]
 
 
+def load_personas_sidecar():
+    """侧车原文（GUI 编辑用：/api/personas 是整份替换，前端必须先拿到全份）。
+    缺文件/坏 JSON/非数组一律回空列表——与 load_personas 的容错口径一致。"""
+    if not PERSONAS_SIDECAR.exists():
+        return []
+    try:
+        side = json.loads(PERSONAS_SIDECAR.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return []
+    return side if isinstance(side, list) else []
+
+
 def load_settings():
     """默认值 + 作者设置的合并视图（下发给前端与 agent 的口径）。"""
     merged = json.loads(json.dumps(DEFAULT_SETTINGS))
@@ -514,6 +526,9 @@ class Handler(BaseHTTPRequestHandler):
                 "poems": load_corpus(),
                 "reads": load_reads(),
                 "personas": load_personas(),
+                # GUI 编辑人设要区分随附/自建/改写，并整份读改侧车
+                "personas_defaults": json.loads(PERSONAS.read_text(encoding="utf-8")),
+                "personas_sidecar": load_personas_sidecar(),
                 "curation": load_curation(),
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),

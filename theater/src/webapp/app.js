@@ -209,6 +209,8 @@ async function route() {
   if (seg[0] === "poem" && seg[1]) return renderPoem(seg[1], seg[2] === "reads");
   if (seg[0] === "read" && seg[1]) return renderDeepRead(seg[1]);
   if (seg[0] === "board" && seg[1]) return renderBoardFull(seg[1]);
+  if (seg[0] === "reader-new") return renderPersonaEdit(null);
+  if (seg[0] === "reader-edit" && seg[1]) return renderPersonaEdit(seg[1]);
   if (seg[0] === "reader" && seg[1]) return renderReader(seg[1]);
   renderBoards();
 }
@@ -409,8 +411,11 @@ function renderBoardFull(key) {
 function renderReaders() {
   app.className = "wide";
   const rows = readerRanking();
-  const active = rows.filter(r => r.n > 0).sort((a, b) => b.n - a.n);
-  const idle = rows.filter(r => !r.n);
+  const custom = rows.filter(r => personaKind(r.persona.persona_id) === "custom")
+    .sort((a, b) => b.n - a.n);
+  const stock = rows.filter(r => personaKind(r.persona.persona_id) !== "custom");
+  const active = stock.filter(r => r.n > 0).sort((a, b) => b.n - a.n);
+  const idle = stock.filter(r => !r.n);
   const card = r => {
     const ps = r.persona;
     return `<a class="reader-card${r.n ? "" : " idle"}" href="#/reader/${esc(ps.persona_id)}">
@@ -420,6 +425,7 @@ function renderReaders() {
         <span class="chip">${esc(ps.orientation || "")}</span>
         ${ps["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
         ${ps["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
+        ${personaBadge(ps.persona_id)}
       </div>
       <div class="rc-desc">${esc(ps.persona)}</div>
       <div class="rc-stats">${r.n
@@ -427,12 +433,32 @@ function renderReaders() {
         : "还没有上场"}</div>
     </a>`;
   };
+  const h2s = "margin:2.4rem 0 1.1rem;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)";
+  // 被撤下的随附读者（侧车 hidden:true）：不在合并结果里，这里给条还原的路
+  const hiddenRows = (S.personas_sidecar || []).filter(e => e.hidden).map(e => ({
+    id: e.persona_id,
+    name: e.name || ((S.personas_defaults || []).find(p => p.persona_id === e.persona_id) || {}).name || e.persona_id,
+  }));
   app.innerHTML = `
     <h1 class="page-title">读者</h1>
     <p class="page-hint">读诗剧场的全部眼睛，共 ${rows.length} 位。点进任何一位，看这双眼睛的松紧、分布与全部评语。</p>
     <div class="reader-cards">${active.map(card).join("")}</div>
-    ${idle.length ? `<h2 style="margin:2.4rem 0 1.1rem;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)">候场</h2>
-      <div class="reader-cards">${idle.map(card).join("")}</div>` : ""}`;
+    ${idle.length ? `<h2 style="${h2s}">候场</h2>
+      <div class="reader-cards">${idle.map(card).join("")}</div>` : ""}
+    <h2 style="${h2s}">你的读者</h2>
+    <p class="page-hint">自建与改写都只存进 corpus/personas.json（你的侧车）——更新、git pull 永不覆盖。
+      <button class="btn" id="rd-new" style="margin-left:.6em">＋ 新建读者</button></p>
+    ${custom.length ? `<div class="reader-cards">${custom.map(card).join("")}</div>`
+      : `<p class="page-hint" style="color:var(--ink-3)">还没有自建读者。新建一位，或点进任何随附读者进行改写。</p>`}
+    ${hiddenRows.length ? `<p class="page-hint" style="margin-top:1.4rem">已撤下：${hiddenRows.map(x =>
+      `${esc(x.name)} <button class="btn" data-restore="${esc(x.id)}">还原</button>`).join(" · ")}</p>` : ""}`;
+  document.getElementById("rd-new").onclick = () => { location.hash = "#/reader-new"; };
+  document.querySelectorAll("[data-restore]").forEach(btn => {
+    btn.onclick = async () => {
+      try { await personaUnhide(btn.dataset.restore); toast("已还原"); route(); }
+      catch (e) { toast("失败：" + e.message); }
+    };
+  });
 }
 
 /* 幕后演员：按模型（显示层归并）统计给分手势，图式同读者松紧。
@@ -490,8 +516,18 @@ function renderReader(pid) {
       <span class="chip">${esc(persona.orientation || "")}</span>
       ${persona["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
       ${persona["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
+      ${personaBadge(pid)}
     </p>
     <blockquote class="persona-desc">${esc(persona.persona)}</blockquote>
+    <p class="page-hint" style="display:flex;gap:.6em;flex-wrap:wrap;align-items:center">
+      <button class="btn" id="pa-edit">编辑</button>
+      ${personaKind(pid) === "custom" ? '<button class="btn" id="pa-del">删除</button>' : ""}
+      ${personaKind(pid) === "overridden" ? '<button class="btn" id="pa-revert">还原随附版</button>' : ""}
+      ${personaKind(pid) === "default" ? '<button class="btn" id="pa-hide">撤下</button>' : ""}
+      <span style="font-size:.72rem;color:var(--ink-3)">${personaKind(pid) === "custom"
+        ? "你的读者——存在侧车里，更新不覆盖。"
+        : "随附读者：改动只存进你的侧车，随时可还原。"}</span>
+    </p>
     ${row && row.n ? `
       <p class="page-hint" style="margin-top:1.5rem">读过 ${row.n} 首 · 均给 ${fmt1(row.mean)} · σ ${fmt1(row.sd)} · 最低 ${fmt1(row.min)} / 最高 ${fmt1(row.max)}</p>
       <div class="dist-wrap" id="dist"></div>
@@ -505,6 +541,32 @@ function renderReader(pid) {
     renderDist(document.getElementById("dist"), rs, null);
     modelChart(document.getElementById("actor-chart"), rs, 1, true);
   }
+
+  document.getElementById("pa-edit").onclick = () => { location.hash = "#/reader-edit/" + pid; };
+  // 两击确认（同升格按钮的手势）；删除/撤下完成后回读者墙，还原留在本页
+  const arm = (id, label, fn) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    let armed = false;
+    btn.onclick = async () => {
+      if (!armed) { armed = true; btn.textContent = label; btn.classList.add("primary"); return; }
+      try { await fn(); } catch (e) { toast("失败：" + e.message); }
+    };
+  };
+  arm("pa-del", "确认删除？再点一次", async () => {
+    await savePersonaSidecar((S.personas_sidecar || []).filter(x => x.persona_id !== pid));
+    toast("已删除（旧读数仍在，挂原 persona_id）"); location.hash = "#/readers";
+  });
+  arm("pa-revert", "确认还原？再点一次", async () => {
+    await savePersonaSidecar((S.personas_sidecar || []).filter(x => x.persona_id !== pid));
+    toast("已还原为随附版"); renderReader(pid);
+  });
+  arm("pa-hide", "确认撤下？再点一次", async () => {
+    const side = (S.personas_sidecar || []).filter(x => x.persona_id !== pid);
+    side.push({ persona_id: pid, hidden: true });
+    await savePersonaSidecar(side);
+    toast("已撤下（读者墙底部可还原）"); location.hash = "#/readers";
+  });
 }
 
 function readerReadRow(r) {
@@ -520,6 +582,116 @@ function readerReadRow(r) {
     <div class="reaction">${esc(r.reaction)}</div>
     ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : ""}
   </div>`;
+}
+
+/* ---------- persona 外挂：自建/改写读者（侧车 corpus/personas.json） ----------
+ * 服务端下发三份：personas（合并结果，全站展示用）、personas_defaults（随附原文）、
+ * personas_sidecar（侧车原文）。/api/personas 是整份替换侧车，所以每次改动都在
+ * 侧车全份上增删改后整体提交；保存成功后 loadState 重拉，三份始终同步。 */
+
+function personaKind(pid) {
+  const isDefault = (S.personas_defaults || []).some(p => p.persona_id === pid);
+  if (!isDefault) return "custom";                                   // 自建（含示例侧车带来的）
+  return (S.personas_sidecar || []).some(e => e.persona_id === pid)
+    ? "overridden" : "default";                                      // 改写过的随附 / 纯随附
+}
+
+function personaBadge(pid) {
+  const k = personaKind(pid);
+  if (k === "custom") return '<span class="chip accent" title="存在 corpus/personas.json——更新、git pull 不覆盖">你的</span>';
+  if (k === "overridden") return '<span class="chip warm" title="随附读者，被你的侧车改写过；可在读者页还原">已改写</span>';
+  return "";
+}
+
+async function savePersonaSidecar(next) {
+  await post("/api/personas", { personas: next });
+  await loadState();
+}
+
+async function personaUnhide(pid) {
+  const next = [];
+  for (const e of (S.personas_sidecar || [])) {
+    if (e.persona_id !== pid) { next.push(e); continue; }
+    const rest = { ...e };
+    delete rest.hidden;
+    // 只剩 persona_id 的空壳不留：随附读者回纯随附；自建的空壳本就非法
+    if (Object.keys(rest).length > 1) next.push(rest);
+  }
+  await savePersonaSidecar(next);
+}
+
+const PERSONA_EDIT_STR = ["name", "generation", "native_lang", "orientation", "persona"];
+const PERSONA_EDIT_BOOL = ["knows_诠释", "knows_date", "reads_background"];
+
+function renderPersonaEdit(pid) {
+  app.className = "";
+  const isNew = !pid;
+  const cur = isNew ? {} : maps.persona.get(pid);
+  if (!isNew && !cur) { app.innerHTML = `<p class="page-hint">没有这位读者。</p>`; return; }
+  const kind = isNew ? "custom" : personaKind(pid);
+  const ic = "font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel);width:100%;box-sizing:border-box";
+  const row = (label, inner, hint) => `<div style="margin-bottom:1.15rem">
+    <div style="font-size:.85rem;color:var(--ink-2);margin-bottom:.35rem">${label}</div>${inner}
+    ${hint ? `<div style="font-size:.72rem;color:var(--ink-3);margin-top:.3rem;line-height:1.6">${hint}</div>` : ""}</div>`;
+  const chk = (id, label, on) => `<label style="display:flex;align-items:center;gap:.5em;cursor:pointer">
+    <input type="checkbox" id="${id}"${on ? " checked" : ""}> ${label}</label>`;
+  const c = cur || {};
+  app.innerHTML = `
+    <p><a class="back" href="${isNew ? "#/readers" : `#/reader/${esc(pid)}`}">← 返回</a></p>
+    <h1 class="page-title">${isNew ? "新建读者" : `编辑 · ${esc(c.name || pid)}`}</h1>
+    <p class="page-hint">${isNew
+      ? "自建读者只存进 corpus/personas.json（你的侧车）——更新、git pull 永不覆盖。"
+      : kind === "custom"
+        ? "这是你的读者，存在侧车里，更新不覆盖。"
+        : "随附读者：改动只存进你的侧车（部分覆盖——没改的字段继续跟随更新），随时可还原。<br>" +
+          "注意：这位读者已有的读数挂的仍是改写前的人设，改得越多语义漂移越大。"}</p>
+    <section class="board" style="text-align:left">
+      ${isNew ? row("persona_id（唯一标识）", `<input id="pe-id" style="${ic}" placeholder="如 my-first-reader">`,
+        "建议英文小写加短横线；这个 id 会写进阅读记录与网址，建了就别改。") : ""}
+      ${row("名字", `<input id="pe-name" style="${ic}" value="${esc(c.name || "")}">`)}
+      ${row("世代", `<input id="pe-gen" style="${ic}" value="${esc(c.generation || "")}" placeholder="如 90后">`)}
+      ${row("母语", `<input id="pe-lang" style="${ic}" value="${esc(c.native_lang || "")}" placeholder="留空即中文">`)}
+      ${row("感受取向", `<input id="pe-orient" style="${ic}" value="${esc(c.orientation || "")}" placeholder="如 意象 / 节奏 / 结构……">`)}
+      ${row("人设（这位读者是谁、怎么读诗）", `<textarea id="pe-persona" rows="8" style="${ic};resize:vertical">${esc(c.persona || "")}</textarea>`,
+        "派发时会原样放进读者的 system prompt；写成第三人称小传即可。")}
+      <div style="display:flex;gap:1.6em;flex-wrap:wrap;margin-bottom:1.3rem;font-size:.88rem">
+        ${chk("pe-k1", "知情（读过作者诠释）", c["knows_诠释"])}
+        ${chk("pe-k2", "知时（知道写作时间）", c["knows_date"])}
+        ${chk("pe-k3", "读背景小注", c["reads_background"])}
+      </div>
+      <button class="btn primary" id="pe-save">保存</button>
+    </section>`;
+
+  document.getElementById("pe-save").onclick = async () => {
+    const gv = id => document.getElementById(id).value.trim();
+    const id = isNew ? gv("pe-id") : pid;
+    if (!id) return toast("persona_id 不能为空");
+    if (isNew && maps.persona.get(id)) return toast("这个 persona_id 已存在——去那位读者的页面里编辑");
+    const vals = { name: gv("pe-name"), generation: gv("pe-gen"), native_lang: gv("pe-lang"),
+      orientation: gv("pe-orient"), persona: gv("pe-persona") };
+    const bools = { "knows_诠释": document.getElementById("pe-k1").checked,
+      "knows_date": document.getElementById("pe-k2").checked,
+      "reads_background": document.getElementById("pe-k3").checked };
+    const def = (S.personas_defaults || []).find(p => p.persona_id === id);
+    const e = { persona_id: id };
+    if (def) {
+      // 随附读者：只存与随附值不同的字段（合并时部分覆盖，其余跟随更新）。
+      // 清空随附已有的字段不会生效（服务端丢弃空串）——想彻底自定义请新建读者。
+      for (const k of PERSONA_EDIT_STR) if (vals[k] && vals[k] !== (def[k] || "")) e[k] = vals[k];
+      for (const k of PERSONA_EDIT_BOOL) if (bools[k] !== !!def[k]) e[k] = bools[k];
+    } else {
+      if (!vals.name || !vals.persona) return toast("名字与人设是必填的");
+      for (const k of PERSONA_EDIT_STR) if (vals[k]) e[k] = vals[k];
+      for (const k of PERSONA_EDIT_BOOL) e[k] = bools[k];
+    }
+    const side = (S.personas_sidecar || []).filter(x => x.persona_id !== id);
+    if (!def || Object.keys(e).length > 1) side.push(e);   // 与随附零差异 → 不留空壳条目
+    try {
+      await savePersonaSidecar(side);
+      toast(def && Object.keys(e).length === 1 ? "与随附版无差异，未改动" : "已存进你的侧车");
+      location.hash = "#/reader/" + id;
+    } catch (err) { toast("失败：" + err.message); }
+  };
 }
 
 /* ---------- 全部作品 ---------- */
