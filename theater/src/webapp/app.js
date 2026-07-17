@@ -66,7 +66,11 @@ function modelAlias(m) {
   // 规范归并表（calibrate.py 随 scores.json 下发）：gemini 碎片归 2.5-pro 等，
   // 展示层与校准口径永远同一套合并规则
   const canon = (S && S.calibration && S.calibration.meta && S.calibration.meta.aliases) || {};
-  return canon[x] || x;
+  x = canon[x] || x;
+  // Claude 系列展示名对齐官方口径：claude-sonnet-4-6 → "Sonnet 4.6"（数字用点号，不进 reads.jsonl）
+  const cm = x.match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:-(\d+))?$/);
+  if (cm) return cm[1][0].toUpperCase() + cm[1].slice(1) + " " + cm[2] + (cm[3] ? "." + cm[3] : "");
+  return x;
 }
 
 function annotatedReads(poemId) {
@@ -148,7 +152,7 @@ function recentRow(r) {
   const title = p ? p.title : r.poem_id;
   const persona = maps.persona.get(r.reader.persona_id);
   const pname = persona ? persona.name : r.reader.persona_id;
-  const model = modelAlias(r.reader.model).replace(/^claude-/, "C:").replace(/^deepseek/, "DS:").replace(/^gemini/, "G:");
+  const model = modelAlias(r.reader.model).replace(/^deepseek/, "DS:").replace(/^gemini/, "G:");
   return `<div class="recent-row">
     <div class="rmeta">
       <span class="rtime">${fmtTs(r.ts)}</span>
