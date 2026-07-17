@@ -42,6 +42,7 @@ async function loadState() {
   S.settings = S.settings || {};
   S.thread_meta = S.thread_meta || {};
   S.votes = S.votes || {};
+  S.voter_votes = S.voter_votes || {};
   applyBranding();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
   maps._primary = null;
@@ -295,7 +296,8 @@ function renderThread(rootId) {
     if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
     const kids = (childrenMap.get(r.read_id) || []).slice()
       .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
-    const lean = m.parent_vote === "up" ? "·认同" : m.parent_vote === "down" ? "·不认同" : "";
+    const pv = (S.voter_votes[r.thread_ref] || {})[r.reader.persona_id];
+    const lean = pv === "up" ? "·认同" : pv === "down" ? "·不认同" : "";
     const stanceTag = m.stance_changed === true
       ? `<span class="chip warm">改变了判断${lean}</span>`
       : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";

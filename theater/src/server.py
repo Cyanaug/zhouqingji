@@ -219,6 +219,22 @@ def load_vote_tally():
     return tally
 
 
+def load_voter_votes():
+    """每一张个人票的方向索引：{target_read_id: {persona_id: "up"/"down"/"skip"}}。
+    供跟帖页面查询「这个楼层的作者对 parent 投了什么票」。"""
+    idx = {}
+    if VOTES.exists():
+        for line in VOTES.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            v = json.loads(line)
+            pid = v.get("voter", {}).get("persona_id")
+            vote = v.get("vote")
+            if pid and vote:
+                idx.setdefault(v["target_read_id"], {})[pid] = vote
+    return idx
+
+
 _calib_lock = threading.Lock()
 
 
@@ -557,6 +573,7 @@ class Handler(BaseHTTPRequestHandler):
                 "curation": load_curation(),
                 "thread_meta": load_thread_meta(),
                 "votes": load_vote_tally(),
+                "voter_votes": load_voter_votes(),
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),
                 "calibration": load_calibration(),
