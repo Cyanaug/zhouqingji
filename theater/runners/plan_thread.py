@@ -171,6 +171,8 @@ def cmd_collect(args):
                 "persona_hash": t["persona_hash"],
                 "depth": t["depth"],
                 "stance_changed": resp.get("stance_changed"),
+                "parent_read_id": t["parent_read_id"],
+                "vote": resp.get("vote"),
             },
         })
         done.mkdir(exist_ok=True)
@@ -202,6 +204,7 @@ def cmd_collect(args):
 
         new_reads = [r for r in R.load_reads() if r["read_id"] not in existing_before]
         meta_store = R.load_thread_meta()
+        piggyback_votes = []
         for rec, m in zip(new_reads, metas):
             meta_store[rec["read_id"]] = {
                 "persona_hash": m["persona_hash"],
@@ -210,7 +213,21 @@ def cmd_collect(args):
                 "void": False,
                 "void_reason": None,
             }
+            # 顺势点赞：回复者已经引用+转述过被回复的楼层，判断早就形成了，
+            # 让这层楼额外收到一票 up/down（2026-07-17 用户提议）——不额外派发。
+            if m.get("vote") in ("up", "down"):
+                piggyback_votes.append({
+                    "poem_id": rec["poem_id"],
+                    "target_read_id": m["parent_read_id"],
+                    "voter": {"persona_id": rec["reader"]["persona_id"],
+                              "model": rec["reader"]["model"]},
+                    "vote": m["vote"],
+                    "reason": "",
+                })
         R.save_thread_meta(meta_store)
+        if piggyback_votes:
+            n = R.append_comment_votes(piggyback_votes)
+            print(f"{n} 条跟帖顺势投票 → {R.VOTES}")
         print(f"{len(new_reads)} 条跟帖落盘 reads.jsonl，侧车元数据写入 {R.THREAD_META}")
 
 

@@ -342,7 +342,8 @@ THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
   "reaction": "【回应】——只有这部分会被存档展示，不要带任何标签，两三句到几句话，像跟帖不像论文",
   "long_form": null,
   "stance_changed": true 或 false,
-  "stance_note": "一句话交代你的立场机制（见上）"
+  "stance_note": "一句话交代你的立场机制（见上）",
+  "vote": "up 或 down —— 你认不认同你正在回复的这层楼本身说的（不是认不认同发帖人这个人）"
 }"""
 
 
@@ -440,8 +441,10 @@ vote 只能是 "up"（认同，这条短评抓住了这首诗真实的样子）/
 def build_vote_prompt(poem, persona, target_read, stanzas=None):
     parts = [VOTE_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
     parts += ["", "—— 这首诗 ——", f"《{poem['title']}》", "", poem_text(poem, stanzas), ""]
-    parts += ["—— 这条短评（" + target_read["reader"]["persona_id"] + " 写的）——",
-              target_read.get("reaction") or ""]
+    is_long = bool((target_read.get("long_form") or "").strip())
+    label = "长评" if is_long else "短评"
+    body = target_read.get("long_form") if is_long else target_read.get("reaction")
+    parts += [f"—— 这条{label}（{target_read['reader']['persona_id']} 写的）——", body or ""]
     parts += ["", VOTE_RESPONSE_FORMAT]
     return "\n".join(parts)
 

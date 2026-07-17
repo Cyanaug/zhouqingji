@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
-"""点赞模式：让读者对已有短评（无长评的盲读反应）投票 认同/不认同/跳过。
+"""点赞模式：让读者对已有的盲读评论（短评或长评均可）投票 认同/不认同/跳过。
 
 不是新的排名指标——数据完全独立于 reads.jsonl，落在 results/votes/votes.jsonl。
-用途：给作者一个"这条短评有没有说到点子上"的信号，作为手动撤下低质短评、腾位置
-给新读者（争取触发长评）的依据。要不要按票数自动降权，v0 不做，先看数据再说。
+用途：给作者一个"这条评论有没有说到点子上"的信号，短评上主要用来判断要不要手动
+撤下低质短评、腾位置给新读者（争取触发长评）；长评上则是比开一整场跟帖更轻的
+认同度信号。跟帖回复时也会对被回复的楼层顺势投一票（见 plan_thread.py），
+落进同一份 votes.jsonl，这里只负责「主动发起」的那条路。
+要不要按票数自动降权，v0 不做，先看数据再说。
 
 用法：
   python plan_votes.py invite --poem-ids zq-0001,zq-0002 [--fraction 0.3] [--seed 0] [--out DIR]
-                                            # 对这些诗「无长评」的全部短评发起投票
+                                            # 对这些诗的全部盲读评论（短评+长评）发起投票
   python plan_votes.py invite --targets r-000123,r-000456 [--fraction 0.3] [--out DIR]
-                                            # 直接指定要投票的具体短评
+                                            # 直接指定要投票的具体评论（含跟帖楼层也可）
   python plan_votes.py collect --tasks DIR/tasks --inbox DIR/inbox --model M
   python plan_votes.py tally --poem-id zq-0001
-                                            # 打印这首诗下每条短评的赞/踩/跳过计数
+                                            # 打印这首诗下每条评论的赞/踩/跳过计数
 """
 import argparse
 import json
@@ -28,12 +31,13 @@ import runner as R
 BATCHES = R.BATCHES
 
 
-def _short_comments_for(poem_ids, reads):
-    """只挑「无长评」的盲读短评——长评走 thread 那条线，不在这里重复投票。"""
+def _votable_reads_for(poem_ids, reads):
+    """挑盲读评论（短评+长评都算）作为投票目标；thread 楼层不走这条批量路径
+    ——它们已经在 plan_thread.py 的回复流程里顺势收过票了，避免重复邀请。"""
     want = set(poem_ids) if poem_ids else None
     out = []
     for r in reads:
-        if r.get("context_mode") != "blind" or r.get("long_form"):
+        if r.get("context_mode") != "blind":
             continue
         if want is not None and r["poem_id"] not in want:
             continue
@@ -47,7 +51,7 @@ def cmd_invite(args):
         targets = [reads_by_id[t] for t in args.targets.split(",") if t in reads_by_id]
     else:
         poem_ids = [x for x in args.poem_ids.split(",") if x]
-        targets = _short_comments_for(poem_ids, reads_by_id.values())
+        targets = _votable_reads_for(poem_ids, reads_by_id.values())
     if not targets:
         sys.exit("没有符合条件的短评可投票")
 

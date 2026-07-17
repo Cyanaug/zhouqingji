@@ -63,7 +63,7 @@ def test_append_and_tally():
     print("[ok] append_comment_votes / vote_tally")
 
 
-def test_short_comments_filter():
+def test_votable_reads_filter():
     reads = [
         {"read_id": "r-1", "poem_id": "zq-a", "context_mode": "blind",
          "long_form": None, "reader": {"persona_id": "x"}},
@@ -74,12 +74,12 @@ def test_short_comments_filter():
         {"read_id": "r-4", "poem_id": "zq-a", "context_mode": "thread",
          "long_form": None, "reader": {"persona_id": "w"}},
     ]
-    out_all = PV._short_comments_for([], reads)
-    assert [r["read_id"] for r in out_all] == ["r-1", "r-3"], \
-        "只挑 blind 且无长评的短评，排除有长评的和 thread 记录"
-    out_a = PV._short_comments_for(["zq-a"], reads)
-    assert [r["read_id"] for r in out_a] == ["r-1"]
-    print("[ok] _short_comments_for 过滤（无长评+context_mode=blind+可选 poem 过滤）")
+    out_all = PV._votable_reads_for([], reads)
+    assert [r["read_id"] for r in out_all] == ["r-1", "r-2", "r-3"], \
+        "短评和长评都算票选目标，只排除 thread 楼层（那边走顺势投票）"
+    out_a = PV._votable_reads_for(["zq-a"], reads)
+    assert [r["read_id"] for r in out_a] == ["r-1", "r-2"]
+    print("[ok] _votable_reads_for 过滤（短评+长评都算，排除 thread，可选 poem 过滤）")
 
 
 def test_invite_dedupe_and_exclude_author():
@@ -162,7 +162,7 @@ def test_collect_valid_and_invalid():
 
 if __name__ == "__main__":
     test_append_and_tally()
-    test_short_comments_filter()
+    test_votable_reads_filter()
     test_invite_dedupe_and_exclude_author()
     test_collect_valid_and_invalid()
     print("ALL PASS")
