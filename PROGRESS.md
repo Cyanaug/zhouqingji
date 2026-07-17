@@ -2,6 +2,17 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-17 · Persona 外挂 + 非诗文体榜（简单项批次，Fable 5）
+
+**做了什么：**
+
+1. **Persona 外挂（侧车持久化）**：随附人设留 git 跟踪的 `theater/personas/personas.json`（随更新走）；读者自建/改写写侧车 `corpus/personas.json`（gitignore、`git pull` 永不覆盖）。`load_personas()` 按 persona_id 合并——同 id 部分覆盖、新 id 追加、`hidden:true` 撤下随附；无侧车时行为字节级不变。server `/api/state`、runner `cmd_plan`、plan_thicken 三处统一走它。
+2. **写 API `/api/personas`**：整份替换侧车，白名单校验/原子写/空则删；新 id 必须含 name+persona，`knows_*` 缺省补 False。读者也可直接手改（复制 `personas.sidecar.example.json` 起步）。
+3. **非诗文体榜**：非诗 `ai_read=false` 本不进诗榜/校准、此前无处可见（读者反馈"找不到非诗榜"）；榜单页新增「更多榜单 · 非诗文体」按各自文体原始均分单独排，与诗榜彻底分离。
+4. **测试**：`theater/tests/test_sidecars.py` 零依赖自测（load_personas 合并 + set_personas 五类校验），两仓均 PASS；app.js 过 node --check。
+
+**下一步（需 Fable 5 / 需作者定）：** 校准偏差感知收缩（低读数模型只读好诗 → 按 `proxy_dev` 衰减其自身分布信任，flagship，设计已定）；读者页 persona 增删改 GUI（自建/随附分区+徽标）；设置页可调项（榜阈值、校准 D0）需作者拍板。
+
 ## 2026-07-16 晚 · 多文体阅读 v1.3（Fable 5）
 
 **做了什么：**
