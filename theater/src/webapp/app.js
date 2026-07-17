@@ -266,9 +266,12 @@ function renderThreads() {
       ${roots.map(r => {
         const poem = maps.poem.get(r.poem_id);
         const n = countDescendants(r.read_id, childrenMap);
+        const vt = S.votes[r.read_id];
+        const vc = vt && (vt.up || vt.down)
+          ? `<span class="chip">👍${vt.up} 👎${vt.down}</span>` : "";
         return `<li><a href="#/thread/${r.read_id}">《${esc(poem ? poem.title : r.poem_id)}》</a>
           <span class="chip">楼主 ${esc(personaName(r.reader.persona_id))}</span>
-          <span class="chip">${n} 层回复</span></li>`;
+          <span class="chip">${n} 层回复</span>${vc}</li>`;
       }).join("")}
     </ul>`;
 }
@@ -281,6 +284,12 @@ function renderThread(rootId) {
   const childrenMap = threadChildrenMap();
   const meta = S.thread_meta || {};
 
+  function floorVoteChip(readId) {
+    const vt = S.votes[readId];
+    return vt && (vt.up || vt.down)
+      ? `<span class="chip">👍${vt.up} 👎${vt.down}</span>` : "";
+  }
+
   function floorHtml(r, depth) {
     const m = meta[r.read_id] || {};
     if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
@@ -292,7 +301,8 @@ function renderThread(rootId) {
     return `
       <div class="thread-floor" style="margin-left:${depth * 1.5}em">
         <p class="floor-meta"><b>${esc(personaName(r.reader.persona_id))}</b>
-          <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span> ${stanceTag}</p>
+          <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
+          ${stanceTag} ${floorVoteChip(r.read_id)}</p>
         <p class="floor-text">${esc(r.reaction || r.long_form || "")}</p>
       </div>
       ${kids.map(k => floorHtml(k, depth + 1)).join("")}`;
@@ -305,7 +315,8 @@ function renderThread(rootId) {
     <p><a class="back" href="#/threads">← 跟帖</a></p>
     <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
     <div class="thread-floor">
-      <p class="floor-meta"><b>楼主 · ${esc(personaName(root.reader.persona_id))}</b></p>
+      <p class="floor-meta"><b>楼主 · ${esc(personaName(root.reader.persona_id))}</b>
+        ${floorVoteChip(rootId)}</p>
       <p class="floor-text">${esc(root.long_form || root.reaction || "")}</p>
     </div>
     ${topKids.map(k => floorHtml(k, 1)).join("")}`;
