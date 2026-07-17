@@ -25,6 +25,8 @@
 }
 ```
 
+（2026-07-17 补充：`context_mode=="thread"` 时 `score` 落 `null`——跟帖不评分，`calibrate.py` 本就按 `context_mode=="blind"` 过滤，天然不受影响。跟帖专属的 `persona_hash`/链深/立场变化/沉默/void 不进这个 FROZEN 字段集，走独立侧车 `results/threads/`，见 `theater/NOTES.md` 与 `theater/runners/plan_thread.py`。）
+
 - `reaction` **设字数上限**（建议 2–3 句），保证列表能扫。
 - 若读者产出了长文分析，放 `long_form`，前端最小化、点开进独立"深读"专栏页慢慢看，不挤在评论列表里。
 - **每条必记 `transport` 与 `model`**——将来若用了质量拉胯的免费模型，作者能按字段一键过滤。**永不丢失出处，是这套东西的命根子。**

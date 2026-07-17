@@ -12,6 +12,7 @@
 - reads.jsonl 为 append-only；本代码读 corpus、写 results，绝不改 corpus。
 """
 import argparse
+import hashlib
 import json
 import random
 import sys
@@ -26,6 +27,10 @@ PERSONAS = ROOT / "theater" / "personas" / "personas.json"
 PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
 BATCHES = ROOT / "theater" / "runners" / "batches"
+THREAD_DIR = ROOT / "results" / "threads"
+THREAD_META = THREAD_DIR / "meta.json"          # 侧车：{read_id: {persona_hash, depth, stance_changed, void, void_reason}}
+THREAD_SILENCES = THREAD_DIR / "silences.jsonl"  # 侧车：append-only 沉默事件日志
+THREAD_TOKEN_BUDGET = 6000  # 祖先链原文字符预算（无分词器，字符数近似；具体数字待 2 首诗试点后校准）
 
 REQUIRED_FIELDS = ["poem_id", "reader", "context_mode", "transport",
                    "score", "reaction", "content_hash"]
@@ -181,6 +186,186 @@ def build_prompt(poem, persona, stanzas=None, with_note=False, genre_notes=None)
     return "\n".join(parts)
 
 
+def persona_sha1(persona):
+    """比照 content_hash 的做法：记一份人格文本的 sha1，人格改了就知道读的是哪版。"""
+    return hashlib.sha1(persona["persona"].encode("utf-8")).hexdigest()
+
+
+def load_thread_meta():
+    if THREAD_META.exists():
+        return json.loads(THREAD_META.read_text(encoding="utf-8"))
+    return {}
+
+
+def save_thread_meta(meta):
+    THREAD_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = THREAD_META.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+    tmp.replace(THREAD_META)
+
+
+def append_thread_silence(rec):
+    THREAD_DIR.mkdir(parents=True, exist_ok=True)
+    with THREAD_SILENCES.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+
+
+def void_floor(read_id, reason, reads_by_id):
+    """标记该楼层及其所有子孙楼层为 void——隐藏不删除，参考 curation.json 先例。
+    格式对了但内容垮了（人格崩坏/跑题）事后才发现时用；机械引用校验不通过走的是
+    「静默重roll」（此时还没有任何记录落盘），跟这里是两回事。"""
+    children = {}
+    for r in reads_by_id.values():
+        if r.get("context_mode") == "thread" and r.get("thread_ref"):
+            children.setdefault(r["thread_ref"], []).append(r["read_id"])
+    meta = load_thread_meta()
+    stack, touched, first = [read_id], [], True
+    while stack:
+        rid = stack.pop()
+        entry = meta.setdefault(rid, {})
+        entry["void"] = True
+        entry["void_reason"] = reason if first else f"祖先 {read_id} void 级联"
+        touched.append(rid)
+        stack.extend(children.get(rid, []))
+        first = False
+    save_thread_meta(meta)
+    return touched
+
+
+def thread_root_id(read_id, reads_by_id):
+    """一路回溯 thread_ref 到根——根是 context_mode=blind 的长评楼。"""
+    seen, rid = set(), read_id
+    while True:
+        r = reads_by_id.get(rid)
+        if r is None:
+            sys.exit(f"thread_ref 断链：{rid} 不存在")
+        if r.get("context_mode") != "thread" or not r.get("thread_ref"):
+            return rid
+        if rid in seen:
+            sys.exit(f"thread_ref 成环：{rid}")
+        seen.add(rid)
+        rid = r["thread_ref"]
+
+
+def floor_text(r):
+    return r.get("long_form") or r.get("reaction") or ""
+
+
+def ancestor_chain(parent_read_id, reads_by_id, token_budget=THREAD_TOKEN_BUDGET):
+    """从 parent 一路回溯到根，返回 [root, ..., parent]（时间顺序）。
+    可见范围 = 祖先链，不是全楼也不是随便开的滑动窗口（见 NOTES 2026-07-17 设计定稿）。
+    深度不靠层数硬封顶（会杀死第 5 轮之后才会发生的说服弧线），改按祖先链原文的
+    token 预算封顶；不足预算时从最老的中间楼层开始丢，根（锚住话题）和 parent
+    （回复对象本身）永远保留。不做摘要压缩——具体预算数字待 2 首诗试点后校准。"""
+    chain, seen, rid = [], set(), parent_read_id
+    while True:
+        r = reads_by_id.get(rid)
+        if r is None:
+            sys.exit(f"thread_ref 断链：{rid} 不存在")
+        chain.append(r)
+        if r.get("context_mode") != "thread" or not r.get("thread_ref"):
+            break
+        if rid in seen:
+            sys.exit(f"thread_ref 成环：{rid}")
+        seen.add(rid)
+        rid = r["thread_ref"]
+    chain.reverse()  # root ... parent
+    root, rest = chain[0], chain[1:]
+    if not rest:
+        return [root]
+    parent, older = rest[-1], rest[:-1]
+    budget = token_budget - len(floor_text(root)) - len(floor_text(parent))
+    kept_older = []
+    for r in reversed(older):  # 从离 parent 最近的开始往回保留
+        t = floor_text(r)
+        if budget - len(t) < 0:
+            break
+        kept_older.append(r)
+        budget -= len(t)
+    kept_older.reverse()
+    return [root] + kept_older + [parent]
+
+
+def own_floor_history(root_id, persona_id, reads_by_id, exclude_read_id=None):
+    """该人设在本帖已经发过的楼层（时间顺序）——外加祖先链，是读者的完整可见范围。
+    防的是同一读者在不同分支里自我打脸（早期方案没考虑到的技术漏洞）。"""
+    out = []
+    for r in reads_by_id.values():
+        if r.get("context_mode") != "thread" or r["read_id"] == exclude_read_id:
+            continue
+        if r["reader"]["persona_id"] != persona_id:
+            continue
+        if thread_root_id(r["thread_ref"], reads_by_id) != root_id:
+            continue
+        out.append(r)
+    out.sort(key=lambda r: r.get("ts") or "")
+    return out
+
+
+THREAD_BASELINE = """你是「昼青集·读诗剧场」的一位读者，现在你在参加一场关于某首诗的跟帖讨论——不是盲读。这场讨论从一篇已有的长评开始，其他读者也在里面发言、互相回应。
+
+读者底线不变：
+1. 读懂并说出真实感受，技艺上的逆耳批评照说不误。
+2. 情绪低沉 ≠ 写得差，把"传达得好不好"和"情绪暗不暗"分开。
+3. 这场讨论只对这一首诗、这一串楼层，不牵涉其他诗。
+4. 这里不打分——你的任务是真实地参与讨论，不是给出裁决。"""
+
+SILENCE_BLOCK = """—— 要不要接话，你自己判断 ——
+多数读者读完一层楼不会有话接——这是正常状态，不是失职。开口前先问自己一句：这层楼里有没有一个具体的、楼上还没人说过的点，你能一句话说清楚？
+- 有：接下去按下面的格式回复。
+- 没有：不要硬挤内容，直接沉默（见下面的 JSON 格式）。沉默和精彩的回复是同样被认可的输出，不是"允许但没人会选"的摆设——按你的真实判断来，不要因为怕被认为"不够投入"而硬凑一段。"""
+
+POSITION_INERTIA_BLOCK = """—— 关于会不会被说服 ——
+你有没有被这一层楼说服，只看你自己在意的东西有没有真的被击中——不预设"应该"被说服还是"应该"守住立场。
+- 如果你的判断变了：说清楚对方哪一句具体的话，推翻了你原来站的哪一个具体理由。
+- 如果你的判断没变：不要绕开对方说得最有力的那一点去挑软柿子——正面复述对方讲得最强的那句话，再说清楚它为什么撼动不了你。绕开最强的点，等于是被说服了却不肯承认。
+不要为了"显得不容易被说服"而刻意唱反调——那和刻意迎合一样，都是表演。"""
+
+QUOTE_BLOCK = """—— 回复格式（内部草稿，不进最终稿）——
+先在心里/草稿里过三段，最后只把第三段交出去：
+【接住的原句】逐字引用对方楼层里真正扛分量的一句话（不是开场寒暄）。
+【我的转述】用你自己的话转述这句话，标准是"对方看了会觉得——对，这就是我的意思"。
+【回应】你的真实回应，第一句必须直接接着上面的转述说下去——删掉转述后，如果这段回应还能独立成立、看不出在接谁的话，说明没有真的在回复，需要重写。
+只有【回应】部分会被存档展示，前两段是给你自己核对用的脚手架，也会被机器拿去核对引用是否属实——不要在最终交出的 reaction 里保留"接住的原句/我的转述/回应"这些标签，让它读起来像你自然说的话。"""
+
+THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
+
+如果沉默：
+{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是"没什么可说"这种空话"}
+
+如果回复：
+{
+  "quote": "【接住的原句】的原文，逐字，用于核对",
+  "restate": "【我的转述】",
+  "reaction": "【回应】——只有这部分会被存档展示，不要带任何标签，两三句到几句话，像跟帖不像论文",
+  "long_form": null,
+  "stance_changed": true 或 false,
+  "stance_note": "一句话交代你的立场机制（见上）"
+}"""
+
+
+def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floor):
+    """ancestor_floors 是 ancestor_chain() 的返回值（[root, ..., parent]，已含 parent）。
+    own_history 是 own_floor_history() 的返回值。"""
+    parts = [THREAD_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
+    parts += ["", "—— 这首诗（讨论背景）——", f"《{poem['title']}》"]
+    root = ancestor_floors[0]
+    parts += ["", "—— 楼主长评（开楼帖）——", floor_text(root)]
+    if len(ancestor_floors) > 1:
+        parts += ["", "—— 沿途楼层（从楼主往下，一路到你要回复的这层）——"]
+        for r in ancestor_floors[1:]:
+            parts += [f"[{r['read_id']} · {r['reader']['persona_id']}]", floor_text(r), ""]
+    if own_history:
+        parts += ["", "—— 你自己在这一串讨论里已经发过的话（防止你在别的分支里说法前后矛盾）——"]
+        for r in own_history:
+            parts += [f"[{r['read_id']}]", floor_text(r), ""]
+    parts += ["", f"—— 现在，请回复这一层 [{parent_floor['read_id']} · "
+                  f"{parent_floor['reader']['persona_id']}] ——", floor_text(parent_floor)]
+    parts += ["", SILENCE_BLOCK, "", POSITION_INERTIA_BLOCK, "", QUOTE_BLOCK,
+              "", THREAD_RESPONSE_FORMAT]
+    return "\n".join(parts)
+
+
 def cmd_coverage(args):
     poems = pool()
     reads = [r for r in load_reads() if r.get("context_mode") == "blind"]
@@ -330,22 +515,33 @@ def next_read_id(existing):
 
 
 def cmd_ingest(args):
-    """输入：一个 JSON 数组文件，每项含冻结 schema 的必填字段（read_id/ts 可缺，落盘时补）。"""
+    """输入：一个 JSON 数组文件，每项含冻结 schema 的必填字段（read_id/ts 可缺，落盘时补）。
+    thread 模式（context_mode=="thread"）不评分：score 不在必填之列、落盘为 null；
+    改为必须给出真实存在的 thread_ref（跟帖不评分，天然不进 calibrate.py 的统计）。"""
     incoming = load_json(args.file)
     if isinstance(incoming, dict):
         incoming = [incoming]
     existing = load_reads()
     counter = next_read_id(existing)
     valid_poems = {p["id"]: p for p in load_json(CORPUS)}
+    existing_ids = {r["read_id"] for r in existing}
 
     lines, errors = [], []
     for i, r in enumerate(incoming):
-        missing = [f for f in REQUIRED_FIELDS if f not in r or r[f] is None]
+        is_thread = r.get("context_mode") == "thread"
+        required = [f for f in REQUIRED_FIELDS if not (is_thread and f == "score")]
+        missing = [f for f in required if f not in r or r[f] is None]
         if missing:
             errors.append(f"#{i} 缺字段 {missing}"); continue
         if r["poem_id"] not in valid_poems:
             errors.append(f"#{i} poem_id 不存在: {r['poem_id']}"); continue
-        if not isinstance(r["score"], (int, float)) or not 0 <= r["score"] <= 10:
+        if is_thread:
+            tref = r.get("thread_ref")
+            if not tref:
+                errors.append(f"#{i} thread 模式必须有 thread_ref"); continue
+            if tref not in existing_ids:
+                errors.append(f"#{i} thread_ref 指向的楼层不存在: {tref}"); continue
+        elif not isinstance(r["score"], (int, float)) or not 0 <= r["score"] <= 10:
             errors.append(f"#{i} score 非法: {r['score']!r}"); continue
         if not r["reader"].get("model"):
             errors.append(f"#{i} reader.model 缺失（出处是命根子）"); continue
@@ -362,13 +558,14 @@ def cmd_ingest(args):
             "context_mode": r["context_mode"],
             "thread_ref": r.get("thread_ref"),
             "transport": r["transport"],
-            "score": round(float(r["score"]), 1),
+            "score": None if is_thread else round(float(r["score"]), 1),
             "reaction": r["reaction"],
             "long_form": r.get("long_form"),
             "ts": r.get("ts") or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "content_hash": r["content_hash"],
         }
         lines.append(json.dumps(rec, ensure_ascii=False))
+        existing_ids.add(rec["read_id"])  # 同批次可续链（root+多层一起 ingest 时）
 
     if lines:
         READS.parent.mkdir(parents=True, exist_ok=True)

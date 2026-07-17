@@ -40,6 +40,7 @@ async function loadState() {
   S.stanzas = S.stanzas || {};
   S.calibration = S.calibration || {};
   S.settings = S.settings || {};
+  S.thread_meta = S.thread_meta || {};
   applyBranding();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
   maps._primary = null;
@@ -209,6 +210,106 @@ function renderRecentInto() {
   };
 }
 
+/* ---------- 跟帖（thread）：与盲读是两种信号，只读展示，不进榜单/校准 ---------- */
+
+function threadChildrenMap() {
+  const m = new Map();
+  for (const r of S.reads) {
+    if (r.context_mode === "thread" && r.thread_ref) {
+      if (!m.has(r.thread_ref)) m.set(r.thread_ref, []);
+      m.get(r.thread_ref).push(r);
+    }
+  }
+  return m;
+}
+
+function threadRoots() {
+  const seen = new Set(), roots = new Map();
+  for (const r of S.reads) {
+    if (r.context_mode !== "thread") continue;
+    let rid = r.thread_ref, guard = new Set();
+    while (rid) {
+      const cur = maps.readById.get(rid);
+      if (!cur) break;
+      if (cur.context_mode !== "thread" || !cur.thread_ref) { roots.set(cur.read_id, cur); break; }
+      if (guard.has(rid)) break;
+      guard.add(rid); rid = cur.thread_ref;
+    }
+  }
+  return [...roots.values()];
+}
+
+function countDescendants(rootId, childrenMap) {
+  let count = 0, stack = [rootId];
+  while (stack.length) {
+    const kids = childrenMap.get(stack.pop()) || [];
+    count += kids.length;
+    for (const k of kids) stack.push(k.read_id);
+  }
+  return count;
+}
+
+function renderThreads() {
+  app.className = "";
+  const childrenMap = threadChildrenMap();
+  const roots = threadRoots();
+  if (!roots.length) {
+    app.innerHTML = `<h1 class="page-title">跟帖</h1>
+      <p class="page-hint">还没有开始任何跟帖讨论——这是「偶尔办的沙龙」，不是日常，只对少数已有长评的诗定点开。</p>`;
+    return;
+  }
+  app.innerHTML = `
+    <h1 class="page-title">跟帖</h1>
+    <p class="page-hint">读者围绕一篇长评展开的讨论，和盲读是两种信号，不评分，永不进榜单/校准。</p>
+    <ul class="thread-list">
+      ${roots.map(r => {
+        const poem = maps.poem.get(r.poem_id);
+        const n = countDescendants(r.read_id, childrenMap);
+        return `<li><a href="#/thread/${r.read_id}">《${esc(poem ? poem.title : r.poem_id)}》</a>
+          <span class="chip">楼主 ${esc(r.reader.persona_id)}</span>
+          <span class="chip">${n} 层回复</span></li>`;
+      }).join("")}
+    </ul>`;
+}
+
+function renderThread(rootId) {
+  app.className = "";
+  const root = maps.readById.get(rootId);
+  if (!root) { app.innerHTML = `<p class="page-hint">找不到这条跟帖。</p>`; return; }
+  const poem = maps.poem.get(root.poem_id);
+  const childrenMap = threadChildrenMap();
+  const meta = S.thread_meta || {};
+
+  function floorHtml(r, depth) {
+    const m = meta[r.read_id] || {};
+    if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
+    const kids = (childrenMap.get(r.read_id) || []).slice()
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+    const stanceTag = m.stance_changed === true
+      ? `<span class="chip warm">改变了判断</span>`
+      : m.stance_changed === false ? `<span class="chip">立场未变</span>` : "";
+    return `
+      <div class="thread-floor" style="margin-left:${depth * 1.5}em">
+        <p class="floor-meta"><b>${esc(r.reader.persona_id)}</b>
+          <span class="chip">${esc(r.reader.model || "")}</span> ${stanceTag}</p>
+        <p class="floor-text">${esc(r.reaction || r.long_form || "")}</p>
+      </div>
+      ${kids.map(k => floorHtml(k, depth + 1)).join("")}`;
+  }
+
+  const topKids = (childrenMap.get(rootId) || []).slice()
+    .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+
+  app.innerHTML = `
+    <p><a class="back" href="#/threads">← 跟帖</a></p>
+    <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
+    <div class="thread-floor">
+      <p class="floor-meta"><b>楼主 · ${esc(root.reader.persona_id)}</b></p>
+      <p class="floor-text">${esc(root.long_form || root.reaction || "")}</p>
+    </div>
+    ${topKids.map(k => floorHtml(k, 1)).join("")}`;
+}
+
 /* ---------- 路由 ---------- */
 
 window.addEventListener("hashchange", route);
@@ -231,6 +332,8 @@ async function route() {
   if (seg[0] === "reader-new") return renderPersonaEdit(null);
   if (seg[0] === "reader-edit" && seg[1]) return renderPersonaEdit(seg[1]);
   if (seg[0] === "reader" && seg[1]) return renderReader(seg[1]);
+  if (seg[0] === "threads") return renderThreads();
+  if (seg[0] === "thread" && seg[1]) return renderThread(seg[1]);
   renderBoards();
 }
 
@@ -791,9 +894,9 @@ function renderPoemBody(content, poemId) {
   /* 无侧车覆盖时，老实信任数据：任何空行都算真分段。
      曾经在这里猜"是否整体双倍行距"，但双倍行距噪音（导出把每行都
      多算一个空行）和真分段在数据里长得一模一样，猜不出来，猜错了
-     还会悄悄吞掉真分段（见 NOTES.md 分段恢复记录）。现有语料已核实/
-     清洗过，不再需要这层猜测；以后新批次务必在导入时就把空行语义
-     提取对，而不是指望这里补救。 */
+     还会悄悄吞掉真分段（见 NOTES.md 华为分段恢复记录）。现在两批
+     语料（华为175/小米182）都已核实/清洗过，不再需要这层猜测；
+     以后新批次务必在导入时就把空行语义提取对，而不是指望这里补救。 */
   const lines = content.split("\n");
   const out = [];
   let blankRun = 0;

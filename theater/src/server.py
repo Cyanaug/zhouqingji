@@ -23,6 +23,7 @@ INTERP = ROOT / "corpus" / "昼青·诠释.md"
 BACKUPS = ROOT / "corpus" / ".backups"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
 CURATION = ROOT / "results" / "curation.json"
+THREAD_META = ROOT / "results" / "threads" / "meta.json"
 CALIBRATION = ROOT / "results" / "calibration" / "scores.json"
 FAVS = ROOT / "corpus" / "作者偏爱.json"
 STANZAS = ROOT / "corpus" / "分段.json"
@@ -191,6 +192,14 @@ ACTIONS = {"set_visibility": act_set_visibility,
 def load_curation():
     if CURATION.exists():
         return json.loads(CURATION.read_text(encoding="utf-8"))
+    return {}
+
+
+def load_thread_meta():
+    """跟帖侧车（runner.py/plan_thread.py 写）：persona_hash/链深/立场变化/void。
+    纯只读展示用，不进任何榜单/校准逻辑。"""
+    if THREAD_META.exists():
+        return json.loads(THREAD_META.read_text(encoding="utf-8"))
     return {}
 
 
@@ -530,6 +539,7 @@ class Handler(BaseHTTPRequestHandler):
                 "personas_defaults": json.loads(PERSONAS.read_text(encoding="utf-8")),
                 "personas_sidecar": load_personas_sidecar(),
                 "curation": load_curation(),
+                "thread_meta": load_thread_meta(),
                 "favs": load_favs(),
                 "stanzas": load_stanzas(),
                 "calibration": load_calibration(),

@@ -2,6 +2,18 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-17 深夜 · 跟帖模式（thread）v0 施工完成
+
+**做了什么：** 把上一条的设计落成代码。`theater/runners/runner.py` 新增祖先链组装（`ancestor_chain`，token 预算封顶，根+parent 永远保留、中间楼层不够预算先丢）、自身楼层历史（`own_floor_history`，防自我打脸）、`persona_sha1`（比照 `content_hash`）、`build_thread_prompt`（沉默基准线/立场惯性/复述格式三块提示词落成实字）、thread 侧车读写（`results/threads/meta.json` + `silences.jsonl`）、`void_floor`（级联标记，隐藏不删除）；`cmd_ingest` 支持 `context_mode=="thread"`（score 落 null、必须有真实存在的 thread_ref）。新文件 `theater/runners/plan_thread.py`：`invite`（派发方指定接楼、楼主默认在邀请名单、随机抽样+乱序派发+记录）、`collect`（引用字符串匹配校验+不匹配静默重roll、沉默响应分流进 silences.jsonl、通过的落盘+写侧车元数据）、`void`（CLI 手动标记）。`personas.json` 里 6 位（midnight-peer/felt-first/teen-reader/silent-reader/translator-eyes/informed-chronologist）缺"审美优先级"颗粒度的读者各补一句"什么论证说服不了你"。`server.py` `/api/state` 新发 `thread_meta`；`webapp` 加只读的 `#/threads` 列表页与 `#/thread/<root_id>` 楼层树页（跳过 void，不进任何榜单/校准）。新测试 `theater/tests/test_thread.py`（祖先链/token封顶/own_history/persona_hash/ingest校验/void级联/collect全链路，ALL PASS）。两仓 `py_compile`/`node --check`/两份测试全绿，代码已同步主仓。
+
+**下一步：** 挑 2 首已有长评的诗跑真实试点（`plan_thread.py invite --parent <长评的read_id>`），肉眼看链多深开始复读/跑题，定 `THREAD_TOKEN_BUDGET`（现暂设 6000 字符）和沉默终止阈值（现暂定"连续两层无人接话→封帖"，尚未写成代码强制项，人工判断即可）；v1.1 再考虑读者自选接楼。
+
+## 2026-07-17 晚 · 跟帖模式（thread）设计定稿，待施工
+
+**做了什么：** 和 Opus/Fable 5 交叉设计敲定了跟帖模式的全部关键决定（可见范围=祖先链∪自己历史、token预算封顶不设层数硬顶、v0派发方指定接楼、楼主优先回护权、立场惯性靠人格审美先验不靠指令、沉默是完整产出+派发层稀疏兜底、复述/引用只做内部脚手架不进展示+静默重roll、坏楼层标void不删除、新元数据走thread专属侧车不碰FROZEN的reads.jsonl字段、派发顺序随机化）。完整记录在 `theater/NOTES.md`（两仓已同步）。
+
+**下一步：** 施工——先过一遍 `theater/personas/personas.json` 补审美优先级颗粒度；然后 runner/server 加 thread 侧车与派发逻辑；挑 2 首已有长评的诗做试点，肉眼看链多深会退化，再定具体的 token 预算数字和封帖阈值。
+
 ## 2026-07-17 · 校准偏差感知收缩 + Persona GUI（Fable 5 批次）
 
 **做了什么：**
