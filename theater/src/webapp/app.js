@@ -977,7 +977,12 @@ function readCard(r, p) {
   const hid = isHidden(r.read_id);
   const vt = S.votes[r.read_id];
   const voteChip = vt && (vt.up || vt.down)
-    ? `<span class="chip" title="点赞模式：读者对这条短评的认同度，仅供参考，不进任何排名">👍${vt.up} 👎${vt.down}</span>` : "";
+    ? `<span class="chip" title="点赞模式：读者对这条评论的认同度，仅供参考，不进任何排名">👍${vt.up} 👎${vt.down}</span>` : "";
+  const threadKids = threadChildrenMap().get(r.read_id);
+  const leftLinks = [
+    r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : "",
+    threadKids ? `<a class="deep-link" href="#/thread/${r.read_id}">跟帖 ${threadKids.length} 条 →</a>` : "",
+  ].filter(Boolean).join(" ");
   return `<div class="read-card${hid ? " dim" : ""}" id="card-${r.read_id}">
     <div class="rc-head">
       <span class="rname"><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></span>
@@ -990,7 +995,7 @@ function readCard(r, p) {
     </div>
     <div class="reaction">${esc(r.reaction)}</div>
     <div class="rc-foot">
-      ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : "<span></span>"}
+      ${leftLinks || "<span></span>"}
       <button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>
     </div>
   </div>`;
