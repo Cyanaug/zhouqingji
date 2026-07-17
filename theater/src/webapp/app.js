@@ -59,6 +59,10 @@ function blindReads(poemId) {
 
 /* 模型名显示层归并：reads.jsonl 永不改（铁律），只在展示与统计时合并同门异名。
  * 规则：去掉日期后缀、统一小写、点号写法归一。 */
+// 厂商名的正确大小写没法靠正则猜（DeepSeek/MiniMax 内部大写），只能查表；
+// 查完表之后剩下的字段（版本号、pro/flash 这类词）用通用规则首字母大写。
+const VENDOR_NAMES = { claude: "Claude", gemini: "Gemini", deepseek: "DeepSeek", minimax: "MiniMax", hy3: "HY3" };
+
 function modelAlias(m) {
   if (!m) return "未知";
   let x = String(m).toLowerCase().replace(/-\d{8}$/, "");
@@ -67,10 +71,17 @@ function modelAlias(m) {
   // 展示层与校准口径永远同一套合并规则
   const canon = (S && S.calibration && S.calibration.meta && S.calibration.meta.aliases) || {};
   x = canon[x] || x;
-  // Claude 系列展示名对齐官方口径：claude-sonnet-4-6 → "Sonnet 4.6"（数字用点号，不进 reads.jsonl）
+  // Claude 系列版本号是连字符切的（sonnet-4-6），单独拼回点号：claude-sonnet-4-6 → "Claude Sonnet 4.6"
   const cm = x.match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:-(\d+))?$/);
-  if (cm) return cm[1][0].toUpperCase() + cm[1].slice(1) + " " + cm[2] + (cm[3] ? "." + cm[3] : "");
-  return x;
+  if (cm) return "Claude " + cm[1][0].toUpperCase() + cm[1].slice(1) + " " + cm[2] + (cm[3] ? "." + cm[3] : "");
+  // 其余厂商：版本号本来就用点号（gemini-2.5-pro），按连字符分段查厂商名+逐段首字母大写
+  const parts = x.split("-");
+  const vendor = VENDOR_NAMES[parts[0]];
+  if (!vendor) return x; // 没见过的家族，原样显示，不瞎猜大小写
+  const rest = parts.slice(1).map(tok =>
+    /^\d+(\.\d+)?$/.test(tok) ? tok : tok.charAt(0).toUpperCase() + tok.slice(1)
+  );
+  return rest.length ? vendor + " " + rest.join(" ") : vendor;
 }
 
 function annotatedReads(poemId) {
@@ -152,7 +163,7 @@ function recentRow(r) {
   const title = p ? p.title : r.poem_id;
   const persona = maps.persona.get(r.reader.persona_id);
   const pname = persona ? persona.name : r.reader.persona_id;
-  const model = modelAlias(r.reader.model).replace(/^deepseek/, "DS:").replace(/^gemini/, "G:");
+  const model = modelAlias(r.reader.model);
   return `<div class="recent-row">
     <div class="rmeta">
       <span class="rtime">${fmtTs(r.ts)}</span>
