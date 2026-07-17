@@ -61,7 +61,11 @@ function blindReads(poemId) {
  * 规则：去掉日期后缀、统一小写、点号写法归一。 */
 // 厂商名的正确大小写没法靠正则猜（DeepSeek/MiniMax 内部大写），只能查表；
 // 查完表之后剩下的字段（版本号、pro/flash 这类词）用通用规则首字母大写。
-const VENDOR_NAMES = { claude: "Claude", gemini: "Gemini", deepseek: "DeepSeek", minimax: "MiniMax", hy3: "HY3" };
+const VENDOR_NAMES = {
+  claude: "Claude", gemini: "Gemini", deepseek: "DeepSeek", minimax: "MiniMax", hy3: "HY3",
+  glm: "GLM", gpt: "GPT", grok: "Grok", kimi: "Kimi", moonshot: "Moonshot",
+  qwen: "Qwen", doubao: "Doubao", ernie: "Ernie", llama: "Llama", mistral: "Mistral",
+};
 
 function modelAlias(m) {
   if (!m) return "未知";
