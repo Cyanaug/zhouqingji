@@ -174,11 +174,77 @@ function pool() {
 /* 最近评论：默认只展开一小页，可一直往下翻（批量跑完后作者要在这里扫一遍） */
 const RECENT_MAX = 300, RECENT_FIRST = 10, RECENT_STEP = 30;
 let recentShown = RECENT_FIRST;
+let recentFilter = { model: "", persona: "", band: "" };
 
 function recentReads() {
   const blind = S.reads.filter(r => r.context_mode === "blind");
   blind.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
   return blind.slice(0, RECENT_MAX);
+}
+
+/* 分数段：低 <5、中 5–7.9、高 ≥8——扫批时按段快速筛 */
+function scoreBand(s) {
+  if (s == null) return "";
+  return s < 5 ? "low" : s < 8 ? "mid" : "high";
+}
+
+/* 当前筛选（模型 / 读者 / 分数段）下的最近盲读子集 */
+function recentFiltered() {
+  const f = recentFilter;
+  return recentReads().filter(r =>
+    (!f.model || modelAlias(r.reader.model) === f.model) &&
+    (!f.persona || r.reader.persona_id === f.persona) &&
+    (!f.band || scoreBand(r.score) === f.band));
+}
+
+/* 缓存池里各模型的条数与均分——放进下拉，一眼看出哪个模型整批偏高/偏低 */
+function recentModelStats() {
+  const m = new Map();
+  for (const r of recentReads()) {
+    const k = modelAlias(r.reader.model);
+    if (!m.has(k)) m.set(k, { n: 0, sum: 0 });
+    const o = m.get(k); o.n++; if (r.score != null) o.sum += r.score;
+  }
+  return [...m.entries()].map(([model, o]) => ({ model, n: o.n, avg: o.n ? o.sum / o.n : null }))
+    .sort((a, b) => b.n - a.n);
+}
+
+function recentPersonaStats() {
+  const m = new Map();
+  for (const r of recentReads()) m.set(r.reader.persona_id, (m.get(r.reader.persona_id) || 0) + 1);
+  return [...m.entries()].map(([pid, n]) => ({ pid, name: personaName(pid), n }))
+    .sort((a, b) => b.n - a.n);
+}
+
+function recentFilterBarHtml() {
+  const opt = (v, label, sel) => `<option value="${esc(v)}"${sel ? " selected" : ""}>${esc(label)}</option>`;
+  const modelOpts = opt("", `全部模型（${recentReads().length}）`, !recentFilter.model) +
+    recentModelStats().map(x => opt(x.model,
+      `${x.model} · ${x.n}条 · 均${x.avg != null ? x.avg.toFixed(1) : "—"}`,
+      recentFilter.model === x.model)).join("");
+  const personaOpts = opt("", "全部读者", !recentFilter.persona) +
+    recentPersonaStats().map(x => opt(x.pid, `${x.name} · ${x.n}`, recentFilter.persona === x.pid)).join("");
+  const band = (v, label) => `<button class="btn band-btn${recentFilter.band === v ? " on" : ""}" data-band="${esc(v)}">${label}</button>`;
+  return `<div class="recent-filter">
+    <select id="rf-model" class="rf-sel">${modelOpts}</select>
+    <select id="rf-persona" class="rf-sel">${personaOpts}</select>
+    <span class="band-group">${band("", "全部")}${band("high", "高 ≥8")}${band("mid", "中 5–7")}${band("low", "低 <5")}</span>
+  </div>`;
+}
+
+function wireRecentFilter() {
+  const ms = document.getElementById("rf-model");
+  const ps = document.getElementById("rf-persona");
+  const reset = () => { recentShown = RECENT_FIRST; renderRecentInto(); };
+  if (ms) ms.onchange = () => { recentFilter.model = ms.value; reset(); };
+  if (ps) ps.onchange = () => { recentFilter.persona = ps.value; reset(); };
+  document.querySelectorAll(".band-btn").forEach(b => {
+    b.onclick = () => {
+      recentFilter.band = b.dataset.band;
+      document.querySelectorAll(".band-btn").forEach(x => x.classList.toggle("on", x === b));
+      reset();
+    };
+  });
 }
 
 function fmtTs(ts) {
@@ -196,6 +262,14 @@ function recentRow(r) {
   const persona = maps.persona.get(r.reader.persona_id);
   const pname = persona ? persona.name : r.reader.persona_id;
   const model = modelAlias(r.reader.model);
+  // 偏离共识标记：这条分数比同诗其它盲读的均分高/低 ≥2.5 分，扫批时一眼揪出跑偏的一条
+  let devCls = "", devTitle = "";
+  const st = stats(r.poem_id);
+  if (st.n >= 3 && st.mean != null && r.score != null) {
+    const dev = r.score - st.mean;
+    if (dev >= 2.5) { devCls = " rscore-hi"; devTitle = ` title="比这首诗共识高 ${dev.toFixed(1)} 分"`; }
+    else if (dev <= -2.5) { devCls = " rscore-lo"; devTitle = ` title="比这首诗共识低 ${(-dev).toFixed(1)} 分"`; }
+  }
   return `<div class="recent-row">
     <div class="rmeta">
       <span class="rtime">${fmtTs(r.ts)}</span>
@@ -205,7 +279,7 @@ function recentRow(r) {
       ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读 →</a>` : ""}
     </div>
     <div class="rbody">
-      <span class="rscore">${fmt1(r.score)}</span>
+      <span class="rscore${devCls}"${devTitle}>${fmt1(r.score)}</span>
       <div class="rtext">${esc(r.reaction || "")}</div>
     </div>
   </div>`;
@@ -215,9 +289,12 @@ function renderRecentInto() {
   const listEl = document.getElementById("recent-list");
   const moreEl = document.getElementById("recent-more");
   if (!listEl) return;
-  const items = recentReads();
+  const items = recentFiltered();
+  const cntEl = document.getElementById("recent-count");
+  const filtered = !!(recentFilter.model || recentFilter.persona || recentFilter.band);
+  if (cntEl) cntEl.textContent = filtered ? `筛出 ${items.length} 条` : "";
   if (!items.length) {
-    listEl.innerHTML = '<div class="empty">暂无盲读记录</div>';
+    listEl.innerHTML = `<div class="empty">${filtered ? "没有符合筛选的盲读" : "暂无盲读记录"}</div>`;
     moreEl.innerHTML = "";
     return;
   }
@@ -377,6 +454,8 @@ function renderThread(rootId) {
     return voteBadge(S.votes[readId]);
   }
 
+  let nShift = 0; // 整场里读者「改变了判断」的次数，供顶部计数
+
   function floorHtml(r, depth) {
     const m = meta[r.read_id] || {};
     if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
@@ -385,28 +464,42 @@ function renderThread(rootId) {
     const pv = (S.voter_votes[r.thread_ref] || {})[r.reader.persona_id];
     const lean = pv === "up" ? ' <span class="vup">▲赞</span>'
       : pv === "down" ? ' <span class="vdown">▼踩</span>' : "";
-    const stanceTag = m.stance_changed === true
+    const shifted = m.stance_changed === true;
+    if (shifted) nShift++;
+    const stanceTag = shifted
       ? `<span class="chip warm">改变了判断${lean}</span>`
       : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
     // 缩进封顶：深楼不再复利式推出屏；逐层描边配色 + 级数标记接手表达嵌套
     const indent = Math.min(depth, 6) * 1.5;
     const dcls = `fl-d${Math.min(depth, 6)}`;
+    // 有子楼就给一个折叠钮：折叠时藏起整支子树，露出「▸ N层」提示深楼有多大
+    const nDesc = kids.length ? countDescendants(r.read_id, childrenMap) : 0;
+    const toggle = kids.length
+      ? `<button class="floor-toggle" title="折叠/展开这一支"><span class="caret"></span><span class="fold-n">${nDesc} 层</span></button>`
+      : "";
+    // 每层包一个 .floor-branch 容器（floor 本体 + .floor-kids 子树），折叠只切子树 display，
+    // margin-left 仍按绝对深度算、不复利，视觉与之前一致
     return `
-      <div class="thread-floor ${dcls}" style="margin-left:${indent}em">
-        <p class="floor-meta"><span class="floor-depth">${depth}级</span>
-          <b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
-          <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
-          ${stanceTag} ${floorVoteChip(r.read_id)}</p>
-        <div class="floor-text">${paras(r.reaction || r.long_form || "")}</div>
-      </div>
-      ${kids.map(k => floorHtml(k, depth + 1)).join("")}`;
+      <div class="floor-branch${shifted ? " stance-shift" : ""}">
+        <div class="thread-floor ${dcls}" style="margin-left:${indent}em">
+          <p class="floor-meta">${toggle}<span class="floor-depth">${depth}级</span>
+            <b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
+            <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
+            ${stanceTag} ${floorVoteChip(r.read_id)}</p>
+          <div class="floor-text">${paras(r.reaction || r.long_form || "")}</div>
+        </div>
+        ${kids.length ? `<div class="floor-kids">${kids.map(k => floorHtml(k, depth + 1)).join("")}</div>` : ""}
+      </div>`;
   }
 
   const topKids = (childrenMap.get(rootId) || []).slice()
     .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const floorsHtml = topKids.map(k => floorHtml(k, 1)).join(""); // 先渲染（会累加 nShift）
   const nFloors = countDescendants(rootId, childrenMap);
   const maxDepth = threadMaxDepth(rootId, childrenMap);
   const ppl = threadParticipants(rootId, root, childrenMap);
+  const foldCtrl = maxDepth > 1
+    ? `<button class="btn thread-foldall" id="thread-foldall">全部折叠</button>` : "";
 
   app.innerHTML = `
     <p>
@@ -414,13 +507,29 @@ function renderThread(rootId) {
       ${poem ? `<a class="back" style="margin-left:1em" href="#/poem/${esc(root.poem_id)}">→ 原诗评论区</a>` : ""}
     </p>
     <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
-    <p class="page-hint thread-summary">${nFloors} 层回复${maxDepth > 1 ? ` · 最深 ${maxDepth} 级` : ""} · ${ppl} 人参与</p>
+    <p class="page-hint thread-summary">${nFloors} 层回复${maxDepth > 1 ? ` · 最深 ${maxDepth} 级` : ""} · ${ppl} 人参与${nShift ? ` · <span class="shift-count">${nShift} 次立场变化</span>` : ""} ${foldCtrl}</p>
     <div class="thread-floor thread-root">
       <p class="floor-meta"><b>楼主 · <a href="#/reader/${esc(root.reader.persona_id)}">${esc(personaName(root.reader.persona_id))}</a></b>
         ${floorVoteChip(rootId)}</p>
       <div class="floor-text">${paras(root.long_form || root.reaction || "")}</div>
     </div>
-    ${topKids.map(k => floorHtml(k, 1)).join("")}`;
+    ${floorsHtml}`;
+
+  // 折叠：点某层的钮切它自己那支；「全部折叠/展开」一键切所有带子树的层
+  app.querySelectorAll(".floor-toggle").forEach(btn => {
+    btn.onclick = () => btn.closest(".floor-branch").classList.toggle("collapsed");
+  });
+  const foldAll = app.querySelector("#thread-foldall");
+  if (foldAll) {
+    let folded = false;
+    foldAll.onclick = () => {
+      folded = !folded;
+      app.querySelectorAll(".floor-branch").forEach(b => {
+        if (b.querySelector(":scope > .floor-kids")) b.classList.toggle("collapsed", folded);
+      });
+      foldAll.textContent = folded ? "全部展开" : "全部折叠";
+    };
+  }
 }
 
 /* ---------- 路由 ---------- */
@@ -616,12 +725,15 @@ function renderBoards() {
       ${gbsHTML}
     </div>
     <section class="board hero" id="recent-reads" style="margin-top:2.5rem">
-      <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '缓存最近 ' + recentReads().length + ' 条' : ''}</span></h2>
-      <p class="board-note">盲读按时间倒序，最新的在最前。点诗名到评论区，点读者名看这双眼睛。</p>
+      <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '缓存最近 ' + recentReads().length + ' 条' : ''}</span>
+        <span class="recent-count" id="recent-count"></span></h2>
+      <p class="board-note">盲读按时间倒序，最新的在最前。点诗名到评论区，点读者名看这双眼睛。分数带 ▲/▼ 的是偏离这首诗共识 ≥2.5 分的评分——可能是跑偏的一条。</p>
+      ${recentFilterBarHtml()}
       <div class="recent-list" id="recent-list"></div>
       <div class="recent-more" id="recent-more"></div>
     </section>`;
   renderRecentInto();
+  wireRecentFilter();
 }
 
 function renderBoardFull(key) {
