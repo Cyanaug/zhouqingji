@@ -2,6 +2,14 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-18 · 非阻塞收尾：skip 死档提示词漏斗化 + tally --worst 跳过已撤评
+
+**做了什么：** A/B/C 暴露的两个纯代码/文本短板，不烧额度先修掉。**① skip 死档**——B 实测 0 skip 的病根是「三选一」结构：模型遇到「没硬伤」的评论就默认表态、被抬成 up。把 `VOTE_BASELINE` 改成**两步漏斗**：第一步只问有没有硬伤（分数/理由脱节、对不上诗、套话）→ down；没硬伤则**默认落 skip**，只有当评论里抄得出一句「只对这首诗成立、我愿逐字背书」的原话时才**挣**到 up。skip 从「弃权档」变「静息档」，措辞里点明「一批里 skip 通常该是多数、up/down 压过 skip 多半是没沉住气」。批量/单条格式提示同步。**② `tally --worst`** 剔除 curation 已 hidden 的评论（`r[0] not in R.hidden_read_ids()`），撤过的不再占榜位把待处理挤下去。双仓同步、`py_compile` 绿、`tally --worst 8` 实跑确认 r-003162 已不在榜。
+
+**诚实标注：** skip 漏斗是**有据但未验证**的结构修正——要证明它真把「四平八稳」压回 skip，得再跑一轮 B 对照（需派发、烧额度），卡在作者审批上，未擅自动手。
+
+**下一步（均需审批后派发）：** 重跑 B 验证 skip 漏斗是否落地；深链换更强模型/硬先验 persona 验立场惯性抗性（flash 偏顺从的级联风险）。
+
 ## 2026-07-18 · 第三阶段 A/B/C 验证跑（无头 agy / Gemini flash，~49 次）
 
 **背景：** hy3 限额，作者特许改走无头 agy（`agy -p "<prompt>" --model "Gemini 3.5 Flash (Medium)" --sandbox < /dev/null`，见 DISPATCH-SPEC）。写了并发驱动 `scratchpad/agy_dispatch.py`：4 路并发调 agy、我接 stdout 抽 JSON 校验后写回执——中间无脚本，`simulate_reads.py` 式伪造structurally不可能。
