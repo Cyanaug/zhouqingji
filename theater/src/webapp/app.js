@@ -15,6 +15,13 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g,
 
 const fmt1 = x => (Math.round(x * 10) / 10).toFixed(1);
 
+/* 多段文本：空行分段成 <p>，段内单换行成 <br>——长评/跟帖不再被 esc 拍平成一堵墙 */
+const paras = s => {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  return t.split(/\n{2,}/).map(p => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`).join("");
+};
+
 function toast(msg) {
   let t = document.querySelector(".toast");
   if (!t) { t = document.createElement("div"); t.className = "toast"; document.body.appendChild(t); }
@@ -264,6 +271,30 @@ function countDescendants(rootId, childrenMap) {
   return count;
 }
 
+/* 最深回复级数（楼主=0，直接回复=1……）；无回复返回 0 */
+function threadMaxDepth(rootId, childrenMap) {
+  let max = 0;
+  (function walk(id, d) {
+    for (const k of (childrenMap.get(id) || [])) {
+      if (d > max) max = d;
+      walk(k.read_id, d + 1);
+    }
+  })(rootId, 1);
+  return max;
+}
+
+/* 参与人数：楼主 + 所有回复者的不同 persona 数 */
+function threadParticipants(rootId, root, childrenMap) {
+  const set = new Set([root.reader.persona_id]);
+  const stack = [rootId];
+  while (stack.length) {
+    for (const k of (childrenMap.get(stack.pop()) || [])) {
+      set.add(k.reader.persona_id); stack.push(k.read_id);
+    }
+  }
+  return set.size;
+}
+
 function renderThreads() {
   app.className = "";
   const childrenMap = threadChildrenMap();
@@ -273,19 +304,47 @@ function renderThreads() {
       <p class="page-hint">还没有开始任何跟帖讨论——这是「偶尔办的沙龙」，不是日常，只对少数已有长评的诗定点开。</p>`;
     return;
   }
+  const items = roots.map(r => {
+    const poem = maps.poem.get(r.poem_id);
+    const title = poem ? poem.title : r.poem_id;
+    const master = personaName(r.reader.persona_id);
+    return {
+      r, title, master,
+      n: countDescendants(r.read_id, childrenMap),
+      depth: threadMaxDepth(r.read_id, childrenMap),
+      ppl: threadParticipants(r.read_id, r, childrenMap),
+      vc: voteBadge(S.votes[r.read_id]),
+      key: (title + " " + master).toLowerCase(),
+    };
+  });
+  // 回复多的排前——一进来先看见热闹的那几场，找起来省一次滚屏
+  items.sort((a, b) => b.n - a.n);
   app.innerHTML = `
     <h1 class="page-title">跟帖</h1>
     <p class="page-hint">读者围绕一篇长评展开的讨论，和盲读是两种信号，不评分，永不进榜单/校准。</p>
+    <input id="thread-search" class="thread-search" type="search" placeholder="搜诗题或楼主…" autocomplete="off">
+    <p class="page-hint thread-count" id="thread-count">共 ${items.length} 场跟帖</p>
     <ul class="thread-list">
-      ${roots.map(r => {
-        const poem = maps.poem.get(r.poem_id);
-        const n = countDescendants(r.read_id, childrenMap);
-        const vc = voteBadge(S.votes[r.read_id]);
-        return `<li><a href="#/thread/${r.read_id}">《${esc(poem ? poem.title : r.poem_id)}》</a>
-          <span class="chip">楼主 ${esc(personaName(r.reader.persona_id))}</span>
-          <span class="chip">${n} 层回复</span>${vc}</li>`;
-      }).join("")}
+      ${items.map(it => `<li data-key="${esc(it.key)}">
+        <a href="#/thread/${it.r.read_id}">《${esc(it.title)}》</a>
+        <span class="chip">楼主 ${esc(it.master)}</span>
+        <span class="chip">${it.n} 层</span>
+        ${it.depth > 1 ? `<span class="chip">最深 ${it.depth} 级</span>` : ""}
+        <span class="chip">${it.ppl} 人</span>${it.vc}</li>`).join("")}
     </ul>`;
+  const box = app.querySelector("#thread-search");
+  const cnt = app.querySelector("#thread-count");
+  const lis = [...app.querySelectorAll(".thread-list li")];
+  box.oninput = () => {
+    const q = box.value.trim().toLowerCase();
+    let shown = 0;
+    for (const li of lis) {
+      const ok = !q || li.dataset.key.includes(q);
+      li.style.display = ok ? "" : "none";
+      if (ok) shown++;
+    }
+    cnt.textContent = q ? `${shown} / ${items.length} 场跟帖` : `共 ${items.length} 场跟帖`;
+  };
 }
 
 function renderThread(rootId) {
@@ -311,18 +370,24 @@ function renderThread(rootId) {
     const stanceTag = m.stance_changed === true
       ? `<span class="chip warm">改变了判断${lean}</span>`
       : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
+    // 缩进封顶：深楼不再复利式推出屏；左边框连线 + 级数标记接手表达嵌套
+    const indent = Math.min(depth, 5) * 1.1;
     return `
-      <div class="thread-floor" style="margin-left:${depth * 1.5}em">
-        <p class="floor-meta"><b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
+      <div class="thread-floor" style="margin-left:${indent}em">
+        <p class="floor-meta"><span class="floor-depth">${depth}级</span>
+          <b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
           <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
           ${stanceTag} ${floorVoteChip(r.read_id)}</p>
-        <p class="floor-text">${esc(r.reaction || r.long_form || "")}</p>
+        <div class="floor-text">${paras(r.reaction || r.long_form || "")}</div>
       </div>
       ${kids.map(k => floorHtml(k, depth + 1)).join("")}`;
   }
 
   const topKids = (childrenMap.get(rootId) || []).slice()
     .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const nFloors = countDescendants(rootId, childrenMap);
+  const maxDepth = threadMaxDepth(rootId, childrenMap);
+  const ppl = threadParticipants(rootId, root, childrenMap);
 
   app.innerHTML = `
     <p>
@@ -330,10 +395,11 @@ function renderThread(rootId) {
       ${poem ? `<a class="back" style="margin-left:1em" href="#/poem/${esc(root.poem_id)}">→ 原诗评论区</a>` : ""}
     </p>
     <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
-    <div class="thread-floor">
+    <p class="page-hint thread-summary">${nFloors} 层回复${maxDepth > 1 ? ` · 最深 ${maxDepth} 级` : ""} · ${ppl} 人参与</p>
+    <div class="thread-floor thread-root">
       <p class="floor-meta"><b>楼主 · <a href="#/reader/${esc(root.reader.persona_id)}">${esc(personaName(root.reader.persona_id))}</a></b>
         ${floorVoteChip(rootId)}</p>
-      <p class="floor-text">${esc(root.long_form || root.reaction || "")}</p>
+      <div class="floor-text">${paras(root.long_form || root.reaction || "")}</div>
     </div>
     ${topKids.map(k => floorHtml(k, 1)).join("")}`;
 }

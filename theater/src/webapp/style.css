@@ -373,15 +373,34 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .toast.show { opacity: .95; }
 
 /* 跟帖（thread）：与盲读是两种信号，视觉上刻意朴素、不做成打分卡片 */
+.thread-search {
+  width: 100%; max-width: 22em; box-sizing: border-box;
+  padding: .5em .8em; margin: 0 0 .6em; font: inherit;
+  border: 1px solid var(--panel-2); border-radius: 8px;
+  background: var(--panel); color: var(--ink);
+}
+.thread-search:focus { outline: none; border-color: var(--accent-deep); }
+.thread-count { margin-bottom: 1.4rem; }
 .thread-list { list-style: none; padding: 0; }
 .thread-list li { padding: .7em 0; border-bottom: 1px solid var(--panel-2); }
+.thread-list li .chip { margin-left: .3em; }
 .thread-list a { font-weight: 600; }
+.thread-summary { margin-top: -1.2rem; margin-bottom: 1.8rem; }
 .thread-floor {
   border-left: 2px solid var(--panel-2); padding: .6em 0 .6em 1em;
   margin: .8em 0;
 }
+.thread-floor.thread-root { border-left-color: var(--accent-deep); }
 .thread-floor .floor-meta { font-size: .82rem; color: var(--ink-3); margin-bottom: .3em; }
+/* 级数标记：缩进封顶后仍能一眼看出嵌套第几层 */
+.floor-depth {
+  display: inline-block; font-size: .68rem; color: var(--ink-3);
+  border: 1px solid var(--panel-2); border-radius: 4px;
+  padding: 0 .35em; margin-right: .4em; vertical-align: middle;
+}
 .thread-floor .floor-text { line-height: 1.85; }
+.thread-floor .floor-text p { margin: 0 0 .7em; }
+.thread-floor .floor-text p:last-child { margin-bottom: 0; }
 
 /* 赞/踩：▲青绿=赞、▼赭红=踩，颜色+方向+字三重区分 */
 .vup { color: var(--accent-deep); font-weight: 600; }
