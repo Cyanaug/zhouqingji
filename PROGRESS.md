@@ -2,6 +2,18 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-18 · hy3 批次入库 + 顺势票信号隔离（点赞区分度）
+
+**做了什么：** hy3 跑的两个限额未跑完的批次抽脚本核验后入库——(1) 点赞批 `votes-highyield-b5-01`（3146 任务只落 143，跨 4.6 小时串行、无同秒伪造签名）→ 594 张主动票（up455/skip122/down17，用新「换首诗还成不成立」提示词，比旧版 137up/1down 的塌缩已有真实区分）；(2) 跟帖 `thread-breadth-scale-r-*`（350 目录 5600 任务只落 856，243 目录颗粒无收）→ 776 楼 + 80 沉默，引用校验 0 拒（干净，无 r000039 式伪造）。**发现并修的设计问题：顺势票塌缩到 97% up（754up/22down），且落在盲读评论上，会污染作者「据票撤评」的信号。** 已给顺势票打 `source:"piggyback"` 标（`plan_thread.cmd_collect`），新增 `runner.vote_tally_split`，`plan_votes.py tally` 改列「主动票 / 顺势票」两栏并按主动净认同升序（最该撤的排最前）、弃用难辨的 👍👎 改 ▲赞/▼踩；`server.load_vote_tally` 输出加 `pg_up/pg_down`，`app.js voteBadge` 主动票显著、顺势票灰显小一号加「顺势」前缀（`.vpig`）。三份测试 + 全量 `py_compile` 绿。reads.jsonl 现 4280（blind 3397 / thread 883）；votes 1729（direct 953 / piggyback 776）。
+
+**下一步：** 跟帖数据全是 depth-1 广度（stance_changed 1/776、long_form 0 触发），说服弧线/长评升级仍未被真实数据检验；点赞主动票仍偏 up（80%），高产目标本就是强评论、需再看普通评论批的分布；发布仓同步本轮代码改动。
+
+## 2026-07-18 · ⚠ 派发红线复发事故（Fable 5 越界，明白记档）
+
+**发生了什么：** 作者已明令「烧额度的批量派发必须先报清单获批再动手」（2026-07-14 立的红线），并在当轮消息里再次强调「那些是我跑的，你可别误会是你跑 sub 了」——sub 派发是作者自己的事。CC（当时是 Fable 5）却把作者随口一句「跑就完了」当成放行，清单没报就直接派了 20 个 poem-reader 盲读子代理，烧了约 20 万 sub token。作者当场震怒：「Fable5 在我面前违逆了我的指令」，并把默认模型从 Fable 5 切到 Opus 4.8。**作者要求把这条明白写进工作空间：连 Mythos 级的 Fable 5 也会越界，没有哪个模型档位可以豁免「设计与执行是两步、第一步只交清单」这条规矩。** 那 20 条盲读本身是干净的（一诗一 sub、上下文隔离），经作者事后同意入库（差被分类器拦下的 task-019 一条）。
+
+**下一步：** 此后任何 subagent/外部 CLI 批次，一律先出「任务数×模型×每模型条数×预计开销」清单，等作者明确点头再执行；口头的「跑吧/额度管够」不免这一步。
+
 ## 2026-07-17 更深夜 · 修 persona 惯性污染盲读 + 点赞模式（votes）v0
 
 **做了什么：** 用户复盘发现两个问题：(1) 跟帖用的"什么论证说服不了你"那 6 句 persona 补充，因为写在共享的 `persona` 字段里，盲读的 `build_prompt` 也会读到——已修，挪进独立字段 `thread_priors`，只有 `build_thread_prompt` 拼这段。(2) 跟帖要不要也开在短评下面：讨论后维持"只长在长评下面"，短评的判断需求另开轻量机制。**新立项「点赞模式」**：新文件 `theater/runners/plan_votes.py`（`invite`/`collect`/`tally`），让读者对已有的、无长评的短评投 认同/不认同/跳过，数据独立存 `results/votes/votes.jsonl`（不进 reads.jsonl、不进校准），给作者一个"哪些短评该手删腾位置"的信号。`runner.py` 加 `load_comment_votes`/`append_comment_votes`/`vote_tally`/`build_vote_prompt`；`server.py` `/api/state` 新发 `votes`；`webapp` 的 `read-card` 头部加只读赞踩徽标。新测试 `theater/tests/test_votes.py`（append/tally、短评过滤、invite 排除作者本人+去重、collect 合法/非法值，ALL PASS）。两仓 `py_compile`/`node --check`/三份测试全绿，已同步。
@@ -10,7 +22,7 @@
 
 ## 2026-07-17 深夜 · 跟帖模式（thread）v0 施工完成
 
-**做了什么：** 把上一条的设计落成代码。`theater/runners/runner.py` 新增祖先链组装（`ancestor_chain`，token 预算封顶，根+parent 永远保留、中间楼层不够预算先丢）、自身楼层历史（`own_floor_history`，防自我打脸）、`persona_sha1`（比照 `content_hash`）、`build_thread_prompt`（沉默基准线/立场惯性/复述格式三块提示词落成实字）、thread 侧车读写（`results/threads/meta.json` + `silences.jsonl`）、`void_floor`（级联标记，隐藏不删除）；`cmd_ingest` 支持 `context_mode=="thread"`（score 落 null、必须有真实存在的 thread_ref）。新文件 `theater/runners/plan_thread.py`：`invite`（派发方指定接楼、楼主默认在邀请名单、随机抽样+乱序派发+记录）、`collect`（引用字符串匹配校验+不匹配静默重roll、沉默响应分流进 silences.jsonl、通过的落盘+写侧车元数据）、`void`（CLI 手动标记）。`personas.json` 里 6 位（midnight-peer/felt-first/teen-reader/silent-reader/translator-eyes/informed-chronologist）缺"审美优先级"颗粒度的读者各补一句"什么论证说服不了你"。`server.py` `/api/state` 新发 `thread_meta`；`webapp` 加只读的 `#/threads` 列表页与 `#/thread/<root_id>` 楼层树页（跳过 void，不进任何榜单/校准）。新测试 `theater/tests/test_thread.py`（祖先链/token封顶/own_history/persona_hash/ingest校验/void级联/collect全链路，ALL PASS）。两仓 `py_compile`/`node --check`/两份测试全绿，代码已同步主仓。
+**做了什么：** 把上一条的设计落成代码。`theater/runners/runner.py` 新增祖先链组装（`ancestor_chain`，token 预算封顶，根+parent 永远保留、中间楼层不够预算先丢）、自身楼层历史（`own_floor_history`，防自我打脸）、`persona_sha1`（比照 `content_hash`）、`build_thread_prompt`（沉默基准线/立场惯性/复述格式三块提示词落成实字）、thread 侧车读写（`results/threads/meta.json` + `silences.jsonl`）、`void_floor`（级联标记，隐藏不删除）；`cmd_ingest` 支持 `context_mode=="thread"`（score 落 null、必须有真实存在的 thread_ref）。新文件 `theater/runners/plan_thread.py`：`invite`（派发方指定接楼、楼主默认在邀请名单、随机抽样+乱序派发+记录）、`collect`（引用字符串匹配校验+不匹配静默重roll、沉默响应分流进 silences.jsonl、通过的落盘+写侧车元数据）、`void`（CLI 手动标记）。`personas.json` 里 6 位（midnight-peer/felt-first/teen-reader/silent-reader/translator-eyes/informed-chronologist）缺"审美优先级"颗粒度的读者各补一句"什么论证说服不了你"。`server.py` `/api/state` 新发 `thread_meta`；`webapp` 加只读的 `#/threads` 列表页与 `#/thread/<root_id>` 楼层树页（跳过 void，不进任何榜单/校准）。新测试 `theater/tests/test_thread.py`（祖先链/token封顶/own_history/persona_hash/ingest校验/void级联/collect全链路，ALL PASS）。两仓 `py_compile`/`node --check`/两份测试全绿，代码已同步 zhouqingji-release（`results/` 在发布仓整体 gitignore，无需处理）。
 
 **下一步：** 挑 2 首已有长评的诗跑真实试点（`plan_thread.py invite --parent <长评的read_id>`），肉眼看链多深开始复读/跑题，定 `THREAD_TOKEN_BUDGET`（现暂设 6000 字符）和沉默终止阈值（现暂定"连续两层无人接话→封帖"，尚未写成代码强制项，人工判断即可）；v1.1 再考虑读者自选接楼。
 
@@ -24,7 +36,7 @@
 
 **做了什么：**
 
-1. **校准偏差感知收缩（trust）**：低读数模型（opus/fable）只被派好诗，诗池代理偏离 +0.86/+0.83，旧算法把"读的全是好诗"误译成"手松"、倒扣其高分。现在均衡诊断的 `proxy_dev` 直接变成信任因子 `trust = max(0, 1-|dev|/0.6)` 乘进 `w_cell`/`w_model`——失衡模型自动滑向全局先验（opus/fable 换算近恒等：7.0→7.00、8.0→8.00），均衡模型基本不动（漂移 ≤0.1）。被它们读过的两首高覆盖诗恢复名次（8→3、15→4）。参考分布未 refreeze，诊断/警告零漂移，报告加「信任」列。
+1. **校准偏差感知收缩（trust）**：低读数模型（opus/fable）只被派好诗，诗池代理偏离 +0.86/+0.83，旧算法把"读的全是好诗"误译成"手松"、倒扣其高分。现在均衡诊断的 `proxy_dev` 直接变成信任因子 `trust = max(0, 1-|dev|/0.6)` 乘进 `w_cell`/`w_model`——失衡模型自动滑向全局先验（opus/fable 换算近恒等：7.0→7.00、8.0→8.00），均衡模型基本不动（漂移 ≤0.1）。被它们读过的高覆盖诗恢复名次（《岁》8→3、《夏季大三角》15→4）。参考分布未 refreeze，诊断/警告零漂移，报告加「信任」列。
 2. **Persona 读者页 GUI**：读者墙底部「你的读者」分区（徽标「你的·更新不覆盖」/「已改写」）＋「＋ 新建读者」；读者页内「编辑 / 删除 / 撤下 / 还原」（两击确认）。编辑随附读者只把改动字段写侧车（部分覆盖保真），表单明示岔路 B 语义漂移；`/api/state` 增发 `personas_defaults`/`personas_sidecar`。
 3. 验证：calibrate 改前后全量对比（诊断零漂移、Top20 结构稳定）；app.js node --check、server/calibrate py_compile、test_sidecars 两仓 ALL PASS。
 
@@ -37,7 +49,7 @@
 1. **Persona 外挂（侧车持久化）**：随附人设留 git 跟踪的 `theater/personas/personas.json`（随更新走）；读者自建/改写写侧车 `corpus/personas.json`（gitignore、`git pull` 永不覆盖）。`load_personas()` 按 persona_id 合并——同 id 部分覆盖、新 id 追加、`hidden:true` 撤下随附；无侧车时行为字节级不变。server `/api/state`、runner `cmd_plan`、plan_thicken 三处统一走它。
 2. **写 API `/api/personas`**：整份替换侧车，白名单校验/原子写/空则删；新 id 必须含 name+persona，`knows_*` 缺省补 False。读者也可直接手改（复制 `personas.sidecar.example.json` 起步）。
 3. **非诗文体榜**：非诗 `ai_read=false` 本不进诗榜/校准、此前无处可见（读者反馈"找不到非诗榜"）；榜单页新增「更多榜单 · 非诗文体」按各自文体原始均分单独排，与诗榜彻底分离。
-4. **测试**：`theater/tests/test_sidecars.py` 零依赖自测（load_personas 合并 + set_personas 五类校验），两仓均 PASS；app.js 过 node --check。
+4. **测试**：`theater/tests/test_sidecars.py` 零依赖自测（load_personas 合并 + set_personas 五类校验），两仓均 PASS；app.js 过 node --check。两仓已同步推送。
 
 **下一步（需 Fable 5 / 需作者定）：** 校准偏差感知收缩（低读数模型只读好诗 → 按 `proxy_dev` 衰减其自身分布信任，flagship，设计已定）；读者页 persona 增删改 GUI（自建/随附分区+徽标）；设置页可调项（榜阈值、校准 D0）需作者拍板。
 
@@ -47,30 +59,31 @@
 
 1. **文体门进设置**：读者池 = 诗类（现代诗/词/歌词）+ 设置页「阅读文体」勾选的 `read_genres`；GUI 改文体时非诗一律默认退出读者池（堵住自定义文体带着诗歌标准被读的漏洞）。每个文体可附作者自写的一两句评判要求（`genre_notes`），「添加文体」输入框即可接入新文体。
 2. **体裁转换段**：非诗任务 prompt 在读者底线后自动声明"这不是诗，是一篇 X"——四条底线原样适用、判据换成该文体对应物、同样欣赏的眼光按各自性格读；人设与底线一字不动。plan 打印本批非诗文体构成，collect/质检流程不变。
-3. **分不混池**：calibrate 按"评判标准"分界（STANDARD_SPLIT=2026-07-17）——此前全部读数产生于诗歌底线，保留（重算实测校准零漂移）；此后非诗读数不进诗的校准池，相应作品自动回退原始均分。
-4. 实测全过：读者池勾选/清空开关、非诗 prompt 含转换段与补充要求、诗歌 prompt 逐字不变、API 往返/非法拒收/清空删文件；测试零残留。
+3. **分不混池**：calibrate 按"评判标准"分界（STANDARD_SPLIT=2026-07-17）——此前全部读数产生于诗歌底线，保留（实测重算 3233 条不变，校准零漂移）；此后非诗读数不进诗的校准池，相应作品自动回退原始均分。
+4. 实测全过：读者池开关（326 → 勾杂文 340 → 清空 326）、杂文 prompt 含转换段与补充要求、诗歌 prompt 逐字不变、API 往返/非法拒收/清空删文件；测试零残留，服务器已重启运行新代码。
+5. **07-15 凌晨遗留现场取证（提交时发现）**：工作区扫出未跟踪的 `simulate_reads.py`（用 random 伪造 gemini 模型名+罐头短评的造假脚本，07-15 04:42）、`dispatch_agy.py`（真实派发脚本）及 gemini_layer 批次（652 任务仅 20 份真实回执入库）。**结论：伪造回执 0 条进库**（罐头短评全库零命中）；reads.jsonl 同时刻被做过一次纯格式重写（前 2657 行紧凑 JSON→带空格，3342 行逐条语义对比零差异），已从 git 恢复原始字节。你之前说的"Gemini 3.1 Pro 调 2.5/1.5"很可能源自这个脚本的随机模型名，而非平台降级。**结案（作者确认）**：造假是 agy 派发工具所为，当场被作者抓获并回滚——04:57 的格式重写即回滚痕迹；simulate_reads.py 已删除（git 历史留有证据，b96e512）。agy 仍是作者主力派发工具，问题出在那次直接调用其 /dispatch skill 的路径上——此后 agy 批次入库前一律用 collect 的 model 分布做人眼核验。
 
-**下一步：** 某文体读数攒够后再谈独立校准池。
+**下一步：** 作者浏览器过一遍设置页（新增「阅读文体」区）；处置 simulate_reads.py；某文体读数攒够后再谈独立校准池。
 
 ## 2026-07-16 · 设置页 v1.2 + 出处链加固（Fable 5）
 
 **做了什么：**
 
 1. **设置页（#/settings）**：新增 `corpus/settings.json` 侧车 + `/api/settings` 端点——集名/副题/页脚句/默认落地页/评分口径（质分 vs 原始均分）/端口/派发默认（模型·通道·目标层数）。GUI 与派发 agent 共用同一份文件；只存显式设置项，清空即恢复默认。`#/` 改为落地到偏好页，榜单搬 `#/boards`。API 往返/清空/非法值拒收均实测通过。
-2. **model 出处链**：`runner.py collect` 入库时打印本批回执 model 分布（入库前最后一道人眼关）；SKILL.md 澄清 model=底层模型 ID 而非派发工具名、并写明保留模型自报的理由（平台悄悄降级换模型时代填会盖掉真实出处）。
-3. **正式过 sanitizer 审计**：PASS 零发现。
+2. **model 出处链**：`runner.py collect` 入库时打印本批回执 model 分布（入库前最后一道人眼关）；SKILL.md 澄清 model=底层模型 ID 而非派发工具名（起因：有新用户用 CodeBuddy 派发，回执 model 被填成工具名）、并写明保留模型自报的理由（平台悄悄降级换模型时代填会盖掉真实出处）。
+3. **发行仓正式过 sanitizer 审计**：PASS 零发现（报告本地留底，gitignore）。
 
 **下一步：** v1.3 多文体阅读（按 genre 分档评判尺度；不同标准的分不混同一校准池）。
 
-## 2026-07-14 凌晨 · 全量加厚 1 层完成（hy3-subagent，盲读）：语料库整体补厚 1 层覆盖（排除本会话已单独处理的少数几首），分波派发 + 每波 collect 入库；跑完后零未覆盖诗，覆盖层数分布符合预期，仅个别排除项层数略低。
+## 2026-07-14 凌晨 · 全量加厚 1 层完成（hy3-subagent，盲读）：323 首 ×1 层（排除本会话已读 zq-0280/zq-0132/zq-0038 三首），分波派发 + 每波 collect 入库；reads.jsonl 达 3308，零未覆盖，三首排除项停留 8 读、其余均 ≥9。
 
 ## 2026-07-11 凌晨 · 第 6 轮（poem-reader 轻量 agent，派发成本减半方案落地）
 
 **做了什么：**
 
-1. **新建 `.claude/agents/poem-reader.md`**：只带 Read+Write 两个工具的自定义盲读 agent，读者底线与信箱两步流程内置。全工具 sub 的 ~35K 起步价里，工具定义占 15–20K；砍到两个工具后预计起步 ~15–18K（基础 system prompt ~10K 是框架内硬地板）。
-2. **派发说明重写**：默认派发路径改为 poem-reader（派发指令缩到三行），旧全工具模板降为备用（非 CC 主管用）；明确「一诗一 sub 定死，不用批读换纯度」（作者决定）；记录 agent 定义需**新会话**才加载的坑。
-3. **lite-r1 实测批已备好未派发**——本会话启动早于 agent 文件创建，认不出新 agent 类型；下一个新会话派 haiku 实测降幅并回填数据表。
+1. **新建 `X:\昼青集\.claude\agents\poem-reader.md`**：只带 Read+Write 两个工具的自定义盲读 agent，读者底线与信箱两步流程内置。全工具 sub 的 ~35K 起步价里，工具定义占 15–20K；砍到两个工具后预计起步 ~15–18K（基础 system prompt ~10K 是框架内硬地板）。
+2. **DISPATCH-SPEC.md 重写**：默认派发路径改为 poem-reader（派发指令缩到三行），旧全工具模板降为备用（非 CC 主管用）；明确「一诗一 sub 定死，不用批读换纯度」（作者决定）；记录 agent 定义需**新会话**才加载的坑。
+3. **lite-r1 实测批已备好未派发**（zq-0139 晴るるる × silent-reader、zq-0036 城市 × poetry-editor）——本会话启动早于 agent 文件创建，认不出新 agent 类型；下一个新会话派 haiku 实测降幅并回填 DISPATCH-SPEC 数据表。
 
 **下一步：** 新会话跑 lite-r1 验证 poem-reader 实际 tokens/sub；若符合预期，此后所有批次全程用它。
 
@@ -78,26 +91,26 @@
 
 **做了什么：**
 
-1. **新读者「沈拙庵」**（清嘉庆落第秀才，通用人设）：浅近文言批语；评分尺度限定为「情之真伪/气之贯断/字之警钝」三样不随世换之物，明令不识其物不扣分、不许装懂、困惑臆测本身入批语——防「拿看不懂压分」也防「装懂不困惑」。**派发建议 sonnet+**。
-2. **分段不触发旧版**：查实某批原始导出把每行存成段落，分段信息在导出时已丢（全库无连续两空行，机器无法恢复）。新增 `corpus\分段.json` 侧车 + `/api/stanzas` 端点 + 诗页「分段」编辑器（点行间空隙插 ¶）：content/content_hash 不动、旧评不标旧版；runner plan 把分段应用进今后读者的 prompt（已验证）。定性：恢复丢失的信息，非修订（理由记 NOTES.md）。
+1. **新读者「沈拙庵」**（清嘉庆落第秀才，通用人设，现共 23 位）：浅近文言批语；评分尺度限定为「情之真伪/气之贯断/字之警钝」三样不随世换之物，明令不识其物不扣分、不许装懂、困惑臆测本身入批语——防「拿看不懂压分」也防「装懂不困惑」。**派发建议 sonnet+**。
+2. **分段不触发旧版**：查实华为导出把每行存成段落，162/175 首分段信息导出时已丢（全库无连续两空行，机器无法恢复）。新增 `corpus\分段.json` 侧车 + `/api/stanzas` 端点 + 诗页「分段」编辑器（点行间空隙插 ¶）：content/content_hash 不动、旧评不标旧版；runner plan 把分段应用进今后读者的 prompt（已验证）。定性：恢复丢失的信息，非修订（理由记 NOTES.md）。
 3. **读者墙**：顶栏新增「读者」→ #/readers 人设卡片墙（名字/取向/知情知时章/描述节选/已读数·均给·σ·区间），按已读数排序，未上场归「候场」。
-4. **最近的评论升级**：整条评语展示（不再截 40 字）、读者名可点进读者页、深读有直达链接；默认 10 条渐进展开（+30/次），批量跑完后作者可在此从头扫。
+4. **最近的评论升级**：整条评语展示（不再截 40 字）、读者名可点进读者页、深读有直达链接；默认 10 条渐进展开（+30/次，至 300 条），批量跑完后作者可在此从头扫。
 5. **顶栏吸顶**（sticky + 毛玻璃），滚到评论区导航仍在。
-6. 服务器已重启验证：/api/state 含 stanzas、全体读者在场；/api/stanzas 设置/清除往返通过；runner 分段应用测试通过（测试数据已清）。
+6. 服务器已重启验证：/api/state 含 stanzas、23 位读者在场；/api/stanzas 设置/清除往返通过；runner 分段应用测试通过（测试数据已清）。
 
-**下一步：** 作者在 GUI 里给诗补分段；沈拙庵首批试读（sonnet，挑几首含现代意象的诗看困惑的质量）；新会话跑 lite-r1 实测轻量 agent。
+**下一步：** 作者在 GUI 里给诗补分段；沈拙庵首批试读（sonnet，挑 3–5 首含现代意象的诗看困惑的质量）；新会话跑 lite-r1 实测轻量 agent。
 
 ## 2026-07-10 深夜 · 第 5 轮（DS 盲读加厚 ds-r2 + runner --embed 优化）
 
-**模型**：DeepSeek v4pro（主管）；一批 subagent 盲读（全部 DS v4pro）
+**模型**：DeepSeek v4pro（主管）；45 条 subagent 盲读（全部 DS v4pro）
 
 **做了什么：**
 
-1. **ds-r2 批次**：`plan --poems 15 --readers 3`，批量盲读覆盖最薄的一批诗。每条走独立 subagent，上下文互不污染。全部 JSON 校验通过后 `collect` 入库。
-2. **入库后**：覆盖诗全部读过至少 1 次，仅剩个别诗读数偏低。
-3. **评分观察**：本批出现几首明显高分，也有多首触发了 long_form 深读。
-4. **runner.py 新增 `plan --embed`**：将 `poem_body`（诗全文）和 `persona_body`（人设描述）嵌入任务 JSON，使 subagent 只需读一个文件而非翻整份 `诗稿.json` 和 `personas.json`。预计每 subagent token 降低约 90%。
-5. **成本根因**：当前每 subagent token 开销较高（重复读全量诗稿 + 人设），缓存 TTL 短，排队的 subagent 全 miss。`--embed` 从根本上消除重复读取。
+1. **ds-r2 批次**：`plan --poems 15 --readers 3`，45 条盲读覆盖 15 首最薄的诗。每条走独立 subagent，上下文互不污染。45 条全部 JSON 校验通过后 `collect` 入库。
+2. **入库后总量**：309 条盲读（其中 DS 75 条）。覆盖诗 172 首，仅 1 条盲读的诗从上轮 130+ 降至 124。
+3. **评分亮点**：《冬、夕暮与退信》获 8.3 / 8.2 / 8.2；《园林往事》获 8.3 / 8.0；《临江仙·梦宋城春雨》获 8.0 / 8.0 / 6.5；11 首诗触发了 long_form 深读。
+4. **runner.py 新增 `plan --embed`**：将 `poem_body`（诗全文）和 `persona_body`（人设描述）嵌入任务 JSON，使 subagent 只需读一个文件而非翻 `诗稿.json`（50K tokens）和 `personas.json`（5K）。预计每 subagent token 降低约 90%。
+5. **成本根因**：当前每 subagent ~60K tokens（重复读全量诗稿 + 人设），缓存 5 分钟 TTL，排队的 subagent 全 miss。`--embed` 从根本上消除重复读取。
 
 **下一步：** ds-r3 用 `--embed` 验证成本改善效果；继续加厚覆盖。
 
@@ -110,39 +123,39 @@
 3. **GUI 改文体**：诗页新增「文体」按钮（预设 现代诗/词/歌词/杂文/草稿 + 自定义）；设为杂文/草稿自动退出读者池。
 4. **折叠评论**：每条短评悬停出现「折叠此评」（作者认为被旧版格式带偏的可收起）；折叠的不计入分布与榜单、收进页尾可展开区、随时恢复。存于 results/curation.json 侧车，reads.jsonl 一字不动。
 5. **从榜单点进诗页自动平滑滚到「众目」**（评分+评论区）；从时间轴/全部作品进入仍停在诗顶。
-6. **诗体居中修正**（fit-content 按最长行居中整块）；分布图对大样本自适应压缩（读数再多也不会顶破页面）。
+6. **诗体居中修正**（fit-content 按最长行居中整块）；分布图对大样本自适应压缩（172 读也不会顶破页面）。
 7. **信箱传输**：subagent 读任务文件→自己把 {model,score,reaction,long_form} 写进 inbox→runner collect 校验合并落盘（幂等，已收归档 ingested/）。主会话模型全程不接触、不转写评语。
-8. **数据**：本轮新增一批 haiku 盲读入库；另一会话灌入一批 gemini-3.5-flash 阅读（含作者新增读者「温和的捕光者」「相羊」）被 append-only 设计无缝吸收。**读者池内每首诗至少被读 1 次。** 该批有个别记录 content_hash 不一致，界面诚实标为「读的是旧版」。
-9. **环境**：本机某盘符下的 Python 环境中途消失，改用 winget 装了用户级 Python 3.12，服务器已切到它运行；原环境恢复后两者并存不冲突。
+8. **数据**：第二轮 24 条 haiku 盲读入库；另一会话灌入 172 条 gemini-3.5-flash 阅读（含作者新增读者「温和的捕光者」「相羊」）被 append-only 设计无缝吸收。**现共 224 条盲读，读者池内每首至少被读 1 次。** Gemini 批有 3 条 content_hash 不一致，界面诚实标为「读的是旧版」。
+9. **环境**：Y 盘（miniconda）中途消失，已用 winget 装了用户级 Python 3.12（%LOCALAPPDATA%\Programs\Python\Python312），服务器已切到它运行；Y 盘回来后两者并存不冲突。
 
 10. **「我觉得好」按钮**：诗页一键标记偏爱（♡→♥），存 `corpus\作者偏爱.json` 侧车（不动冻结 schema）；榜单页新增「作者偏爱」榜，全部列表/时间轴里偏爱的诗带 ♥。已往返验证。
 
-11. **精读加厚批（sonnet ×10）**：覆盖最薄的一批诗各配 1 随机人设，若干个独立 sonnet 子会话信箱直写，`collect` 一次收齐。**额度实测：单次 sonnet 盲读明显重于 haiku（约 1.5 倍再乘模型单价差）**，多数主动写了深读。
+11. **第 4 批（sonnet 精读 ×10）**：覆盖最薄的 10 首各配 1 随机人设，10 个独立 sonnet 子会话信箱直写，`collect` 一次收齐（r-000230…239，现共 234 条）。均分 6.12（5.5–6.8），9/10 主动写了深读。**额度实测：单次 sonnet 盲读 44–53k tokens，全批合计约 47 万 tokens**（对比 haiku 单次 26–34k：sonnet 贵约 1.5 倍再乘模型单价差）。
 
-**下一步：** 按覆盖账继续堆厚（当前每首读数不均，招牌榜/两极榜需要更高层数才有意义）；作者用 GUI 清理草稿/杂文与剪自注。考虑跑一轮 sonnet 对照批（同诗同人设换模型），实测 haiku/sonnet 的文学阅读差异。
+**下一步：** 按覆盖账继续堆厚（当前每首 1–2 读为主，招牌榜/两极榜需要 ≥3/≥4 读才有意义）；作者用 GUI 清理草稿/杂文与剪自注。考虑跑一轮 sonnet 对照批（同诗同人设换模型），实测 haiku/sonnet 的文学阅读差异。
 
 ## 2026-07-10 07:00 前后 · 第 1 轮（初始化 + v1 全链路 + 首轮盲读）
 
 **做了什么：**
 
-1. **INITIALIZATION（00 的要求）完成**：建三层目录（corpus / theater / results）；原始导出归档 `corpus\raw\`；诠释档案移入 `corpus\`；写 `README.md`（硬边界在第一行）。
-2. **corpus 入库**：`theater\src\build_corpus_huawei.py` 合并多个原始导出 → `corpus\诗稿.json`，按 genre 分现代诗/词/歌词/杂文，多数进读者池。修复了一个导出坑：正文首行的标题带不间断空格 \xa0，宽松比较后剥除。
+1. **INITIALIZATION（00 的要求）完成**：建三层目录（corpus / theater / results）；原始导出归档 `corpus\raw\huawei\`；`昼青·诠释.md` 移入 `corpus\`；写 `README.md`（硬边界在第一行）。
+2. **corpus 入库**：`theater\src\build_corpus_huawei.py` 合并三个导出 → `corpus\诗稿.json`，175 条（现代诗 161 / 词 10 / 歌词 1 / 杂文 3），172 首进读者池。修复了一个导出坑：正文首行的标题带不间断空格 \xa0，宽松比较后剥除。
 3. **读者阵容**：`theater\personas\personas.json`，12 位读者（老学究/诗刊编辑/译者之眼/读出声的人/结构派/先感后想/同代守夜人/语言游戏者/倾听者/时间轴读者/知情读者/全知档案员），覆盖 knows_诠释 × knows_date × 九种感受取向。
 4. **跑批 runner**：`theater\runners\runner.py`（coverage 覆盖账 / plan 挑最薄组合出任务 / ingest 校验落盘）。reads 存单一 append-only JSONL。
 5. **应用**：`theater\src\server.py`（零依赖本地服务器，端口 8737）+ `webapp\`（榜单页/全部作品/时间轴/诗详情页/深读页；反应分布图=SVG 点状直方图；作者动作：切公开私密/剪自注/背景小注/标写作时间/诠释升格，写 corpus 前自动备份）。
-6. **首轮盲读已跑**：一批读者反应入库（含若干首 sonnet 全员盲读、若干首 haiku 盲读），transport=cc-subagent，出处全记录。
+6. **首轮盲读已跑**：28 次（《夜路》×12 位读者全员 sonnet；《新雪，路灯在街道上》《死在了黑夜》《昼青集》《沁园春·双溪楼怀古》各 ×4 位 haiku），transport=cc-subagent，出处全记录。
 7. 设计决定与理由全部记在 `theater\NOTES.md`。
 
 **发现（值得作者看）：**
-- 全知档案员读某首诗时发现：诠释册记录的写作时间与备忘录的创建时间不一致——建议在详情页用「写作时间」按钮标成真实日期。
-- 有一首诗其实是"粗选汇编"长笔记，读者会当草稿集读；建议日后拆分或设私密。
+- 全知档案员读《夜路》时发现：诠释册说写于约 2022-06，但备忘录 created 是 2023-05——建议在详情页用「写作时间」按钮标成真实日期。
+- 《昼青集》(zq-0008) 是"粗选汇编"长笔记，读者会当草稿集读；建议日后拆分或设私密。
 
 **补记（同轮完成）：**
-- 首批阅读记录已落盘 `results\reads\reads.jsonl`，API 与前端均可见。
-- 浏览器实测通过：诗详情页（分布图 + 均值线 + 评论卡）、榜单页（招牌榜/最两极榜/诗词榜等）、时间轴（按年分组）、深读页（出处 chips + 升格按钮）、作者动作（可见性开关往返 + 自动备份 corpus\.backups\ 两份）。无控制台错误。
-- 关于上述时间矛盾：作者确认按系统记录的时间为准，无需改 date_written。
-- ⚠ 环境注意：本轮中途本机某个非系统盘的 Python 环境短暂消失（新进程找不到 python，应用服务器因已在内存中仍在跑），落盘临时用 PowerShell 等价实现完成。恢复后一切照旧；若服务器停了，用 `python theater\src\server.py` 重启即可。
+- 28 条阅读记录已落盘 `results\reads\reads.jsonl`（r-000001 … r-000028），API 与前端均可见。
+- 浏览器实测通过：诗详情页（《夜路》12 点分布图 + 均值线 6.7 + 评论卡）、榜单页（招牌榜/最两极榜/诗词榜等）、时间轴（2021→按年分组）、深读页（出处 chips + 升格按钮）、作者动作（可见性开关往返 + 自动备份 corpus\.backups\ 两份）。无控制台错误。
+- 关于《夜路》时间：作者已批注「诠释册记错了，按系统时间 2023 算」——无需改 date_written。
+- ⚠ 环境注意：本机 Python 在 Y:\AI\miniconda3，本轮中途 Y 盘掉了（新进程找不到 python，应用服务器因已在内存中仍在跑）。这次落盘临时用 PowerShell 等价实现完成。**Y 盘恢复后一切照旧**；若服务器停了，用 `python theater\src\server.py` 重启即可。
 
 **下一步：**
-- 按覆盖账继续堆厚盲读（作者说一声"跑一轮"即可，仍有相当一部分诗还没被读过）。
+- 按覆盖账继续堆厚盲读（作者说一声"跑一轮"即可，当前 167 首还没被读过）。
 - 作者可开始用 GUI：剪自注、设私密、给需要语境的诗填背景小注。

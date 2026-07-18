@@ -204,18 +204,44 @@ def load_thread_meta():
     return {}
 
 
+def _vote_void_ids():
+    """作废票标记（results/votes/void.json，plan_votes.py void 写）：统计与展示一律排除。"""
+    f = VOTES.parent / "void.json"
+    if f.exists():
+        return set(json.loads(f.read_text(encoding="utf-8")))
+    return set()
+
+
+def _iter_votes():
+    if not VOTES.exists():
+        return
+    void = _vote_void_ids()
+    for line in VOTES.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        v = json.loads(line)
+        if v.get("vote_id") in void:
+            continue
+        yield v
+
+
 def load_vote_tally():
-    """点赞模式（plan_votes.py 写）的只读聚合视图：{read_id: {up, down, skip}}。
-    不是排名指标，纯展示，帮作者判断要不要手删某条短评。"""
+    """点赞模式（plan_votes.py 写）的只读聚合视图：
+    {read_id: {up, down, skip, pg_up, pg_down}}。up/down/skip 只数「主动票」——作者
+    据此判断要不要手删短评；pg_* 是跟帖顺势票，几乎恒为 up 的弱信号，分开列，不混入撤评判断。
+    不是排名指标，纯展示。"""
     tally = {}
-    if VOTES.exists():
-        for line in VOTES.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            v = json.loads(line)
-            t = tally.setdefault(v["target_read_id"], {"up": 0, "down": 0, "skip": 0})
-            if v.get("vote") in t:
-                t[v["vote"]] += 1
+    for v in _iter_votes():
+        t = tally.setdefault(v["target_read_id"],
+                             {"up": 0, "down": 0, "skip": 0, "pg_up": 0, "pg_down": 0})
+        vote = v.get("vote")
+        if v.get("source") == "piggyback":
+            if vote == "up":
+                t["pg_up"] += 1
+            elif vote == "down":
+                t["pg_down"] += 1
+        elif vote in ("up", "down", "skip"):
+            t[vote] += 1
     return tally
 
 
@@ -223,15 +249,11 @@ def load_voter_votes():
     """每一张个人票的方向索引：{target_read_id: {persona_id: "up"/"down"/"skip"}}。
     供跟帖页面查询「这个楼层的作者对 parent 投了什么票」。"""
     idx = {}
-    if VOTES.exists():
-        for line in VOTES.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
-            v = json.loads(line)
-            pid = v.get("voter", {}).get("persona_id")
-            vote = v.get("vote")
-            if pid and vote:
-                idx.setdefault(v["target_read_id"], {})[pid] = vote
+    for v in _iter_votes():
+        pid = v.get("voter", {}).get("persona_id")
+        vote = v.get("vote")
+        if pid and vote:
+            idx.setdefault(v["target_read_id"], {})[pid] = vote
     return idx
 
 

@@ -214,10 +214,17 @@ function renderRecentInto() {
 
 /* ---------- 跟帖（thread）：与盲读是两种信号，只读展示，不进榜单/校准 ---------- */
 
-/* 赞/踩统一视觉：▲青绿=赞、▼赭红=踩（方向+颜色+字三重区分，emoji 太难分辨） */
+/* 赞/踩统一视觉：▲青绿=赞、▼赭红=踩（方向+颜色+字三重区分，emoji 太难分辨）。
+   主动票（点赞模式）显著；顺势票（跟帖带来，几乎恒为 up 的弱信号）灰显、加「顺势」前缀分开。 */
 function voteBadge(vt) {
-  if (!vt || (!vt.up && !vt.down)) return "";
-  return `<span class="chip"><span class="vup">▲${vt.up}</span> <span class="vdown">▼${vt.down}</span></span>`;
+  if (!vt) return "";
+  const up = vt.up || 0, dn = vt.down || 0, pu = vt.pg_up || 0, pd = vt.pg_down || 0;
+  if (!up && !dn && !pu && !pd) return "";
+  const main = (up || dn)
+    ? `<span class="vup">▲${up}</span> <span class="vdown">▼${dn}</span>` : "";
+  const pig = (pu || pd)
+    ? `<span class="vpig" title="跟帖顺势票——回复者几乎总认同自己选来回复的楼层，弱信号，不计入撤评判断">顺势 ▲${pu}${pd ? " ▼" + pd : ""}</span>` : "";
+  return `<span class="chip">${main}${main && pig ? " " : ""}${pig}</span>`;
 }
 
 function threadChildrenMap() {
@@ -995,9 +1002,7 @@ function renderPoem(id, goReads) {
 function readCard(r, p) {
   const stale = r.content_hash !== p.content_hash;
   const hid = isHidden(r.read_id);
-  const vt = S.votes[r.read_id];
-  const voteChip = vt && (vt.up || vt.down)
-    ? `<span class="chip" title="点赞模式：读者对这条评论的认同度，仅供参考，不进任何排名"><span class="vup">▲${vt.up}</span> <span class="vdown">▼${vt.down}</span></span>` : "";
+  const voteChip = voteBadge(S.votes[r.read_id]);
   const threadKids = threadChildrenMap().get(r.read_id);
   const leftLinks = [
     r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : "",

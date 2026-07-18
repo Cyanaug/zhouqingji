@@ -230,6 +230,10 @@ def cmd_collect(args):
                               "model": rec["reader"]["model"]},
                     "vote": m["vote"],
                     "reason": "",
+                    # 顺势票 vs 点赞模式主动票要分得开：回复者几乎总认同自己选来回复的楼层
+                    # （实测 754up/22down≈97% up），信号弱。作者据票撤评时只该看主动票，
+                    # 展示层可合并显示，但去重/裁撤统计要能把这批摘出去。
+                    "source": "piggyback",
                 })
         R.save_thread_meta(meta_store)
         if piggyback_votes:

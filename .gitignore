@@ -28,6 +28,10 @@ results/reads/*.bak-*
 # Stray run logs
 collect_tmp.log
 
+# Dispatch batch working dirs: tasks/prompts/inbox responses are reproducible
+# intermediates; ingested data lives in results/. Never commit these.
+theater/runners/batches/
+
 # Your own data — corpus/ and results/ are generated locally by you,
 # never committed. See 01_corpus_schema.md / 03_runner_and_coverage.md.
 /corpus/

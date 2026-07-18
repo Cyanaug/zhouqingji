@@ -61,7 +61,8 @@ def cmd_invite(args):
     poems = {p["id"]: p for p in R.load_json(R.CORPUS)}
     personas = {p["persona_id"]: p for p in R.load_personas() if not p.get("superseded_by")}
     stanzas = R.load_stanzas()
-    all_votes = R.load_comment_votes()
+    # 去重只认有效票：被作废（void）的票不算「已投过」，允许真读者重新投
+    all_votes = R.valid_comment_votes()
     voted = {(v["target_read_id"], v["voter"]["persona_id"]) for v in all_votes}
 
     seed = args.seed if args.seed else int(time.time())
@@ -192,7 +193,7 @@ def cmd_collect(args):
 
 
 def cmd_tally(args):
-    votes = R.load_comment_votes()
+    votes = R.valid_comment_votes()
     reads_by_id = {r["read_id"]: r for r in R.load_reads()}
     by_target = defaultdict(list)
     for v in votes:
@@ -201,12 +202,26 @@ def cmd_tally(args):
     if not by_target:
         print("这首诗还没有投票记录")
         return
+    # 主动票（点赞模式）在前——撤不撤评看这个；顺势票（跟帖带来）弱信号，括号里附注
+    rows = []
     for rid in by_target:
+        s = R.vote_tally_split(rid, votes)
+        rows.append((rid, s))
+    # 按主动票的净认同（up-down）升序：最该考虑撤下的排最前
+    rows.sort(key=lambda x: x[1]["direct"]["up"] - x[1]["direct"]["down"])
+    for rid, s in rows:
         r = reads_by_id.get(rid, {})
-        tally = R.vote_tally(rid, votes)
+        d, p = s["direct"], s["piggyback"]
+        pig = f"  〔顺势 ▲{p['up']} ▼{p['down']}〕" if (p["up"] or p["down"]) else ""
         print(f"{rid}（{r.get('reader', {}).get('persona_id', '?')}）："
-              f"👍{tally['up']} 👎{tally['down']} 跳过{tally['skip']}  "
+              f"主动 ▲赞{d['up']} ▼踩{d['down']} 跳过{d['skip']}{pig}  "
               f"{(r.get('reaction') or '')[:40]}")
+
+
+def cmd_void(args):
+    ids = [x.strip() for x in args.vote_ids.split(",") if x.strip()]
+    touched = R.void_votes(ids, args.reason)
+    print(f"标记作废 {len(touched)} 张票 → {R.VOTES_VOID}（票据不删，统计/展示/去重均已排除）")
 
 
 def main():
@@ -232,8 +247,14 @@ def main():
     t = sub.add_parser("tally")
     t.add_argument("--poem-id", dest="poem_id", required=True)
 
+    v = sub.add_parser("void")
+    v.add_argument("--vote-ids", dest="vote_ids", required=True,
+                   help="逗号分隔 vote_id，如 v-000137,v-000138")
+    v.add_argument("--reason", required=True)
+
     args = ap.parse_args()
-    {"invite": cmd_invite, "collect": cmd_collect, "tally": cmd_tally}[args.cmd](args)
+    {"invite": cmd_invite, "collect": cmd_collect, "tally": cmd_tally,
+     "void": cmd_void}[args.cmd](args)
 
 
 if __name__ == "__main__":
