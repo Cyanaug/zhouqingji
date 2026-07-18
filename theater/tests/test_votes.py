@@ -160,9 +160,107 @@ def test_collect_valid_and_invalid():
     print("[ok] cmd_collect 合法落盘 + 非法 vote 值拒收")
 
 
+def test_batch_ballot_trim_and_best_prompt():
+    """批量装箱（v1.5）：逐投票人裁剪选票——自己写的从票面摘掉而不是整箱排除；
+    prompt 里带加精（best）问题。"""
+    poem = _setup_corpus()
+    personas_all = [p["persona_id"] for p in R.load_personas()
+                    if not p.get("superseded_by")]
+    a1, a2 = personas_all[0], personas_all[1]
+    reads = [
+        {"read_id": "r-300", "poem_id": poem["id"], "context_mode": "blind",
+         "long_form": None, "reaction": "短评甲", "reader": {"persona_id": a1, "model": "m"},
+         "content_hash": poem["content_hash"]},
+        {"read_id": "r-301", "poem_id": poem["id"], "context_mode": "blind",
+         "long_form": None, "reaction": "短评乙", "reader": {"persona_id": a2, "model": "m"},
+         "content_hash": poem["content_hash"]},
+    ]
+    _write_reads(reads, "reads_batch.jsonl")
+    R.VOTES_DIR = TMP
+    R.VOTES = TMP / "votes_batch.jsonl"
+    if R.VOTES.exists():
+        R.VOTES.unlink()
+
+    out_dir = TMP / "invite_batch_out"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+
+    class _A:
+        targets = "r-300,r-301"
+        poem_ids = ""
+        fraction = 1.0
+        batch_size = 8
+        batch_chars = 4000
+        seed = 1
+        out = str(out_dir)
+
+    PV.cmd_invite(_A)
+    tasks = json.loads((out_dir / "batch.json").read_text(encoding="utf-8"))
+    by_voter = {t["voter"]["persona_id"]: t for t in tasks}
+    assert a1 in by_voter and a2 in by_voter, "作者只是被摘掉自己那条，不该整箱出局"
+    assert [x["read_id"] for x in by_voter[a1]["targets"]] == ["r-301"]
+    assert [x["read_id"] for x in by_voter[a2]["targets"]] == ["r-300"]
+    third = next(p for p in personas_all if p not in (a1, a2))
+    assert {x["read_id"] for x in by_voter[third]["targets"]} == {"r-300", "r-301"}
+    assert "加精" in by_voter[third]["prompt"] and '"best"' in by_voter[third]["prompt"]
+    print("[ok] 批量装箱逐投票人裁剪选票 + prompt 含加精")
+
+
+def test_collect_batch_best():
+    """batch collect（v1.5）：best 落盘为 vote="best"；模型把说明抄进值里也能解析；
+    指向箱外的 best 被忽略；旧统计自动忽略 best。"""
+    poem = _setup_corpus()
+    R.VOTES_DIR = TMP
+    R.VOTES = TMP / "votes_best.jsonl"
+    if R.VOTES.exists():
+        R.VOTES.unlink()
+
+    tdir, idir = TMP / "best_tasks", TMP / "best_inbox"
+    for d in (tdir, idir):
+        if d.exists():
+            shutil.rmtree(d)
+        d.mkdir(parents=True)
+
+    task = {"poem_id": poem["id"],
+            "targets": [{"read_id": "r-400"}, {"read_id": "r-401"}],
+            "voter": {"persona_id": "reader1", "model": None}, "prompt": "..."}
+    task2 = {"poem_id": poem["id"],
+             "targets": [{"read_id": "r-402"}],
+             "voter": {"persona_id": "reader2", "model": None}, "prompt": "..."}
+    (tdir / "task-001.json").write_text(json.dumps(task, ensure_ascii=False), encoding="utf-8")
+    (tdir / "task-002.json").write_text(json.dumps(task2, ensure_ascii=False), encoding="utf-8")
+    (idir / "task-001.response.json").write_text(json.dumps({
+        "model": "test-model",
+        "votes": [{"read_id": "r-400", "vote": "skip", "reason": ""},
+                  {"read_id": "r-401", "vote": "up", "reason": "原句"}],
+        "best": "r-401 —— 这一批里你最想顶上去…（模型把说明抄进来了）",
+    }, ensure_ascii=False), encoding="utf-8")
+    (idir / "task-002.response.json").write_text(json.dumps({
+        "model": "test-model",
+        "votes": [{"read_id": "r-402", "vote": "skip", "reason": ""}],
+        "best": "r-999999",
+    }, ensure_ascii=False), encoding="utf-8")
+
+    class _A:
+        tasks = str(tdir)
+        inbox = str(idir)
+        model = "fallback"
+
+    PV.cmd_collect(_A)
+    votes = R.load_comment_votes()
+    best = [v for v in votes if v["vote"] == "best"]
+    assert len(votes) == 4 and len(best) == 1, (len(votes), len(best))
+    assert best[0]["target_read_id"] == "r-401", "脏值里应解析出开头的 read_id"
+    assert R.vote_tally("r-401", votes) == {"up": 1, "down": 0, "skip": 0}, \
+        "旧统计（vote_tally）必须自动忽略 best"
+    print("[ok] batch collect：best 落盘 + 脏值解析 + 箱外 best 忽略 + 旧统计不受影响")
+
+
 if __name__ == "__main__":
     test_append_and_tally()
     test_votable_reads_filter()
     test_invite_dedupe_and_exclude_author()
     test_collect_valid_and_invalid()
+    test_batch_ballot_trim_and_best_prompt()
+    test_collect_batch_best()
     print("ALL PASS")

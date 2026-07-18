@@ -222,10 +222,74 @@ def test_plan_thread_collect():
     print("[ok] plan_thread.cmd_collect 引用校验/沉默分流/落盘/侧车元数据")
 
 
+def test_invite_tiering_and_priority():
+    """v1.5 分档邀请：一楼 prompt 无惯性段/stance 字段、深楼齐全且含诗正文；
+    优先回应权=楼主+被回击者、parent 作者不自回；已回帖者默认去重、--allow-repeat 放开。"""
+    poem = _setup_corpus()
+    personas_all = [p["persona_id"] for p in R.load_personas()
+                    if not p.get("superseded_by")]
+    p1, p2, p3 = personas_all[0], personas_all[1], personas_all[2]
+    root = {"read_id": "r-500", "poem_id": poem["id"],
+            "reader": {"persona_id": p1, "model": "m", "knows_诠释": False,
+                       "knows_date": False},
+            "context_mode": "blind", "thread_ref": None, "transport": "cc-subagent",
+            "score": 8.0, "reaction": "短评", "long_form": "根楼长评：灯火意象撑住了全诗。",
+            "content_hash": poem["content_hash"], "ts": "2026-01-01T00:00:00"}
+    f2 = dict(root, read_id="r-501", context_mode="thread", thread_ref="r-500",
+              score=None, long_form=None, reaction="二楼：我不觉得撑住了",
+              reader={"persona_id": p2, "model": "m", "knows_诠释": False,
+                      "knows_date": False})
+    f3 = dict(f2, read_id="r-502", thread_ref="r-501", reaction="三楼：同意二楼",
+              reader={"persona_id": p3, "model": "m", "knows_诠释": False,
+                      "knows_date": False})
+    _write_reads([root, f2, f3], "reads_invite.jsonl")
+
+    def run(parent, allow_repeat=False, sub="x"):
+        out_dir = TMP / f"invite_{parent}_{sub}"
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
+
+        class _A:
+            fraction = 1.0
+            exclude = ""
+            seed = 1
+            out = str(out_dir)
+        _A.parent = parent
+        _A.allow_repeat = allow_repeat
+        PT.cmd_invite(_A)
+        return json.loads((out_dir / "batch.json").read_text(encoding="utf-8"))
+
+    # 一楼（parent=root）：楼主不自回、已回过的 p2 去重、prompt 是广度档
+    tasks = run("r-500")
+    invited = {t["persona_id"] for t in tasks}
+    assert p1 not in invited, "楼主=parent 作者，不回自己的楼"
+    assert p2 not in invited, "p2 已回过 r-500，默认去重"
+    prompt = tasks[0]["prompt"]
+    assert "诗歌正文到此为止" in prompt, "一楼 prompt 必须带诗全文"
+    assert "关于会不会被说服" not in prompt, "一楼没有旧立场，不拼惯性段"
+    assert "stance_changed" not in prompt, "一楼回执不收 stance 字段"
+
+    # 深楼（parent=r-501）：优先回应权=楼主 p1；p2 不自回；p3 已回过 r-501 去重
+    tasks2 = run("r-501")
+    invited2 = {t["persona_id"] for t in tasks2}
+    assert p1 in invited2, "楼主有优先回应权"
+    assert p2 not in invited2 and p3 not in invited2
+    t_p1 = next(t for t in tasks2 if t["persona_id"] == p1)
+    assert t_p1["depth"] == 2
+    assert "关于会不会被说服" in t_p1["prompt"] and "stance_changed" in t_p1["prompt"]
+    assert "诗歌正文到此为止" in t_p1["prompt"]
+
+    # --allow-repeat：p3 可以再回 r-501
+    tasks3 = run("r-501", allow_repeat=True, sub="rep")
+    assert p3 in {t["persona_id"] for t in tasks3}
+    print("[ok] invite 分档 prompt / 优先回应权 / 不自回 / 去重与 --allow-repeat")
+
+
 if __name__ == "__main__":
     test_ancestor_chain_and_history()
     test_persona_sha1()
     test_ingest_thread_requires_valid_thread_ref()
     test_void_cascade()
     test_plan_thread_collect()
+    test_invite_tiering_and_priority()
     print("ALL PASS")

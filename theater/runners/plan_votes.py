@@ -72,6 +72,7 @@ def cmd_invite(args):
     random.seed(seed)
 
     batch_size = getattr(args, "batch_size", 8)
+    batch_chars = getattr(args, "batch_chars", 4000)
     tasks = []
 
     if batch_size <= 1:
@@ -108,7 +109,7 @@ def cmd_invite(args):
             for c in ptargets:
                 body = c.get("long_form") or c.get("reaction") or ""
                 if cur and (len(cur) >= batch_size
-                            or cur_chars + len(body) > args.batch_chars):
+                            or cur_chars + len(body) > batch_chars):
                     chunks.append(cur)
                     cur, cur_chars = [], 0
                 cur.append(c)
