@@ -356,19 +356,42 @@ THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
   "vote": "up 或 down —— 你认不认同你正在回复的这层楼本身说的（不是认不认同发帖人这个人）"
 }"""
 
+# 一楼（直接回楼主长评）没有"旧立场"可言——立场惯性是回复回复时才有的机制。
+# 一楼回执不收 stance 字段：实测 892 层里 depth=1 占 886、stance_changed 仅 5 例，
+# 对一楼要求表态立场只会产出噪音（2026-07-18 机制审查结论）。
+THREAD_RESPONSE_FORMAT_FIRST = """你的产出必须是一个 JSON 对象。
 
-def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floor):
+如果沉默：
+{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是"没什么可说"这种空话"}
+
+如果回复：
+{
+  "quote": "【接住的原句】的原文，逐字，用于核对",
+  "restate": "【我的转述】",
+  "reaction": "【回应】——只有这部分会被存档展示，不要带任何标签，两三句到几句话，像跟帖不像论文",
+  "long_form": null,
+  "vote": "up 或 down —— 你认不认同这篇长评本身说的（不是认不认同楼主这个人）"
+}"""
+
+
+def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floor,
+                        stanzas=None):
     """ancestor_floors 是 ancestor_chain() 的返回值（[root, ..., parent]，已含 parent）。
-    own_history 是 own_floor_history() 的返回值。"""
+    own_history 是 own_floor_history() 的返回值。
+    深楼（parent 本身是跟帖楼层）才拼立场惯性段和 stance 字段——一楼没有旧立场。"""
+    deep = len(ancestor_floors) > 1
     parts = [THREAD_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
     if persona.get("thread_priors"):
         # 立场惯性的真实来源：只在跟帖 prompt 里拼，盲读的 build_prompt 不读这个字段，
         # 避免"什么论证说服不了你"这类跟帖专属的价值倾向渗进盲读打分（2026-07-17 用户指出）。
         parts += ["", "—— 你在讨论时的脾气 ——", persona["thread_priors"]]
-    parts += ["", "—— 这首诗（讨论背景）——", f"《{poem['title']}》"]
+    # 诗正文必须在场：回帖人不能只靠楼主转述认识这首诗（2026-07-18 用户拍板补上；
+    # 此前只给标题是施工疏漏，盲读/点赞的 prompt 一直都带全文）。
+    parts += ["", "—— 这首诗（讨论对象，全文）——", f"《{poem['title']}》",
+              "", poem_text(poem, stanzas), "", "—— 诗歌正文到此为止 ——"]
     root = ancestor_floors[0]
     parts += ["", "—— 楼主长评（开楼帖）——", floor_text(root)]
-    if len(ancestor_floors) > 1:
+    if deep:
         parts += ["", "—— 沿途楼层（从楼主往下，一路到你要回复的这层）——"]
         for r in ancestor_floors[1:]:
             parts += [f"[{r['read_id']} · {r['reader']['persona_id']}]", floor_text(r), ""]
@@ -378,8 +401,11 @@ def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floo
             parts += [f"[{r['read_id']}]", floor_text(r), ""]
     parts += ["", f"—— 现在，请回复这一层 [{parent_floor['read_id']} · "
                   f"{parent_floor['reader']['persona_id']}] ——", floor_text(parent_floor)]
-    parts += ["", SILENCE_BLOCK, "", POSITION_INERTIA_BLOCK, "", QUOTE_BLOCK,
-              "", THREAD_RESPONSE_FORMAT]
+    parts += ["", SILENCE_BLOCK]
+    if deep:
+        parts += ["", POSITION_INERTIA_BLOCK]
+    parts += ["", QUOTE_BLOCK,
+              "", THREAD_RESPONSE_FORMAT if deep else THREAD_RESPONSE_FORMAT_FIRST]
     return "\n".join(parts)
 
 
@@ -523,14 +549,18 @@ BATCH_VOTE_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象，votes 
     {"read_id": "r-xxxxxx", "vote": "up",   "reason": "抄下你愿意背书的那句原话"},
     {"read_id": "r-yyyyyy", "vote": "down",  "reason": "点名露馅的那句"},
     {"read_id": "r-zzzzzz", "vote": "skip",  "reason": ""}
-  ]
+  ],
+  "best": "r-xxxxxx —— 这一批里你最想顶上去让更多人看到的一条（加精）。必须从上方 read_id 里选一条；只有当这几条真的全都平平无奇、没有一条值得多看一眼时，才允许填 null"
 }
 两步漏斗见上（默认落 skip，up/down 都要挣）：先看硬伤——分数与理由脱节/对不上诗/套话才降 down；没硬伤先落 skip；只有抄得出「只对这首诗成立」的原句，才把它抬成 up。
-逐条独立判断，不要给整批一个统一态度——这一批里 skip 通常该是多数，出现清一色 up 或 up/down 压过 skip 几乎一定是没沉住气；read_id 必须原样照抄，不能省略或改写。"""
+逐条独立判断，不要给整批一个统一态度——这一批里 skip 通常该是多数，出现清一色 up 或 up/down 压过 skip 几乎一定是没沉住气；read_id 必须原样照抄，不能省略或改写。
+加精（best）跟逐条投票是两回事：逐条是"有没有硬伤/挣没挣到 up"的绝对判断，加精是"这几条放在一起，谁最扛得住"的相对判断——就算你逐条全投了 skip，通常也挑得出一条相对最实的；真分不出高下再填 null，别把 null 当第三个 skip 用。"""
 
 
 def build_batch_vote_prompt(poem, persona, target_reads, stanzas=None):
-    """批量投票：一次读 N 条评论，逐一判断——减少任务数，同时能做横向比较。"""
+    """批量投票：一次读 N 条评论，逐一判断——减少任务数，同时能做横向比较。
+    顺带一个「加精」相对判断：绝对判断有正向偏置（实测 up 占八成），
+    相对比较不受这个偏置影响，是批量模式白捡的区分度信号（2026-07-18 机制审查）。"""
     parts = [VOTE_BASELINE, "", "—— 你是谁 ——", persona["persona"]]
     parts += ["", "—— 这首诗 ——", f"《{poem['title']}》", "", poem_text(poem, stanzas), ""]
     parts += [f"—— 需要你判断的 {len(target_reads)} 条评论（逐一给出判断）——"]
@@ -742,20 +772,24 @@ def cmd_ingest(args):
             "ts": r.get("ts") or time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             "content_hash": r["content_hash"],
         }
-        lines.append(json.dumps(rec, ensure_ascii=False))
+        lines.append(rec)
         existing_ids.add(rec["read_id"])  # 同批次可续链（root+多层一起 ingest 时）
 
-    if lines:
-        READS.parent.mkdir(parents=True, exist_ok=True)
-        with READS.open("a", encoding="utf-8") as f:
-            for ln in lines:
-                f.write(ln + "\n")
-    print(f"落盘 {len(lines)} 条 → {READS}")
+    # all-or-nothing：有任何一条坏记录就整批拒收、一条不落。
+    # 旧行为是"好的先落盘再 exit(1)"，会留下两种烂摊子：跟帖侧车 meta 没写成的孤儿楼层、
+    # 以及 inbox 回执未归档时重跑 collect 的重复入库（2026-07-18 机制审查修复）。
     if errors:
-        print(f"拒收 {len(errors)} 条：", file=sys.stderr)
+        print(f"拒收整批（{len(errors)} 条有错，未落盘任何记录）：", file=sys.stderr)
         for e in errors:
             print("  " + e, file=sys.stderr)
         sys.exit(1)
+    if lines:
+        READS.parent.mkdir(parents=True, exist_ok=True)
+        with READS.open("a", encoding="utf-8") as f:
+            for rec in lines:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"落盘 {len(lines)} 条 → {READS}")
+    return lines
 
 
 def main():

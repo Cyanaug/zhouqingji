@@ -492,5 +492,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 /* 赞/踩：▲青绿=赞、▼赭红=踩，颜色+方向+字三重区分 */
 .vup { color: var(--accent-deep); font-weight: 600; }
 .vdown { color: var(--warm); font-weight: 600; }
+/* 加精：相对判断的正向信号，比 ▲ 更有区分度，给足视觉分量 */
+.vbest { color: #a8842c; font-weight: 700; }
 /* 顺势票：弱信号，灰显、小一号，跟主动票拉开层级 */
 .vpig { color: var(--ink-3); font-size: .82em; margin-left: .3em; }

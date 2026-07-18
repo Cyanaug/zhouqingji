@@ -11,6 +11,8 @@
 用法：
   python plan_votes.py invite --poem-ids zq-0001,zq-0002 [--fraction 0.3] [--seed 0] [--out DIR]
                                             # 对这些诗的全部盲读评论（短评+长评）发起投票
+                                            # 默认批量装箱（≤8 条/箱、4000 字预算），回执
+                                            # 顺带一条「加精」（best）——相对判断，见 runner.py
   python plan_votes.py invite --targets r-000123,r-000456 [--fraction 0.3] [--out DIR]
                                             # 直接指定要投票的具体评论（含跟帖楼层也可）
   python plan_votes.py collect --tasks DIR/tasks --inbox DIR/inbox --model M
@@ -20,6 +22,7 @@
 import argparse
 import json
 import random
+import re
 import sys
 import time
 from collections import defaultdict
@@ -68,11 +71,11 @@ def cmd_invite(args):
     seed = args.seed if args.seed else int(time.time())
     random.seed(seed)
 
-    batch_size = getattr(args, "batch_size", 1)
+    batch_size = getattr(args, "batch_size", 8)
     tasks = []
 
     if batch_size <= 1:
-        # 原有逻辑：每条评论独立一个任务
+        # 逐条模式（退化用法）：每条评论独立一个任务
         for t in targets:
             poem = poems.get(t["poem_id"])
             if poem is None:
@@ -92,31 +95,50 @@ def cmd_invite(args):
                     "prompt": prompt,
                 })
     else:
-        # 批量模式：同一首诗的评论分组后按 batch_size 切块，一个任务读 N 条
+        # 批量模式：同一首诗的评论按字符预算装箱——短评多的箱能装到 batch_size 上限，
+        # 长评多的箱自动缩小。省钱的逻辑是摊薄固定开销，但箱子太大注意力会稀释
+        # （逐条判断变敷衍、read_id 抄错、挑最佳只记得头尾），字符预算让两头自动平衡。
         by_poem = defaultdict(list)
         for t in targets:
             if t["poem_id"] in poems:
                 by_poem[t["poem_id"]].append(t)
         for poem_id, ptargets in by_poem.items():
             poem = poems[poem_id]
-            for i in range(0, len(ptargets), batch_size):
-                chunk = ptargets[i:i + batch_size]
-                chunk_rids = {c["read_id"] for c in chunk}
-                excluded = {c["reader"]["persona_id"] for c in chunk}
-                already = {pid for (rid, pid) in voted if rid in chunk_rids}
-                candidates = [pid for pid in personas
-                              if pid not in excluded and pid not in already]
-                random.shuffle(candidates)
-                n = max(1, round(len(candidates) * args.fraction)) if candidates else 0
-                for pid in candidates[:n]:
+            chunks, cur, cur_chars = [], [], 0
+            for c in ptargets:
+                body = c.get("long_form") or c.get("reaction") or ""
+                if cur and (len(cur) >= batch_size
+                            or cur_chars + len(body) > args.batch_chars):
+                    chunks.append(cur)
+                    cur, cur_chars = [], 0
+                cur.append(c)
+                cur_chars += len(body)
+            if cur:
+                chunks.append(cur)
+            for chunk in chunks:
+                voters = list(personas)
+                random.shuffle(voters)
+                quota = max(1, round(len(voters) * args.fraction))
+                made = 0
+                for pid in voters:
+                    if made >= quota:
+                        break
+                    # 逐投票人裁剪选票：自己写的、已投过的从这个人的票面上摘掉，
+                    # 而不是把这个人整箱排除（旧逻辑排除面过宽，补票时覆盖会歪）。
+                    ballot = [c for c in chunk
+                              if c["reader"]["persona_id"] != pid
+                              and (c["read_id"], pid) not in voted]
+                    if not ballot:
+                        continue
                     persona = personas[pid]
-                    prompt = R.build_batch_vote_prompt(poem, persona, chunk, stanzas)
+                    prompt = R.build_batch_vote_prompt(poem, persona, ballot, stanzas)
                     tasks.append({
                         "poem_id": poem_id,
-                        "targets": [{"read_id": c["read_id"]} for c in chunk],
+                        "targets": [{"read_id": c["read_id"]} for c in ballot],
                         "voter": {"persona_id": pid, "model": None},
                         "prompt": prompt,
                     })
+                    made += 1
 
     out = Path(args.out) if args.out else \
         BATCHES / f"votes-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -169,6 +191,23 @@ def cmd_collect(args):
             if bad:
                 print(f"  {tf.stem}: {len(bad)} 条无效（read_id 不对或 vote 非法）：{bad}",
                       file=sys.stderr)
+            # 加精（相对判断，见 build_batch_vote_prompt）：best 是本箱一条 read_id 或 null。
+            # 模型偶尔会把格式说明整段抄进值里，只认开头的 read_id。
+            best_raw = resp.get("best")
+            if isinstance(best_raw, str) and best_raw.strip():
+                m = re.match(r"\s*(r-\d+)", best_raw)
+                brid = m.group(1) if m else ""
+                if brid in valid_rids:
+                    new_votes.append({
+                        "poem_id": t["poem_id"],
+                        "target_read_id": brid,
+                        "voter": {"persona_id": voter_id, "model": model},
+                        "vote": "best",
+                        "reason": "",
+                    })
+                else:
+                    print(f"  {tf.stem}: best 指向箱外或无法解析（{best_raw[:40]}），忽略",
+                          file=sys.stderr)
         else:
             # 逐条模式（原有）
             vote = resp.get("vote")
@@ -224,10 +263,12 @@ def cmd_tally(args):
     for rid, s in rows:
         r = reads_by_id.get(rid, {})
         d, p = s["direct"], s["piggyback"]
+        best_n = sum(1 for v in by_target[rid] if v.get("vote") == "best")
         pid_poem = f"[{r.get('poem_id', '?')}] " if not args.poem_id else ""
         pig = f"  〔顺势 ▲{p['up']} ▼{p['down']}〕" if (p["up"] or p["down"]) else ""
+        star = f" ⭐{best_n}" if best_n else ""
         print(f"{pid_poem}{rid}（{r.get('reader', {}).get('persona_id', '?')}）："
-              f"主动 ▲赞{d['up']} ▼踩{d['down']} 跳过{d['skip']}{pig}  "
+              f"主动 ▲赞{d['up']} ▼踩{d['down']} 跳过{d['skip']}{star}{pig}  "
               f"{(r.get('reaction') or '')[:40]}")
 
 
@@ -243,12 +284,14 @@ def main():
 
     i = sub.add_parser("invite")
     i.add_argument("--poem-ids", dest="poem_ids", default="",
-                    help="逗号分隔 poem_id：对这些诗「无长评」的短评发起投票")
+                    help="逗号分隔 poem_id：对这些诗的全部盲读评论（短评+长评）发起投票")
     i.add_argument("--targets", default="",
-                    help="逗号分隔 read_id：直接指定要投票的短评（优先于 --poem-ids）")
+                    help="逗号分隔 read_id：直接指定要投票的评论（优先于 --poem-ids）")
     i.add_argument("--fraction", type=float, default=0.3, help="邀请的读者比例")
-    i.add_argument("--batch-size", dest="batch_size", type=int, default=1,
-                   help="批量模式：一个任务打包几条评论（默认 1=逐条，建议 3-5）")
+    i.add_argument("--batch-size", dest="batch_size", type=int, default=8,
+                   help="批量装箱上限：一个任务最多读几条评论（默认 8；1=逐条退化模式）")
+    i.add_argument("--batch-chars", dest="batch_chars", type=int, default=4000,
+                   help="每箱评论正文的字符预算（默认 4000）：长评多的箱自动装得少")
     i.add_argument("--seed", type=int, default=0, help="0=用当前时间，其他值可复现")
     i.add_argument("--out", default="")
 

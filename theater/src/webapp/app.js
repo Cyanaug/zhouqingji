@@ -317,16 +317,21 @@ function renderRecentInto() {
 /* ---------- 跟帖（thread）：与盲读是两种信号，只读展示，不进榜单/校准 ---------- */
 
 /* 赞/踩统一视觉：▲青绿=赞、▼赭红=踩（方向+颜色+字三重区分，emoji 太难分辨）。
-   主动票（点赞模式）显著；顺势票（跟帖带来，几乎恒为 up 的弱信号）灰显、加「顺势」前缀分开。 */
+   主动票（点赞模式）显著；顺势票（跟帖带来，几乎恒为 up 的弱信号）灰显、加「顺势」前缀分开。
+   ⭐加精：批量投票时"这一批里最扛得住的一条"的相对判断——▲ 普遍偏高（实测八成 up），
+   ⭐ 才是有区分度的正向信号，放在最前面。 */
 function voteBadge(vt) {
   if (!vt) return "";
-  const up = vt.up || 0, dn = vt.down || 0, pu = vt.pg_up || 0, pd = vt.pg_down || 0;
-  if (!up && !dn && !pu && !pd) return "";
+  const up = vt.up || 0, dn = vt.down || 0, bs = vt.best || 0,
+        pu = vt.pg_up || 0, pd = vt.pg_down || 0;
+  if (!up && !dn && !bs && !pu && !pd) return "";
+  const star = bs
+    ? `<span class="vbest" title="加精 ×${bs}：同批横向比较里被评为最扛得住的一条——比普遍偏高的 ▲ 更有区分度">⭐${bs}</span>` : "";
   const main = (up || dn)
     ? `<span class="vup">▲${up}</span> <span class="vdown">▼${dn}</span>` : "";
   const pig = (pu || pd)
     ? `<span class="vpig" title="跟帖顺势票——回复者几乎总认同自己选来回复的楼层，弱信号，不计入撤评判断">顺势 ▲${pu}${pd ? " ▼" + pd : ""}</span>` : "";
-  return `<span class="chip">${main}${main && pig ? " " : ""}${pig}</span>`;
+  return `<span class="chip">${[star, main, pig].filter(Boolean).join(" ")}</span>`;
 }
 
 function threadChildrenMap() {

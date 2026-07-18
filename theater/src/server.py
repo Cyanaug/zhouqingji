@@ -229,32 +229,35 @@ def _iter_votes():
 
 def load_vote_tally():
     """点赞模式（plan_votes.py 写）的只读聚合视图：
-    {read_id: {up, down, skip, pg_up, pg_down}}。up/down/skip 只数「主动票」——作者
+    {read_id: {up, down, skip, best, pg_up, pg_down}}。up/down/skip 只数「主动票」——作者
     据此判断要不要手删短评；pg_* 是跟帖顺势票，几乎恒为 up 的弱信号，分开列，不混入撤评判断。
-    不是排名指标，纯展示。"""
+    best 是「加精」——批量投票时"这几条里最扛得住的一条"的相对判断；绝对判断有正向
+    偏置（实测 up 占八成），加精不受它影响，是真正有区分度的正向信号。不是排名指标，纯展示。"""
     tally = {}
     for v in _iter_votes():
         t = tally.setdefault(v["target_read_id"],
-                             {"up": 0, "down": 0, "skip": 0, "pg_up": 0, "pg_down": 0})
+                             {"up": 0, "down": 0, "skip": 0, "best": 0,
+                              "pg_up": 0, "pg_down": 0})
         vote = v.get("vote")
         if v.get("source") == "piggyback":
             if vote == "up":
                 t["pg_up"] += 1
             elif vote == "down":
                 t["pg_down"] += 1
-        elif vote in ("up", "down", "skip"):
+        elif vote in ("up", "down", "skip", "best"):
             t[vote] += 1
     return tally
 
 
 def load_voter_votes():
     """每一张个人票的方向索引：{target_read_id: {persona_id: "up"/"down"/"skip"}}。
-    供跟帖页面查询「这个楼层的作者对 parent 投了什么票」。"""
+    供跟帖页面查询「这个楼层的作者对 parent 投了什么票」。
+    加精（best）不是方向票，不入此索引——否则会覆盖同一人对同一目标的 up/down。"""
     idx = {}
     for v in _iter_votes():
         pid = v.get("voter", {}).get("persona_id")
         vote = v.get("vote")
-        if pid and vote:
+        if pid and vote in ("up", "down", "skip"):
             idx.setdefault(v["target_read_id"], {})[pid] = vote
     return idx
 

@@ -34,39 +34,48 @@ for r in lf: print(r['read_id'], r['poem_id'], r['reader']['persona_id'], r['lon
 ## 2. 开楼（第一层）/ 接楼（后续层）
 
 ```
-# 第一次：以某条长评为根开楼
+# 第一次：以某条长评为根开楼（广度档）
 python plan_thread.py invite --parent <长评的read_id> --fraction 0.5 \
     --out batches/thread-<read_id>-<批次标识>
 
-# 后续层：对某条已有楼层继续接楼
-python plan_thread.py invite --parent <子楼的read_id> --fraction 0.5 \
+# 后续层：对某条已有楼层继续接楼（深度档，人少而精）
+python plan_thread.py invite --parent <子楼的read_id> --fraction 0.25 \
     --out batches/thread-<root_id>-r<N>
+
+# 不知道接哪层？让它提案（只打印候选清单和现成命令，不派发）
+python plan_thread.py nextround [--root <root_id>] [--top 3]
 ```
 
 参数说明：
 - `--parent`：要接的楼层 read_id（派发方指定，v0 不做读者自选）
-- `--fraction 0.5`：邀请比例；根楼作者（楼主）永远额外在列，不受此影响
+- `--fraction`：邀请比例。广度档（一楼）0.5 铺场；深度档（2 级起）0.25 上下
+- 优先回应权自动保障：楼主 + 被 parent 回击那层楼的作者永远在邀请名单里；parent 自己的作者不邀（不回自己的楼）
+- 已回过这层楼的人默认不重复邀请（防顺势票重复计）；要重邀显式加 `--allow-repeat`
 - `--exclude a,b`：排除某些 persona_id（可选）
 
-任务生成后打印任务数和祖先链深度，向用户确认再派发。
+任务生成后打印任务数、祖先链深度和档位提示，向用户确认再派发。
+
+**分档只谈贵贱、不预设模型**（各人手头最便宜的通道不一样）：
+- 广度档（一楼）：任务多、上下文短，用你手头最便宜的通道。一楼 prompt 不含立场惯性段、回执无 stance 字段——一楼没有旧立场可言。
+- 深度档（2 级起）：任务少、上下文长、要接得住论点，用你手头更强的通道，别心疼这几个任务。立场惯性、自己的发言历史等全套机械只在这档启用。
 
 ## 3. 派发
 
-`poem-reader` 子代理专为盲读设计，**不适用于跟帖任务**。用以下两种方式之一：
+`poem-reader` 子代理专为盲读设计，**不适用于跟帖任务**。跟帖通道（按当时哪个便宜/哪个强用哪个，不预设）：
 
-### 方式 A：CC 通用子代理（推荐）
+### 方式 A：CC 轻量子代理 task-runner
 
-用 Agent 工具，`subagent_type: "claude"`，`model: "haiku"`，并行 15–20 个为一波：
+用 Agent 工具，`subagent_type: "task-runner"`（只带 Read+Write，起步开销约为全工具子代理的 1/4；agent 定义新建/修改后要**新会话**才派得出去），模型按批次/档位指定，并行 15–20 个为一波：
 
 ```
-读 <仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt 的全部内容，
-按其中指示产出 JSON，写入 <仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json。
-model 字段填 claude-haiku-4-5。
+PROMPT 文件：<仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt
+RESPONSE 输出文件：<仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json
+回执 model 字段填：<模型 ID>
 ```
 
-### 方式 B：hy3 / CodeBuddy 等外部工具
+### 方式 B：hy3 / CodeBuddy / agy 等外部 CLI
 
-每个 task-NNN.prompt.txt 原样喂给 hy3（不要改写、不要摘要）。
+每个 task-NNN.prompt.txt 原样喂给外部工具（不要改写、不要摘要）。agy 注意：无结构化输出、退出码不可信，提示词里要求"只输出这个 JSON、不要任何别的话"，回来自行解析校验。
 
 **正常回复回执格式**：
 ```json
@@ -93,9 +102,10 @@ model 字段填 claude-haiku-4-5。
 
 字段说明：
 - `quote`：必须能在 parent 原文里逐字找到，否则 collect 静默拒绝并移入 rejected/
-- `stance_changed`：这次回复过程中自己的立场有没有被说服改变（不是"认不认同楼主"）
+- `stance_changed` / `stance_note`：**仅深度档（2 级起）**——这次回复过程中自己的立场有没有被说服改变（不是"认不认同楼主"）。一楼的 prompt 不含这两个字段，回执缺省即可
 - `vote`：`"up"` / `"down"` / `null`——对 parent 楼层的顺势投一票；null 或缺字段表示跳过
 - `model` 填底层真实模型 ID，不是工具名（hy3/codebuddy 是工具名）
+- 2026-07-18 起跟帖 prompt 含诗全文（此前只给标题是施工疏漏）——回执若声称"看不到诗"说明拿到了旧批次任务文件，重新 invite 生成
 
 ## 3c. 质检（collect 之前，必做）
 
