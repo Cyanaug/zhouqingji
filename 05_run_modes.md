@@ -71,7 +71,7 @@
 2. **出榜单** → `calibrate.py`，看新覆盖下榜单怎么动。
 3. **筛质量**（可选）→ `/dispatch-votes` 对可疑批次投票，`tally --worst` 看最该撤的，撤评。
 4. **掘深度**（偶尔）→ 挑一两首有好长评的诗，`/dispatch-thread` 开一场沙龙。
-5. **看现状** → `python theater/runners/stats.py` 或直接开前端（`python theater/src/server.py` → localhost:8737）。
+5. **看现状** → 直接开前端最直观（`python theater/src/server.py` → localhost:8737）；要单看覆盖账用 `python theater/runners/runner.py coverage`（加 `--full` 看每首诗每人设的明细）。
 
 ---
 
