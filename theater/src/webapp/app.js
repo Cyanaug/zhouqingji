@@ -370,10 +370,11 @@ function renderThread(rootId) {
     const stanceTag = m.stance_changed === true
       ? `<span class="chip warm">改变了判断${lean}</span>`
       : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
-    // 缩进封顶：深楼不再复利式推出屏；左边框连线 + 级数标记接手表达嵌套
-    const indent = Math.min(depth, 5) * 1.1;
+    // 缩进封顶：深楼不再复利式推出屏；逐层描边配色 + 级数标记接手表达嵌套
+    const indent = Math.min(depth, 6) * 1.5;
+    const dcls = `fl-d${Math.min(depth, 6)}`;
     return `
-      <div class="thread-floor" style="margin-left:${indent}em">
+      <div class="thread-floor ${dcls}" style="margin-left:${indent}em">
         <p class="floor-meta"><span class="floor-depth">${depth}级</span>
           <b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
           <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>

@@ -390,8 +390,22 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
   border-left: 2px solid var(--panel-2); padding: .6em 0 .6em 1em;
   margin: .8em 0;
 }
-.thread-floor.thread-root { border-left-color: var(--accent-deep); }
+.thread-floor.thread-root { border-left-color: var(--accent-deep); border-left-width: 3px; }
 .thread-floor .floor-meta { font-size: .82rem; color: var(--ink-3); margin-bottom: .3em; }
+/* 逐层描边配色：一组与暖纸主题同调的低饱和大地色，相邻层永远可分。
+   左边框 + 级数标记同色，缩进封顶后深楼仍一眼看清在第几层。 */
+.thread-floor.fl-d1 { border-left-color: #2f6d62; } /* 青瓷绿 */
+.thread-floor.fl-d2 { border-left-color: #a4593d; } /* 赭陶红 */
+.thread-floor.fl-d3 { border-left-color: #8a7b32; } /* 苍黄 */
+.thread-floor.fl-d4 { border-left-color: #4a6d8c; } /* 黛蓝 */
+.thread-floor.fl-d5 { border-left-color: #855a78; } /* 紫檀 */
+.thread-floor.fl-d6 { border-left-color: #6e6557; } /* 深墨（6 级及更深封顶同色） */
+.fl-d1 .floor-depth { color: #2f6d62; border-color: #2f6d62; }
+.fl-d2 .floor-depth { color: #a4593d; border-color: #a4593d; }
+.fl-d3 .floor-depth { color: #8a7b32; border-color: #8a7b32; }
+.fl-d4 .floor-depth { color: #4a6d8c; border-color: #4a6d8c; }
+.fl-d5 .floor-depth { color: #855a78; border-color: #855a78; }
+.fl-d6 .floor-depth { color: #6e6557; border-color: #6e6557; }
 /* 级数标记：缩进封顶后仍能一眼看出嵌套第几层 */
 .floor-depth {
   display: inline-block; font-size: .68rem; color: var(--ink-3);
