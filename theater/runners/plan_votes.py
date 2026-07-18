@@ -197,23 +197,31 @@ def cmd_tally(args):
     reads_by_id = {r["read_id"]: r for r in R.load_reads()}
     by_target = defaultdict(list)
     for v in votes:
-        if v["poem_id"] == args.poem_id:
-            by_target[v["target_read_id"]].append(v)
+        if args.poem_id and v["poem_id"] != args.poem_id:
+            continue
+        by_target[v["target_read_id"]].append(v)
     if not by_target:
-        print("这首诗还没有投票记录")
+        print("这首诗还没有投票记录" if args.poem_id else "还没有任何投票记录")
         return
     # 主动票（点赞模式）在前——撤不撤评看这个；顺势票（跟帖带来）弱信号，括号里附注
     rows = []
     for rid in by_target:
         s = R.vote_tally_split(rid, votes)
         rows.append((rid, s))
-    # 按主动票的净认同（up-down）升序：最该考虑撤下的排最前
-    rows.sort(key=lambda x: x[1]["direct"]["up"] - x[1]["direct"]["down"])
+    # 按主动票的净认同（up-down）升序：最该考虑撤下的排最前。
+    # 只有主动票才排序（顺势票是弱信号）；无主动票的目标沉底、净值记 0。
+    rows.sort(key=lambda x: (x[1]["direct"]["up"] - x[1]["direct"]["down"],
+                             -(x[1]["direct"]["up"] + x[1]["direct"]["down"])))
+    if args.worst:
+        # 全集撤评总览：只留有主动票的、按最该撤在前，取前 N 条
+        rows = [r for r in rows if (r[1]["direct"]["up"] or r[1]["direct"]["down"]
+                                    or r[1]["direct"]["skip"])][:args.worst]
     for rid, s in rows:
         r = reads_by_id.get(rid, {})
         d, p = s["direct"], s["piggyback"]
+        pid_poem = f"[{r.get('poem_id', '?')}] " if not args.poem_id else ""
         pig = f"  〔顺势 ▲{p['up']} ▼{p['down']}〕" if (p["up"] or p["down"]) else ""
-        print(f"{rid}（{r.get('reader', {}).get('persona_id', '?')}）："
+        print(f"{pid_poem}{rid}（{r.get('reader', {}).get('persona_id', '?')}）："
               f"主动 ▲赞{d['up']} ▼踩{d['down']} 跳过{d['skip']}{pig}  "
               f"{(r.get('reaction') or '')[:40]}")
 
@@ -245,7 +253,10 @@ def main():
     c.add_argument("--model", default="")
 
     t = sub.add_parser("tally")
-    t.add_argument("--poem-id", dest="poem_id", required=True)
+    t.add_argument("--poem-id", dest="poem_id", default="",
+                   help="只看这首诗；省略=全集")
+    t.add_argument("--worst", type=int, default=0,
+                   help="全集撤评总览：按主动净认同升序取前 N 条（最该撤的在前）")
 
     v = sub.add_parser("void")
     v.add_argument("--vote-ids", dest="vote_ids", required=True,
