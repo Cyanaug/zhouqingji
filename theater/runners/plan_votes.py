@@ -213,9 +213,14 @@ def cmd_tally(args):
     rows.sort(key=lambda x: (x[1]["direct"]["up"] - x[1]["direct"]["down"],
                              -(x[1]["direct"]["up"] + x[1]["direct"]["down"])))
     if args.worst:
-        # 全集撤评总览：只留有主动票的、按最该撤在前，取前 N 条
-        rows = [r for r in rows if (r[1]["direct"]["up"] or r[1]["direct"]["down"]
-                                    or r[1]["direct"]["skip"])][:args.worst]
+        # 全集撤评总览：只留有主动票的、按最该撤在前，取前 N 条。
+        # 已撤评（curation hidden）的评论从总览里剔除——它们已经处理过，
+        # 留在榜上只会占位、把还没处理的挤下去。
+        hidden = R.hidden_read_ids()
+        rows = [r for r in rows
+                if r[0] not in hidden
+                and (r[1]["direct"]["up"] or r[1]["direct"]["down"]
+                     or r[1]["direct"]["skip"])][:args.worst]
     for rid, s in rows:
         r = reads_by_id.get(rid, {})
         d, p = s["direct"], s["piggyback"]
