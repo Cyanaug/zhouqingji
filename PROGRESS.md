@@ -2,6 +2,20 @@
 
 > 每完成一步记一条：做了什么 / 下一步。倒序（最新在上）。
 
+## 2026-07-18 · 第三阶段 A/B/C 验证跑（无头 agy / Gemini flash，~49 次）
+
+**背景：** hy3 限额，作者特许改走无头 agy（`agy -p "<prompt>" --model "Gemini 3.5 Flash (Medium)" --sandbox < /dev/null`，见 DISPATCH-SPEC）。写了并发驱动 `scratchpad/agy_dispatch.py`：4 路并发调 agy、我接 stdout 抽 JSON 校验后写回执——中间无脚本，`simulate_reads.py` 式伪造structurally不可能。
+
+**A 深链跟帖（测深度，最大空洞）** `thread-deep-0166`：zq-0166 一条长评做楼主，逐轮串行 root→translator-eyes→chronologist→R3，达 **depth-4**，祖先链仅 1624 字符（远低于 6000 封顶，截断无虞）。**共 4 次 stance_changed=true**（此前全项目 1/776）：R2 楼主被"不可译性"论说服翻转，R3 三人被"写作期声带损伤"传记论证全数翻转。**立场惯性/说服机器验证有效，深处质量无退化。** ⚠ 警号：R1=0/3、R3=3/3 翻转——Gemini flash 偏顺从，深链有级联成"全体倒向最新强论证"的风险，硬先验 persona 或更强模型可能更扛。
+
+**B 弱评论点赞对照（证区分度）** `votes-weakctrl-01`：12 条弱/平庸短评×3 票=36。结论比预想好：**up/down 轴工作准确**——r-003162 一致 down(3/3)，三人独立点名"全盘否定却打 3.5、论证与分数脱节"，正是"论证撑不撑得起这个分"要抓的。**但 skip 档彻底死了（0 skip）**，模型非上即下、拒绝"空泛但不错"的中间档，整体仍偏松。这是点赞提示词下一步要修的唯一短板。
+
+**C 撤评闭环** ：识别+撤评半环已完全工具化并跑通——`tally --worst` 定位 → 读 down 理由核实 → curation hidden → 退出可投票池/展示（r-003162 演示，可逆）。「触发长评」半环**非自动触发**，是作者撤评后手动补读（A/B 已证派发管线可用）。
+
+**踩坑：** r-000380 经 `--targets` 误入 B（它是 poetry-editor 旧版折叠归档读，`--targets` 不过滤 hidden）；覆盖其 curation reason 后已 git 还原，4 张误票 void。
+
+**下一步：** 修点赞提示词的 skip 档（让"四平八稳换首诗照样成立"的评论真正落 skip，而非被抬成 up）；`tally --worst` 可加"跳过已 hidden"；深链可换更强模型或硬先验 persona 再验立场惯性抗性。
+
 ## 2026-07-18 · hy3 批次入库 + 顺势票信号隔离（点赞区分度）
 
 **做了什么：** hy3 跑的两个限额未跑完的批次抽脚本核验后入库——(1) 点赞批 `votes-highyield-b5-01`（3146 任务只落 143，跨 4.6 小时串行、无同秒伪造签名）→ 594 张主动票（up455/skip122/down17，用新「换首诗还成不成立」提示词，比旧版 137up/1down 的塌缩已有真实区分）；(2) 跟帖 `thread-breadth-scale-r-*`（350 目录 5600 任务只落 856，243 目录颗粒无收）→ 776 楼 + 80 沉默，引用校验 0 拒（干净，无 r000039 式伪造）。**发现并修的设计问题：顺势票塌缩到 97% up（754up/22down），且落在盲读评论上，会污染作者「据票撤评」的信号。** 已给顺势票打 `source:"piggyback"` 标（`plan_thread.cmd_collect`），新增 `runner.vote_tally_split`，`plan_votes.py tally` 改列「主动票 / 顺势票」两栏并按主动净认同升序（最该撤的排最前）、弃用难辨的 👍👎 改 ▲赞/▼踩；`server.load_vote_tally` 输出加 `pg_up/pg_down`，`app.js voteBadge` 主动票显著、顺势票灰显小一号加「顺势」前缀（`.vpig`）。三份测试 + 全量 `py_compile` 绿。reads.jsonl 现 4280（blind 3397 / thread 883）；votes 1729（direct 953 / piggyback 776）。
