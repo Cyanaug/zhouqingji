@@ -66,12 +66,48 @@ main {
 main.wide { width: min(58rem, 94vw); }
 
 .site-foot {
+  position: relative;
   text-align: center; padding: 2rem 0 2.4rem;
   color: var(--ink-3); font-size: .82rem; letter-spacing: .25em;
   border-top: 1px solid var(--line);
 }
+/* 版本号绝对定位靠右，诗句仍独立真居中、不被挤偏 */
+.foot-ver {
+  position: absolute; right: max(1.5rem, 6vw); top: 50%; transform: translateY(-50%);
+  margin: 0; letter-spacing: .1em; opacity: .6; font-size: .92em;
+}
+@media (max-width: 520px) {
+  /* 窄屏怕与居中句子撞，落回句子下方、居中淡显 */
+  .site-foot { position: static; }
+  .foot-ver {
+    position: static; transform: none; display: block;
+    margin-top: .5em; text-align: center;
+  }
+}
 
 .loading { color: var(--ink-3); text-align: center; padding: 4rem 0; }
+
+/* 页内确认框：非原生 confirm，暖纸风、居中遮罩 */
+.modal-back {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(43, 38, 32, .38);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem;
+}
+.modal {
+  background: var(--panel); border-radius: 14px;
+  max-width: 30rem; width: 100%; padding: 1.6rem 1.7rem 1.3rem;
+  box-shadow: 0 12px 40px rgba(43, 38, 32, .25);
+}
+.modal-title { font-size: 1.1rem; margin-bottom: .8rem; color: var(--ink); }
+.modal-body { font-size: .9rem; line-height: 1.75; color: var(--ink-2); }
+.modal-body p { margin-bottom: .6em; }
+.modal-body code {
+  font-size: .85em; background: var(--panel-2); padding: .1em .4em; border-radius: 4px;
+}
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: .6em; margin-top: 1.3rem;
+}
 
 /* ---------- 通用件 ---------- */
 

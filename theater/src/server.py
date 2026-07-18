@@ -12,6 +12,7 @@
 import hashlib
 import json
 import shutil
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -31,6 +32,7 @@ STANZAS = ROOT / "corpus" / "分段.json"
 PERSONAS = ROOT / "theater" / "personas" / "personas.json"
 PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 WEBAPP = Path(__file__).resolve().parent / "webapp"
+VERSION_FILE = ROOT / "VERSION"
 
 # 作者偏好（corpus/settings.json 侧车）：缺文件/缺字段一律回退这里的默认值。
 # GUI 设置页与派发 agent 读写同一份文件——所有"可以换成你自己的"都收口在这里。
@@ -568,6 +570,71 @@ def promote_interpretation(payload):
         f.write(block)
 
 
+# ---------- 版本 & 更新（对 git-clone 了本仓的读者：显示版本 / 检查 / 一键快进拉取）----------
+
+def app_version():
+    try:
+        return VERSION_FILE.read_text(encoding="utf-8").strip() or "?"
+    except OSError:
+        return "?"
+
+
+def _git(args, timeout=30):
+    """在 ROOT 跑 git，返回 (rc, stdout, stderr)。git 缺失/超时时 rc=-1。"""
+    try:
+        p = subprocess.run(["git", "-C", str(ROOT), *args],
+                           capture_output=True, text=True, encoding="utf-8",
+                           timeout=timeout)
+        return p.returncode, (p.stdout or "").strip(), (p.stderr or "").strip()
+    except FileNotFoundError:
+        return -1, "", "git 未安装"
+    except subprocess.TimeoutExpired:
+        return -1, "", "git 超时"
+
+
+def update_check():
+    """git fetch 后比对本地与上游——只读，不动工作树。返回落后提交数与远端版本。"""
+    rc, _, _ = _git(["rev-parse", "--is-inside-work-tree"], timeout=10)
+    if rc != 0:
+        return {"ok": False, "error": "这里不是 git 仓库，无法检查更新（直接下载的压缩包没有更新能力）。",
+                "local_version": app_version()}
+    rc, upstream, _ = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=10)
+    if rc != 0:
+        return {"ok": False, "error": "没有配置远端上游分支，无法检查更新。",
+                "local_version": app_version()}
+    rc, _, err = _git(["fetch", "--quiet"], timeout=60)
+    if rc != 0:
+        return {"ok": False, "error": f"连接远端失败：{err or '网络或权限问题'}",
+                "local_version": app_version()}
+    rc, behind, _ = _git(["rev-list", "--count", f"HEAD..{upstream}"], timeout=15)
+    behind = int(behind) if behind.isdigit() else 0
+    rc, remote_ver, _ = _git(["show", f"{upstream}:VERSION"], timeout=15)
+    remote_ver = remote_ver.strip() if rc == 0 else "?"
+    return {"ok": True, "behind": behind, "upstream": upstream,
+            "local_version": app_version(), "remote_version": remote_ver}
+
+
+def update_pull():
+    """git pull --ff-only，前置洁净检查：有本地未提交改动或历史分叉一律拒绝，绝不冲突毁数据。"""
+    rc, _, _ = _git(["rev-parse", "--is-inside-work-tree"], timeout=10)
+    if rc != 0:
+        return {"ok": False, "error": "这里不是 git 仓库，无法拉取更新。"}
+    rc, dirty, _ = _git(["status", "--porcelain"], timeout=15)
+    if rc != 0:
+        return {"ok": False, "error": "读不到 git 状态，已中止。"}
+    if dirty:
+        n = len(dirty.splitlines())
+        return {"ok": False, "dirty": True,
+                "error": f"检测到 {n} 处本地未提交改动，为避免冲突已中止。"
+                         f"请先提交或搁置（git stash）本地改动，再拉取更新。"}
+    rc, out, err = _git(["pull", "--ff-only"], timeout=120)
+    if rc != 0:
+        return {"ok": False,
+                "error": f"拉取失败（多半是本地历史与远端分叉，需手动处理）：{err or out}"}
+    return {"ok": True, "message": out or "已更新到最新。",
+            "new_version": app_version(), "restart_needed": True}
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 安静
@@ -600,6 +667,7 @@ class Handler(BaseHTTPRequestHandler):
                 "stanzas": load_stanzas(),
                 "calibration": load_calibration(),
                 "settings": load_settings(),
+                "version": app_version(),
             })
         # 静态文件
         if path == "/":
@@ -624,6 +692,10 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/settings":
                 set_settings(payload)
                 return self._send(200, {"ok": True, "settings": load_settings()})
+            if self.path == "/api/update/check":
+                return self._send(200, update_check())
+            if self.path == "/api/update/pull":
+                return self._send(200, update_pull())
             if self.path == "/api/personas":
                 set_personas(payload)
                 return self._send(200, {"ok": True, "personas": load_personas()})

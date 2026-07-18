@@ -30,6 +30,24 @@ function toast(msg) {
   clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2400);
 }
 
+/* 页内确认框（不用原生 confirm——那会阻塞、也丑）。titleHtml/bodyHtml 已是可信 HTML。 */
+function confirmPopup({ title, bodyHtml, okLabel = "确定", cancelLabel = "取消", onOk }) {
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">${esc(title)}</h3>
+    <div class="modal-body">${bodyHtml}</div>
+    <div class="modal-actions">
+      <button class="btn" data-x>${esc(cancelLabel)}</button>
+      <button class="btn primary" data-ok>${esc(okLabel)}</button>
+    </div></div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", e => { if (e.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-ok]").onclick = async () => { close(); await onOk(); };
+  document.body.appendChild(back);
+}
+
 async function post(path, body) {
   const res = await fetch(path, { method: "POST",
     headers: {"Content-Type": "application/json"},
@@ -447,7 +465,10 @@ function applyBranding() {
   const brand = document.querySelector(".brand");
   if (brand) brand.innerHTML = `${esc(t)}${sub ? `<span class="brand-sub">${esc(sub)}</span>` : ""}`;
   const foot = document.querySelector(".site-foot");
-  if (foot) foot.textContent = st.footer_text || "";
+  if (foot) {
+    const v = S.version ? `v${esc(S.version)}` : "";
+    foot.innerHTML = `${esc(st.footer_text || "")}${v ? ` <span class="foot-ver">${v}</span>` : ""}`;
+  }
 }
 
 /* ---------- 榜单页 ---------- */
@@ -1925,6 +1946,20 @@ function renderSettings() {
       ${row("目标覆盖层数", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth || 4}">`,
         "每首诗希望被盲读到的层数——agent 算缺口时的默认目标。")}
       <div style="margin-top:1.4rem"><button class="btn primary" id="set-save">保存</button></div>
+    </section>
+    <section class="board" style="text-align:left;margin-top:1.6rem">
+      <h2 style="font-size:1rem">版本与更新</h2>
+      ${row("当前版本",
+        `<div style="font-size:1.05rem;color:var(--ink);font-weight:600">v${esc(S.version || "?")}</div>`,
+        "从仓库根目录的 VERSION 文件读取。")}
+      <div style="display:flex;gap:.6em;flex-wrap:wrap;align-items:center;margin-top:.4rem">
+        <button class="btn" id="upd-check">检查更新</button>
+        <button class="btn" id="upd-pull">拉取更新</button>
+        <span id="upd-status" style="font-size:.82rem;color:var(--ink-3)"></span>
+      </div>
+      <div style="font-size:.72rem;color:var(--ink-3);margin-top:.7rem;line-height:1.7">
+        更新对「用 git 克隆了本仓」的读者有效；直接下载压缩包的没有这能力。拉取只做「快进」（<code>git pull --ff-only</code>）——
+        有本地未提交改动或历史分叉时会自动中止，不会覆盖你的数据。拉取成功后需重启服务器才生效。</div>
     </section>`;
   document.getElementById("set-save").onclick = async () => {
     const gv = id => document.getElementById(id).value.trim();
@@ -1948,6 +1983,39 @@ function renderSettings() {
       renderSettings();
       toast("已保存（端口改动需重启服务器后生效）");
     } catch (e) { toast("失败：" + e.message); }
+  };
+
+  const status = document.getElementById("upd-status");
+  document.getElementById("upd-check").onclick = async () => {
+    status.textContent = "检查中…";
+    try {
+      const r = await post("/api/update/check", {});
+      if (!r.ok) { status.textContent = r.error || "检查失败"; return; }
+      if (r.behind > 0) {
+        status.textContent = `有 ${r.behind} 个新提交可拉取`
+          + (r.remote_version && r.remote_version !== "?" ? `（远端 v${r.remote_version}）` : "");
+      } else {
+        status.textContent = "已是最新 ✓";
+      }
+    } catch (e) { status.textContent = "检查失败：" + e.message; }
+  };
+  document.getElementById("upd-pull").onclick = () => {
+    confirmPopup({
+      title: "拉取更新？",
+      bodyHtml: `<p>将从远端仓库拉取最新版本（<code>git pull --ff-only</code>，只快进）。</p>
+        <p style="color:var(--ink-2)">若你有本地未提交的改动、或本地历史与远端分叉，会<b>自动中止且不改动任何文件</b>，你的数据不会被覆盖。</p>
+        <p style="color:var(--ink-3);font-size:.85em">拉取成功后需重启服务器（重新运行 server.py）才生效。</p>`,
+      okLabel: "拉取", cancelLabel: "取消",
+      onOk: async () => {
+        status.textContent = "拉取中…";
+        try {
+          const r = await post("/api/update/pull", {});
+          if (!r.ok) { status.textContent = r.error || "拉取失败"; toast(r.error || "拉取失败"); return; }
+          status.textContent = `已更新到 v${r.new_version || "?"}，重启服务器后生效`;
+          toast("已拉取更新，请重启服务器");
+        } catch (e) { status.textContent = "拉取失败：" + e.message; toast("拉取失败：" + e.message); }
+      },
+    });
   };
 }
 
