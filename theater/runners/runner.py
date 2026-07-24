@@ -385,10 +385,21 @@ def build_thread_prompt(poem, persona, ancestor_floors, own_history, parent_floo
         # 立场惯性的真实来源：只在跟帖 prompt 里拼，盲读的 build_prompt 不读这个字段，
         # 避免"什么论证说服不了你"这类跟帖专属的价值倾向渗进盲读打分（2026-07-17 用户指出）。
         parts += ["", "—— 你在讨论时的脾气 ——", persona["thread_priors"]]
+    # 知情人设的知识必须真的在场：盲读给 knows_诠释 的人设附《诠释》全文，跟帖此前不附，
+    # 结果知情人设在楼里凭空复述"诠释说过什么"（2026-07-19 B 批试跑抓到的幻觉，同类疏漏
+    # 还有下面的诗正文）。knows_date/背景小注同理，与 build_prompt 的盲读展示保持一致。
+    if persona.get("knows_诠释") and INTERP.exists():
+        parts += ["", "—— 你读过作者的自述档案《昼青·诠释》（背景，不是标准答案）——",
+                  INTERP.read_text(encoding="utf-8")]
     # 诗正文必须在场：回帖人不能只靠楼主转述认识这首诗（2026-07-18 用户拍板补上；
     # 此前只给标题是施工疏漏，盲读/点赞的 prompt 一直都带全文）。
-    parts += ["", "—— 这首诗（讨论对象，全文）——", f"《{poem['title']}》",
-              "", poem_text(poem, stanzas), "", "—— 诗歌正文到此为止 ——"]
+    parts += ["", "—— 这首诗（讨论对象，全文）——", f"《{poem['title']}》"]
+    if persona.get("knows_date"):
+        when = poem.get("date_written") or poem.get("created", "")[:7]
+        parts += [f"（写于 {when}）"]
+    if persona.get("reads_background") and poem.get("background"):
+        parts += [f"（背景小注：{poem['background']}）"]
+    parts += ["", poem_text(poem, stanzas), "", "—— 诗歌正文到此为止 ——"]
     root = ancestor_floors[0]
     parts += ["", "—— 楼主长评（开楼帖）——", floor_text(root)]
     if deep:
