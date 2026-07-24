@@ -15,6 +15,7 @@
                                             # 顺带一条「加精」（best）——相对判断，见 runner.py
   python plan_votes.py invite --targets r-000123,r-000456 [--fraction 0.3] [--out DIR]
                                             # 直接指定要投票的具体评论（含跟帖楼层也可）
+                                            # 已折叠(hidden)的评论一律跳过、不投票不加精
   python plan_votes.py collect --tasks DIR/tasks --inbox DIR/inbox --model M
   python plan_votes.py tally --poem-id zq-0001
                                             # 打印这首诗下每条评论的赞/踩/跳过计数
@@ -54,7 +55,15 @@ def _votable_reads_for(poem_ids, reads):
 def cmd_invite(args):
     reads_by_id = {r["read_id"]: r for r in R.load_reads()}
     if args.targets:
-        targets = [reads_by_id[t] for t in args.targets.split(",") if t in reads_by_id]
+        # 显式点名也要滤掉折叠评论——折叠＝作者已判低质，不该再花票/加精（浪费资源）。
+        # 但保留「可点名跟帖楼层」这一初衷，故只滤 hidden、不套用 blind-only 过滤。
+        hidden = R.hidden_read_ids()
+        req = [t for t in args.targets.split(",") if t]
+        targets = [reads_by_id[t] for t in req if t in reads_by_id and t not in hidden]
+        dropped = [t for t in req if t in hidden]
+        if dropped:
+            print(f"跳过 {len(dropped)} 条已折叠评论（不投票/加精）：{','.join(dropped)}",
+                  file=sys.stderr)
     else:
         poem_ids = [x for x in args.poem_ids.split(",") if x]
         targets = _votable_reads_for(poem_ids, reads_by_id.values())

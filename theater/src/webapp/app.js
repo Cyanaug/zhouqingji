@@ -539,6 +539,258 @@ function renderThread(rootId) {
 
 /* ---------- 路由 ---------- */
 
+/* ---------- 词云 ---------- */
+/* 数据实时来自 /api/wordcloud（服务端 jieba 按当前语料/票据算、mtime 缓存）。
+ * 布局：√(词频秩) 均匀面密度螺旋——秩∝r² ⇒ 全盘密度一致，中心不堆、边缘不空。
+ * 暖纸底、墨字，颜色沿「冷 ink-3 → 热 accent(诗)/warm(评)」按频次插值。
+ * 悬停点亮共现伙伴与一句真实诗/评。离开页面自动停 rAF。 */
+let _wcData = null;
+
+async function renderWordcloud() {
+  app.innerHTML = `<div class="wc">
+    <div class="wc-head">
+      <div>
+        <p class="wc-eyebrow">词云 · Word Field</p>
+        <h1 class="wc-title" id="wc-title">诗 的 星 图</h1>
+        <p class="wc-sub" id="wc-sub">正在数点每个词……</p>
+      </div>
+      <div class="wc-switch" role="tablist">
+        <button data-mode="poems" class="on">诗正文</button>
+        <button data-mode="reasons">读者反应</button>
+      </div>
+    </div>
+    <div class="wc-stage">
+      <canvas id="wc-canvas"></canvas>
+      <div class="wc-card" id="wc-card"></div>
+      <p class="wc-hint">悬停一个词，点亮它常同现的词与一句真实的诗</p>
+    </div>
+    <section class="wc-bars">
+      <p class="wc-eyebrow">诚实读数 · Honest Scale</p>
+      <h2>词频榜</h2>
+      <p class="wc-note">字号会骗眼睛——同一个词，这里给它真实的出现次数。</p>
+      <ol class="wc-barlist" id="wc-barlist"></ol>
+    </section>
+  </div>`;
+
+  if (!_wcData) {
+    try {
+      const res = await fetch("/api/wordcloud");
+      _wcData = await res.json();
+    } catch (e) {
+      document.getElementById("wc-sub").textContent = "词云数据加载失败：" + e;
+      return;
+    }
+  }
+  if (location.hash.replace(/^#/, "").split("/").filter(Boolean)[0] !== "wordcloud") return;
+  wcStart(_wcData);
+}
+
+function wcStart(data) {
+  const canvas = document.getElementById("wc-canvas");
+  const card = document.getElementById("wc-card");
+  const stage = canvas.parentElement;
+  const ctx = canvas.getContext("2d");
+  const serif = getComputedStyle(document.body).fontFamily;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // 色：冷 → 热。ink-3 = #a29786；热色随模式取青瓷或赭。
+  const COLD = [162, 151, 134];
+  const HOT = { poems: [47, 109, 98], reasons: [164, 89, 61] };
+  const mix = (a, b, t) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",")})`;
+
+  const MODES = {
+    poems: { title: "诗 的 星 图", sub: n => `${n} 首诗 · 词的大小＝它在诗里出现的<b>次数</b>` },
+    reasons: { title: "评 的 星 图", sub: n => `${n} 条读者投票理由 · 词的大小＝它在理由里出现的<b>次数</b>` },
+  };
+
+  let mode = "poems";
+  let nodes = [];        // 当前布局的词节点
+  let hovered = -1;
+  let t0 = performance.now();
+  let raf = 0;
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = stage.clientWidth, h = stage.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w, h };
+  }
+
+  function layout() {
+    const { w, h } = fit();
+    const src = (data[mode] && data[mode].words) || [];
+    const words = src.slice(0, 100);
+    const N = words.length;
+    document.getElementById("wc-title").textContent = MODES[mode].title;
+    document.getElementById("wc-sub").innerHTML =
+      MODES[mode].sub(((data[mode] || {}).meta || {})[mode] || N);
+
+    nodes = [];
+    if (!N) return;
+    const cmax = words[0].c, cmin = words[N - 1].c;
+    const cx = w / 2, cy = h * 0.48;
+    const maxR = Math.min(w, h) * 0.5;
+    const coreR = maxR * 0.05, spanR = maxR * 0.92;
+    const vsq = Math.min(1, h / w * 1.35);   // 纵向压扁，让词云铺满偏宽的舞台
+    const minPx = Math.max(11, Math.min(w, h) * 0.02);
+    const maxPx = Math.min(w, h) * 0.11;
+
+    for (let i = 0; i < N; i++) {
+      const wd = words[i];
+      const t = cmax === cmin ? 1 : (wd.c - cmin) / (cmax - cmin);
+      const size = minPx + Math.pow(t, 0.7) * (maxPx - minPx);
+      ctx.font = `600 ${size}px ${serif}`;
+      const tw = ctx.measureText(wd.w).width;
+      const bw = tw + size * 0.42, bh = size * 1.16;
+      const rankFrac = N > 1 ? i / (N - 1) : 0;
+      const floorR = coreR + Math.sqrt(rankFrac) * spanR;
+
+      let theta = Math.random() * Math.PI * 2, x = cx, y = cy, ok = false;
+      for (let s = 0; s < 1400; s++) {
+        const rad = floorR + 2.3 * theta;   // 阿基米德螺旋：从 floorR 起缓缓外扩找空位
+        x = cx + Math.cos(theta) * rad;
+        y = cy + Math.sin(theta) * rad * vsq;
+        theta += 0.32;
+        if (x - bw / 2 < 6 || x + bw / 2 > w - 6 || y - bh / 2 < 6 || y + bh / 2 > h - 6) continue;
+        ok = true;
+        for (const p of nodes) {
+          if (Math.abs(p.x - x) * 2 < p.bw + bw && Math.abs(p.y - y) * 2 < p.bh + bh) { ok = false; break; }
+        }
+        if (ok) break;
+      }
+      if (!ok) continue;
+      nodes.push({
+        w: wd.w, c: wd.c, ex: wd.ex || "",
+        partners: (wd.p || []).map(pp => pp[0]),
+        x, y, bw, bh, size, tint: t,
+        appear: i * 9,   // 入场按秩错开（ms）
+        // 呼吸相位
+        ph: Math.random() * Math.PI * 2,
+      });
+    }
+    // 伙伴解析成节点索引（只连也被放下的词）
+    const byName = new Map(nodes.map((n, i) => [n.w, i]));
+    for (const n of nodes) n.pIdx = n.partners.map(nm => byName.get(nm)).filter(v => v != null);
+  }
+
+  function frame(now) {
+    if (!document.body.contains(canvas)) { cancelAnimationFrame(raf); return; }
+    const { w, h } = { w: stage.clientWidth, h: stage.clientHeight };
+    ctx.clearRect(0, 0, w, h);
+    const hot = HOT[mode];
+
+    // 悬停时先画共现连线（在词底下）
+    if (hovered >= 0 && nodes[hovered]) {
+      const n = nodes[hovered];
+      ctx.lineWidth = 1;
+      for (const j of n.pIdx) {
+        const m = nodes[j];
+        ctx.strokeStyle = "rgba(47,109,98,.28)";
+        ctx.beginPath(); ctx.moveTo(n.x, n.y); ctx.lineTo(m.x, m.y); ctx.stroke();
+      }
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      const life = Math.min(1, Math.max(0, (now - t0 - n.appear) / 520));
+      if (life <= 0) continue;
+      const ease = 1 - Math.pow(1 - life, 3);
+      const rise = (1 - ease) * 16;
+      const br = reduce ? 0 : Math.sin(now / 1600 + n.ph) * n.size * 0.02;
+      const isHot = hovered < 0 || i === hovered || (nodes[hovered] && nodes[hovered].pIdx.includes(i));
+      let col = mix(COLD, hot, n.tint);
+      let alpha = ease * (isHot ? 1 : 0.28);
+      if (i === hovered) col = mix(COLD, hot, Math.min(1, n.tint + 0.4));
+      ctx.font = `600 ${n.size}px ${serif}`;
+      ctx.fillStyle = col;
+      ctx.globalAlpha = alpha;
+      ctx.fillText(n.w, n.x + br, n.y - rise);
+    }
+    ctx.globalAlpha = 1;
+    raf = requestAnimationFrame(frame);
+  }
+
+  function pick(px, py) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      if (Math.abs(px - n.x) <= n.bw / 2 && Math.abs(py - n.y) <= n.bh / 2) return i;
+    }
+    return -1;
+  }
+
+  function onMove(e) {
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left, py = e.clientY - rect.top;
+    const i = pick(px, py);
+    if (i !== hovered) {
+      hovered = i;
+      canvas.style.cursor = i >= 0 ? "pointer" : "default";
+      if (i >= 0) showCard(nodes[i], px, py); else card.classList.remove("show");
+    } else if (i >= 0) {
+      placeCard(px, py);
+    }
+  }
+
+  function showCard(n, px, py) {
+    card.innerHTML = `<div><span class="wc-card-w">${esc(n.w)}</span>
+      <span class="wc-card-c">出现 ${n.c} 次</span></div>
+      <div class="wc-card-ex${n.ex ? "" : " empty"}">${n.ex ? "「" + esc(n.ex) + "」" : "（无合适例句）"}</div>`;
+    card.classList.add("show");
+    placeCard(px, py);
+  }
+
+  function placeCard(px, py) {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    const cw = card.offsetWidth, ch = card.offsetHeight;
+    let x = px + 16, y = py + 16;
+    if (x + cw > sw - 8) x = px - cw - 16;
+    if (y + ch > sh - 8) y = py - ch - 16;
+    card.style.left = Math.max(8, x) + "px";
+    card.style.top = Math.max(8, y) + "px";
+  }
+
+  function buildBars() {
+    const src = (data[mode] && data[mode].words) || [];
+    const rows = src.slice(0, 24);
+    const max = rows.length ? rows[0].c : 1;
+    document.getElementById("wc-barlist").innerHTML = rows.map((wd, i) => `
+      <li class="wc-barrow">
+        <span class="wc-rank">${i + 1}</span>
+        <span class="wc-word">${esc(wd.w)}</span>
+        <span class="wc-bartrack"><span class="wc-barfill" style="width:${Math.max(4, wd.c / max * 100)}%"></span></span>
+        <span class="wc-cnt">${wd.c}</span>
+      </li>`).join("");
+  }
+
+  function switchMode(m) {
+    if (m === mode) return;
+    mode = m;
+    hovered = -1; card.classList.remove("show");
+    t0 = performance.now();
+    layout(); buildBars();
+  }
+
+  app.querySelectorAll(".wc-switch button").forEach(b => {
+    b.onclick = () => {
+      app.querySelectorAll(".wc-switch button").forEach(x => x.classList.toggle("on", x === b));
+      switchMode(b.dataset.mode);
+    };
+  });
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseleave", () => { hovered = -1; card.classList.remove("show"); });
+  let rt;
+  const onResize = () => { clearTimeout(rt); rt = setTimeout(() => { if (document.body.contains(canvas)) layout(); }, 150); };
+  window.addEventListener("resize", onResize);
+
+  layout();
+  buildBars();
+  raf = requestAnimationFrame(frame);
+}
+
 window.addEventListener("hashchange", route);
 
 async function route() {
@@ -552,6 +804,7 @@ async function route() {
   if (seg[0] === "all") return renderAll();
   if (seg[0] === "timeline") return renderTimeline();
   if (seg[0] === "stats") return renderStats();
+  if (seg[0] === "wordcloud") return renderWordcloud();
   if (seg[0] === "readers") return renderReaders();
   if (seg[0] === "poem" && seg[1]) return renderPoem(seg[1], seg[2] === "reads");
   if (seg[0] === "read" && seg[1]) return renderDeepRead(seg[1]);

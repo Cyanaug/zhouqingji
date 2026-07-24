@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""昼青集·读诗剧场 本地服务器（纯标准库，零依赖）。
+"""昼青集·读诗剧场 本地服务器（标准库为主；词云分词用仓库内 vendored jieba，随仓库分发、无需 pip）。
 
 职责边界（README 硬边界的机器侧执行）：
 - 读 corpus，读 results；
@@ -264,6 +264,9 @@ def load_voter_votes():
 
 _calib_lock = threading.Lock()
 
+_wc_lock = threading.Lock()
+_WC_CACHE = {"key": None, "data": None}   # 词云按语料/票据 mtime 缓存，见 load_wordcloud
+
 
 def load_calibration():
     """校准分（calibrate.py 生成的只读视图）。scores.json 比 reads.jsonl 或
@@ -285,6 +288,34 @@ def load_calibration():
     if CALIBRATION.exists():
         return json.loads(CALIBRATION.read_text(encoding="utf-8"))
     return {}
+
+
+def load_wordcloud():
+    """词云数据（诗正文 + 读者反应）。跟着当前语料/票据实时算，按二者 mtime 缓存：
+    诗稿或投票没变就直接吃缓存，变了才在锁内重算一次（诗~0.7s、评~1.5s）。分词用
+    仓库内 vendored jieba（theater/vendor，MIT、纯 Python，随仓库分发，无需 pip 安装）。
+    首次调用惰性加载词典。任何失败（如 vendor 缺失）只打警告、回退上次结果或空，绝不拖垮页面。"""
+    key = (CORPUS.stat().st_mtime if CORPUS.exists() else 0,
+           VOTES.stat().st_mtime if VOTES.exists() else 0)
+    if _WC_CACHE["key"] == key and _WC_CACHE["data"] is not None:
+        return _WC_CACHE["data"]
+    with _wc_lock:
+        if _WC_CACHE["key"] == key and _WC_CACHE["data"] is not None:
+            return _WC_CACHE["data"]
+        try:
+            import wordcloud_data as wc
+            poems = [p for p in load_corpus() if p.get("visibility") == "public"]
+            data = {"poems": wc.compute_poem_cloud(poems),
+                    "reasons": wc.compute_reason_cloud(_iter_votes())}
+            _WC_CACHE["key"] = key
+            _WC_CACHE["data"] = data
+            return data
+        except Exception as e:
+            print(f"[wordcloud] 计算失败，回退：{e}")
+            if _WC_CACHE["data"] is not None:
+                return _WC_CACHE["data"]
+            return {"poems": {"meta": {}, "words": []},
+                    "reasons": {"meta": {}, "words": []}}
 
 
 def load_favs():
@@ -654,6 +685,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        if path == "/api/wordcloud":
+            return self._send(200, load_wordcloud())
         if path == "/api/state":
             return self._send(200, {
                 "poems": load_corpus(),

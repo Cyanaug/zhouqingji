@@ -256,10 +256,58 @@ def test_collect_batch_best():
     print("[ok] batch collect：best 落盘 + 脏值解析 + 箱外 best 忽略 + 旧统计不受影响")
 
 
+def test_invite_targets_skip_hidden():
+    """显式 --targets 点名也要跳过已折叠(hidden)评论——折叠即作者判低质，
+    不该再花票/加精。堵死原来 --targets 绕过折叠过滤的后门。"""
+    poem = _setup_corpus()
+    personas_all = [p["persona_id"] for p in R.load_personas() if not p.get("superseded_by")]
+    a1, a2 = personas_all[0], personas_all[1]
+    reads = [
+        {"read_id": "r-500", "poem_id": poem["id"], "context_mode": "blind",
+         "long_form": None, "reaction": "没折叠", "reader": {"persona_id": a1, "model": "m"},
+         "content_hash": poem["content_hash"]},
+        {"read_id": "r-501", "poem_id": poem["id"], "context_mode": "blind",
+         "long_form": None, "reaction": "被折叠", "reader": {"persona_id": a2, "model": "m"},
+         "content_hash": poem["content_hash"]},
+    ]
+    _write_reads(reads, "reads_hidden.jsonl")
+    R.CURATION = TMP / "curation_hidden.json"
+    R.CURATION.write_text(json.dumps({"r-501": {"hidden": True, "reason": "低质"}},
+                                     ensure_ascii=False), encoding="utf-8")
+    R.VOTES_DIR = TMP
+    R.VOTES = TMP / "votes_hidden.jsonl"
+    if R.VOTES.exists():
+        R.VOTES.unlink()
+
+    out_dir = TMP / "invite_hidden_out"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+
+    class _A:
+        targets = "r-500,r-501"
+        poem_ids = ""
+        fraction = 1.0
+        seed = 1
+        out = str(out_dir)
+
+    PV.cmd_invite(_A)
+    tasks = json.loads((out_dir / "batch.json").read_text(encoding="utf-8"))
+    all_target_rids = set()
+    for t in tasks:
+        for tg in t.get("targets", []):
+            all_target_rids.add(tg["read_id"])
+        if "target_read_id" in t:
+            all_target_rids.add(t["target_read_id"])
+    assert "r-501" not in all_target_rids, "折叠评论不该被 --targets 派去投票/加精"
+    assert "r-500" in all_target_rids, "未折叠评论应正常派发"
+    print("[ok] cmd_invite --targets 跳过折叠评论（不投票/加精）")
+
+
 if __name__ == "__main__":
     test_append_and_tally()
     test_votable_reads_filter()
     test_invite_dedupe_and_exclude_author()
+    test_invite_targets_skip_hidden()
     test_collect_valid_and_invalid()
     test_batch_ballot_trim_and_best_prompt()
     test_collect_batch_best()

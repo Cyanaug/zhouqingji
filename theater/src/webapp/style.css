@@ -496,3 +496,74 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .vbest { color: #a8842c; font-weight: 700; }
 /* 顺势票：弱信号，灰显、小一号，跟主动票拉开层级 */
 .vpig { color: var(--ink-3); font-size: .82em; margin-left: .3em; }
+
+/* ---------- 词云 ---------- */
+/* 破出窄栏、贴近满宽（不受居中窄 main 限制），暖纸底、墨字、青瓷/赭双色 */
+.wc { width: 94vw; position: relative; left: 50%; transform: translateX(-50%); }
+
+.wc-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1.2rem;
+  width: min(70rem, 92vw); margin-left: auto; margin-right: auto;
+}
+.wc-eyebrow {
+  font-size: .72rem; letter-spacing: .34em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: .5em;
+}
+.wc-title { font-size: 2.1rem; letter-spacing: .18em; color: var(--ink); line-height: 1.2; }
+.wc-sub { font-size: .92rem; color: var(--ink-2); margin-top: .4em; }
+.wc-sub b { color: var(--accent-deep); font-weight: 600; }
+
+/* 段控：青瓷胶囊，选中填色——是页头考究布局的一部分，不是孤立的顶部按钮 */
+.wc-switch { display: inline-flex; background: var(--panel-2); border-radius: 999px;
+  padding: .28rem; gap: .2rem; border: 1px solid var(--line); }
+.wc-switch button {
+  font: inherit; font-size: .88rem; letter-spacing: .06em; cursor: pointer;
+  border: 0; background: transparent; color: var(--ink-2);
+  padding: .42rem 1.15rem; border-radius: 999px; transition: all .2s;
+}
+.wc-switch button:hover { color: var(--accent-deep); }
+.wc-switch button.on { background: var(--accent); color: #fdfaf3; box-shadow: 0 1px 4px rgba(47,109,98,.28); }
+
+.wc-stage {
+  position: relative;
+  height: clamp(420px, 66vh, 720px);
+  width: min(70rem, 92vw); margin: 0 auto;
+  border: 1px solid var(--line); border-radius: 14px;
+  background:
+    radial-gradient(120% 100% at 50% 0%, var(--panel) 0%, var(--paper) 70%);
+  overflow: hidden;
+}
+.wc-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* 悬停诗句卡：浮层，跟随词、不挡视线 */
+.wc-card {
+  position: absolute; z-index: 3; max-width: 20rem; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: .7rem .9rem; box-shadow: 0 6px 22px rgba(43,38,32,.14);
+  opacity: 0; transform: translateY(4px); transition: opacity .16s, transform .16s;
+  font-size: .9rem; line-height: 1.7;
+}
+.wc-card.show { opacity: 1; transform: translateY(0); }
+.wc-card .wc-card-w { font-size: 1.05rem; color: var(--accent-deep); font-weight: 600; letter-spacing: .04em; }
+.wc-card .wc-card-c { color: var(--ink-3); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.wc-card .wc-card-ex { color: var(--ink); margin-top: .35em; }
+.wc-card .wc-card-ex.empty { color: var(--ink-3); font-style: italic; }
+
+.wc-hint {
+  position: absolute; left: 0; right: 0; bottom: .7rem; z-index: 2;
+  text-align: center; font-size: .78rem; color: var(--ink-3);
+  letter-spacing: .06em; pointer-events: none;
+}
+
+/* 词频榜：诚实条形——字号会骗眼睛，这里给真实次数 */
+.wc-bars { width: min(52rem, 92vw); margin: 3rem auto 1rem; }
+.wc-bars .wc-note { font-size: .88rem; color: var(--ink-2); margin: .3em 0 1.2em; }
+.wc-barlist { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+.wc-barrow { display: grid; grid-template-columns: 1.6rem 5.5rem 1fr auto; align-items: center; gap: .7rem; }
+.wc-barrow .wc-rank { color: var(--ink-3); font-size: .8rem; text-align: right; font-variant-numeric: tabular-nums; }
+.wc-barrow .wc-word { color: var(--ink); font-size: .96rem; letter-spacing: .04em; }
+.wc-bartrack { height: .7rem; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+.wc-barfill { display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-deep)); }
+.wc-barrow .wc-cnt { color: var(--ink-2); font-size: .84rem; font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }
