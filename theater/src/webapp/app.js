@@ -545,6 +545,7 @@ function renderThread(rootId) {
  * 暖纸底、墨字，颜色沿「冷 ink-3 → 热 accent(诗)/warm(评)」按频次插值。
  * 悬停点亮共现伙伴与一句真实诗/评。离开页面自动停 rAF。 */
 let _wcData = null;
+let _wcResizeHandler = null;   // 只保留一个 resize 监听，切页重进时先摘旧的（防累积泄漏）
 
 async function renderWordcloud() {
   app.innerHTML = `<div class="wc">
@@ -696,7 +697,8 @@ function wcStart(data) {
     ctx.textBaseline = "middle";
     for (let i = 0; i < nodes.length; i++) {
       const n = nodes[i];
-      const life = Math.min(1, Math.max(0, (now - t0 - n.appear) / 520));
+      // 减动效偏好：跳过升起+淡入的入场，直接呈现（呼吸下方也已按 reduce 关掉）
+      const life = reduce ? 1 : Math.min(1, Math.max(0, (now - t0 - n.appear) / 520));
       if (life <= 0) continue;
       const ease = 1 - Math.pow(1 - life, 3);
       const rise = (1 - ease) * 16;
@@ -784,6 +786,8 @@ function wcStart(data) {
   canvas.addEventListener("mouseleave", () => { hovered = -1; card.classList.remove("show"); });
   let rt;
   const onResize = () => { clearTimeout(rt); rt = setTimeout(() => { if (document.body.contains(canvas)) layout(); }, 150); };
+  if (_wcResizeHandler) window.removeEventListener("resize", _wcResizeHandler);  // 摘掉上次的，避免累积
+  _wcResizeHandler = onResize;
   window.addEventListener("resize", onResize);
 
   layout();
