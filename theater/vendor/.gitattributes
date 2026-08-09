@@ -1,0 +1,3 @@
+# vendored 第三方库：一律不做行尾/文本规范化，避免 dict.txt 与 finalseg/*.p
+# 等二进制/数据文件在跨平台 checkout 时被 CRLF 转换损坏。
+* -text

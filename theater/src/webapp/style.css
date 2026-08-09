@@ -1,0 +1,569 @@
+/* 昼青集 · 读诗剧场 —— 暖纸、墨字、青瓷点缀。以诗为中心，评论不挤诗。 */
+
+:root {
+  --paper: #f6f1e7;
+  --panel: #fcf9f2;
+  --panel-2: #f1eadc;
+  --ink: #2b2620;
+  --ink-2: #6e6557;
+  --ink-3: #a29786;
+  --accent: #2f6d62;
+  --accent-deep: #24544c;
+  --accent-soft: #e2ebe7;
+  --warm: #a4593d;
+  --warm-soft: #f2e2d9;
+  --line: #e3dac7;
+  --serif: "Noto Serif SC", "Source Han Serif SC", "Source Han Serif CN",
+           "思源宋体", "STSong", "SimSun", serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html { background: var(--paper); }
+
+body {
+  font-family: var(--serif);
+  color: var(--ink);
+  line-height: 1.8;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+a { color: var(--accent-deep); text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 4px; }
+
+/* ---------- 页架 ---------- */
+
+.site-head {
+  display: flex; align-items: baseline; justify-content: space-between;
+  padding: 1.4rem 7vw 1.2rem;
+  border-bottom: 1px solid var(--line);
+  /* 吸顶：滚到评论区时导航仍在 */
+  position: sticky; top: 0; z-index: 50;
+  background: rgba(246, 241, 231, .92);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+.brand { font-size: 1.35rem; letter-spacing: .12em; color: var(--ink); }
+.brand:hover { text-decoration: none; }
+.brand-sub {
+  font-size: .78rem; color: var(--ink-3); margin-left: .9em;
+  letter-spacing: .3em;
+}
+.site-head nav a {
+  margin-left: 1.8em; font-size: .92rem; color: var(--ink-2);
+  letter-spacing: .08em;
+}
+.site-head nav a:hover { color: var(--accent-deep); }
+
+main {
+  flex: 1;
+  width: min(46rem, 92vw);
+  margin: 0 auto;
+  padding: 2.5rem 0 4rem;
+}
+main.wide { width: min(58rem, 94vw); }
+
+.site-foot {
+  position: relative;
+  text-align: center; padding: 2rem 0 2.4rem;
+  color: var(--ink-3); font-size: .82rem; letter-spacing: .25em;
+  border-top: 1px solid var(--line);
+}
+/* 版本号绝对定位靠右，诗句仍独立真居中、不被挤偏 */
+.foot-ver {
+  position: absolute; right: max(1.5rem, 6vw); top: 50%; transform: translateY(-50%);
+  margin: 0; letter-spacing: .1em; opacity: .6; font-size: .92em;
+}
+@media (max-width: 520px) {
+  /* 窄屏怕与居中句子撞，落回句子下方、居中淡显 */
+  .site-foot { position: static; }
+  .foot-ver {
+    position: static; transform: none; display: block;
+    margin-top: .5em; text-align: center;
+  }
+}
+
+.loading { color: var(--ink-3); text-align: center; padding: 4rem 0; }
+
+/* 页内确认框：非原生 confirm，暖纸风、居中遮罩 */
+.modal-back {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(43, 38, 32, .38);
+  display: flex; align-items: center; justify-content: center;
+  padding: 1.5rem;
+}
+.modal {
+  background: var(--panel); border-radius: 14px;
+  max-width: 30rem; width: 100%; padding: 1.6rem 1.7rem 1.3rem;
+  box-shadow: 0 12px 40px rgba(43, 38, 32, .25);
+}
+.modal-title { font-size: 1.1rem; margin-bottom: .8rem; color: var(--ink); }
+.modal-body { font-size: .9rem; line-height: 1.75; color: var(--ink-2); }
+.modal-body p { margin-bottom: .6em; }
+.modal-body code {
+  font-size: .85em; background: var(--panel-2); padding: .1em .4em; border-radius: 4px;
+}
+.modal-actions {
+  display: flex; justify-content: flex-end; gap: .6em; margin-top: 1.3rem;
+}
+
+/* ---------- 通用件 ---------- */
+
+.chip {
+  display: inline-block; font-size: .72rem; line-height: 1;
+  padding: .3em .7em; border-radius: 99px;
+  background: var(--panel-2); color: var(--ink-2);
+  letter-spacing: .05em; vertical-align: middle;
+}
+.chip.accent { background: var(--accent-soft); color: var(--accent-deep); }
+.chip.warm { background: var(--warm-soft); color: var(--warm); }
+
+.score-badge {
+  font-size: .95rem; color: var(--accent-deep);
+  font-variant-numeric: tabular-nums; letter-spacing: 0;
+}
+
+.btn {
+  font-family: var(--serif); font-size: .82rem;
+  padding: .35em 1.1em; border-radius: 99px;
+  border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink-2); cursor: pointer; letter-spacing: .08em;
+}
+.btn:hover { border-color: var(--accent); color: var(--accent-deep); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fdfcf8; }
+.btn.primary:hover { background: var(--accent-deep); }
+
+h1.page-title {
+  font-size: 1.5rem; font-weight: 600; letter-spacing: .1em;
+  margin-bottom: .4rem;
+}
+.page-hint { color: var(--ink-3); font-size: .85rem; margin-bottom: 2.2rem; }
+
+/* ---------- 榜单页 ---------- */
+
+.boards { display: grid; grid-template-columns: 1fr 1fr; gap: 2.2rem; }
+@media (max-width: 46rem) { .boards { grid-template-columns: 1fr; } }
+
+.board {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 1.5rem 1.7rem 1.2rem;
+}
+.board.hero { grid-column: 1 / -1; }
+.board h2 {
+  font-size: 1.05rem; font-weight: 600; letter-spacing: .15em;
+  color: var(--ink); margin-bottom: .2rem;
+  display: flex; align-items: baseline; justify-content: space-between;
+}
+.board h2 .full-link {
+  font-size: .72rem; font-weight: 400; letter-spacing: .1em;
+  color: var(--ink-3);
+}
+.board h2 .full-link:hover { color: var(--accent-deep); }
+
+.persona-desc {
+  margin: 1.2rem 0 0; padding: 1rem 1.3rem;
+  background: var(--panel); border-left: 3px solid var(--accent-soft);
+  border-radius: 0 8px 8px 0;
+  font-size: .92rem; color: var(--ink-2); line-height: 2;
+}
+.board .board-note { font-size: .78rem; color: var(--ink-3); margin-bottom: 1rem; }
+.board ol { list-style: none; counter-reset: rank; }
+.board li {
+  counter-increment: rank;
+  display: flex; align-items: baseline; gap: .8em;
+  padding: .5em 0; border-top: 1px dashed var(--line);
+}
+.board li::before {
+  content: counter(rank, cjk-ideographic);
+  color: var(--ink-3); font-size: .78rem; min-width: 2em;
+}
+.board li .t { flex: 1; }
+.board li .m {
+  color: var(--ink-2); font-size: .8rem;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.board .empty { color: var(--ink-3); font-size: .85rem; padding: 1rem 0; }
+
+/* ---------- 全部作品 / 时间轴 ---------- */
+
+.filter-row { margin-bottom: 1.6rem; display: flex; gap: .6em; flex-wrap: wrap; }
+.btn.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-deep); }
+
+.poem-row {
+  display: flex; align-items: baseline; gap: 1em;
+  padding: .55em .2em; border-bottom: 1px dashed var(--line);
+  font-size: .95rem;
+}
+.poem-row .id { color: var(--ink-3); font-size: .75rem; min-width: 4.5em; }
+.poem-row .t { flex: 1; }
+.poem-row .meta { color: var(--ink-2); font-size: .78rem; white-space: nowrap; }
+
+.year-block { margin-bottom: 2.8rem; }
+.year-block h2 {
+  font-size: 1.8rem; font-weight: 400; color: var(--ink-3);
+  letter-spacing: .1em; margin-bottom: 1rem;
+}
+.tl-row {
+  display: flex; align-items: baseline; gap: 1.2em;
+  padding: .5em 0; border-bottom: 1px dashed var(--line);
+}
+.tl-row .mon { color: var(--ink-3); font-size: .8rem; min-width: 3em; }
+.tl-row .t { flex: 1; }
+.tl-row .first-line { color: var(--ink-3); font-size: .82rem; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; max-width: 16em; }
+
+/* ---------- 诗详情页 ---------- */
+
+.poem-head { text-align: center; margin: 1.5rem 0 0; }
+.poem-head h1 {
+  font-size: 1.7rem; font-weight: 600; letter-spacing: .12em;
+  margin-bottom: .8rem;
+}
+.poem-head .meta { color: var(--ink-3); font-size: .82rem; letter-spacing: .1em; }
+.poem-head .meta .chip { margin: 0 .25em; }
+
+.author-tools {
+  display: flex; justify-content: center; gap: .7em; flex-wrap: wrap;
+  margin: 1.2rem 0 0;
+}
+
+.poem-body {
+  /* fit-content：按最长诗行水平居中整块，行内仍左对齐（修正"全屏偏左"） */
+  margin: 3rem auto 0;
+  width: fit-content;
+  max-width: 34em;
+  font-size: 1.12rem;
+  line-height: 2.35;
+  letter-spacing: .05em;
+}
+.poem-body p { margin: 0; text-indent: 0; }
+.poem-body p.gap { height: 1.2em; }
+
+.bg-note {
+  margin: 2.2rem auto 0; max-width: 34em;
+  font-size: .85rem; color: var(--ink-2);
+  border-left: 3px solid var(--accent-soft); padding-left: 1em;
+}
+
+details.self-note {
+  margin: 2.5rem auto 0; max-width: 34em;
+  border: 1px solid var(--line); border-radius: 8px;
+  background: var(--panel); padding: .7em 1.1em;
+  font-size: .9rem; color: var(--ink-2);
+}
+details.self-note summary { cursor: pointer; color: var(--ink-3); font-size: .82rem; letter-spacing: .15em; }
+details.self-note .note-text { margin-top: .8em; white-space: pre-wrap; line-height: 2; }
+
+.cut-btn {
+  position: absolute; z-index: 9;
+  transform: translate(-50%, -130%);
+}
+
+/* 评论区：与诗之间留大片空白，评论不挤诗 */
+.reads-zone { margin-top: 5.5rem; border-top: 1px solid var(--line); padding-top: 2.2rem; }
+.reads-zone h2 {
+  font-size: .95rem; font-weight: 600; letter-spacing: .3em;
+  color: var(--ink-2); text-align: center; margin-bottom: 1.6rem;
+}
+
+.dist-wrap { margin: 0 auto 2.5rem; max-width: 36em; }
+.dist-wrap svg { display: block; width: 100%; height: auto; }
+.dist-caption { text-align: center; color: var(--ink-3); font-size: .78rem; margin-top: .3rem; }
+
+.read-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 1rem 1.3rem;
+  margin-bottom: 1rem; font-size: .92rem;
+}
+.read-card.hl { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.read-card .rc-head {
+  display: flex; align-items: baseline; gap: .6em; flex-wrap: wrap;
+  margin-bottom: .45em;
+}
+.read-card .rname { font-weight: 600; letter-spacing: .05em; }
+.read-card .rc-head .chip { font-size: .68rem; }
+.read-card .rc-head .score-badge { margin-left: auto; }
+.read-card .reaction { color: var(--ink); line-height: 1.95; }
+.read-card .deep-link { font-size: .8rem; margin-top: .5em; display: inline-block; }
+
+.read-card .rc-foot {
+  display: flex; justify-content: space-between; align-items: baseline;
+  margin-top: .5em;
+}
+.read-card .curate-btn {
+  font-family: var(--serif); font-size: .72rem; color: var(--ink-3);
+  background: none; border: none; cursor: pointer; letter-spacing: .08em;
+  opacity: 0; transition: opacity .15s;
+}
+.read-card:hover .curate-btn { opacity: 1; }
+.read-card .curate-btn:hover { color: var(--warm); }
+.read-card.dim { opacity: .75; background: var(--panel-2); }
+
+details.hidden-reads { margin-top: 2rem; }
+details.hidden-reads summary {
+  cursor: pointer; color: var(--ink-3); font-size: .8rem;
+  letter-spacing: .12em; text-align: center; margin-bottom: 1rem;
+}
+
+details.more-boards { grid-column: 1 / -1; }
+details.more-boards summary {
+  cursor: pointer; color: var(--ink-3); font-size: .85rem; letter-spacing: .15em;
+}
+details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--ink-2); }
+
+/* 最近评论 */
+.recent-list { font-size: .85rem; }
+.recent-row {
+  padding: .7em 0 .75em; border-bottom: 1px dashed var(--line);
+  line-height: 1.85;
+}
+.recent-row:last-child { border-bottom: none; }
+.recent-row .rmeta { display: flex; align-items: baseline; gap: .55em; flex-wrap: wrap; }
+.recent-row .rtime { color: var(--ink-3); font-size: .78rem; white-space: nowrap; width: 3.6rem; }
+.recent-row .rpoem { font-weight: 600; letter-spacing: .04em; white-space: nowrap; }
+.recent-row .rpoem a { color: var(--ink); text-decoration: none; }
+.recent-row .rpoem a:hover { color: var(--accent-deep); }
+.recent-row .rname { color: var(--ink-2); font-size: .82rem; white-space: nowrap; }
+.recent-row .rname a { color: var(--ink-2); }
+.recent-row .score-badge { font-size: .82rem; }
+.recent-row .rbody { display: flex; gap: .55em; align-items: baseline; margin-top: .2em; }
+.recent-row .rscore {
+  width: 3.6rem; flex: none; text-align: right;
+  font-size: 1.08rem; font-weight: 600; color: var(--accent-deep);
+  font-variant-numeric: tabular-nums;
+}
+.recent-row .rtext { color: var(--ink-2); flex: 1; }
+@media (max-width: 46rem) { .recent-row .rscore { width: auto; text-align: left; } }
+.recent-more { text-align: center; margin-top: 1.1rem; }
+
+/* 最近评论筛选条：模型/读者下拉 + 分数段按钮 */
+.recent-filter { display: flex; flex-wrap: wrap; gap: .5em; align-items: center; margin: .3em 0 1.1em; }
+.rf-sel {
+  font: inherit; font-size: .8rem; padding: .32em .6em; max-width: 100%;
+  border: 1px solid var(--panel-2); border-radius: 6px; background: var(--panel); color: var(--ink);
+}
+.rf-sel:focus { outline: none; border-color: var(--accent-deep); }
+.band-group { display: inline-flex; gap: .3em; }
+.band-btn { padding: .22em .7em; font-size: .75rem; }
+.band-btn.on { background: var(--panel-2); border-color: var(--accent-deep); color: var(--accent-deep); font-weight: 600; }
+.recent-count { font-weight: 400; font-size: .78rem; color: var(--warm); letter-spacing: .04em; margin-left: .4em; }
+/* 偏离共识：高于共识=赭红▲、低于共识=黛蓝▼，颜色+箭头双重区分，非好坏判断 */
+.recent-row .rscore.rscore-hi { color: #a4593d; }
+.recent-row .rscore.rscore-lo { color: #4a6d8c; }
+.recent-row .rscore.rscore-hi::after { content: "▲"; }
+.recent-row .rscore.rscore-lo::after { content: "▼"; }
+.recent-row .rscore.rscore-hi::after,
+.recent-row .rscore.rscore-lo::after { font-size: .55em; margin-left: .18em; vertical-align: middle; }
+
+/* ---------- 读者卡片墙 ---------- */
+
+.reader-cards {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(17rem, 1fr));
+  gap: 1.4rem;
+}
+.reader-card {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 10px; padding: 1.2rem 1.4rem 1.1rem;
+  display: block; color: var(--ink);
+  transition: border-color .15s, box-shadow .15s;
+}
+.reader-card:hover {
+  text-decoration: none; border-color: var(--accent);
+  box-shadow: 0 2px 10px rgba(43, 38, 32, .06);
+}
+.reader-card .rc-name { font-size: 1.05rem; font-weight: 600; letter-spacing: .06em; }
+.reader-card .rc-chips { margin-top: .45em; display: flex; gap: .4em; flex-wrap: wrap; }
+.reader-card .rc-desc {
+  margin-top: .7em; font-size: .8rem; color: var(--ink-2); line-height: 1.9;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+.reader-card .rc-stats { margin-top: .8em; font-size: .78rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.reader-card.idle { opacity: .62; }
+
+/* ---------- 分段编辑器 ---------- */
+
+.stanza-edit p { margin: 0; }
+.gap-toggle {
+  height: .55em; margin: .15em 0; border-radius: 4px;
+  cursor: pointer; position: relative;
+  transition: background .12s;
+}
+.gap-toggle:hover { background: var(--accent-soft); }
+.gap-toggle.on { height: 1.2em; background: var(--accent-soft); }
+.gap-toggle.on::after {
+  content: "¶"; position: absolute; left: -1.4em; top: 50%;
+  transform: translateY(-50%); color: var(--accent); font-size: .7rem;
+}
+.stanza-bar { text-align: center; margin-top: 1.6rem; display: flex; gap: .7em; justify-content: center; }
+.stanza-hint { font-size: .78rem; color: var(--ink-3); text-align: center; margin-top: .8rem; }
+
+.genre-pick.on { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-deep); }
+
+.fav-mark { color: var(--warm); font-size: .85em; margin-left: .35em; }
+.btn.faved { background: var(--warm-soft); border-color: var(--warm); color: var(--warm); }
+
+/* 深读页 */
+.deep-read { max-width: 36em; margin: 0 auto; }
+.deep-read .long-form { margin-top: 2rem; line-height: 2.2; font-size: 1.02rem; white-space: pre-wrap; }
+.deep-read .back { font-size: .85rem; color: var(--ink-3); }
+
+/* 图表 tooltip */
+.tip {
+  position: fixed; z-index: 99; pointer-events: none;
+  background: var(--ink); color: #f6f1e7;
+  font-size: .78rem; line-height: 1.6;
+  padding: .5em .8em; border-radius: 6px;
+  max-width: 22em; opacity: 0; transition: opacity .12s;
+}
+.tip.show { opacity: .96; }
+
+.toast {
+  position: fixed; left: 50%; bottom: 2.5rem; transform: translateX(-50%);
+  background: var(--ink); color: #f6f1e7; font-size: .85rem;
+  padding: .6em 1.4em; border-radius: 99px; opacity: 0; transition: opacity .2s;
+  z-index: 999;
+}
+.toast.show { opacity: .95; }
+
+/* 跟帖（thread）：与盲读是两种信号，视觉上刻意朴素、不做成打分卡片 */
+.thread-search {
+  width: 100%; max-width: 22em; box-sizing: border-box;
+  padding: .5em .8em; margin: 0 0 .6em; font: inherit;
+  border: 1px solid var(--panel-2); border-radius: 8px;
+  background: var(--panel); color: var(--ink);
+}
+.thread-search:focus { outline: none; border-color: var(--accent-deep); }
+.thread-count { margin-bottom: 1.4rem; }
+.thread-list { list-style: none; padding: 0; }
+.thread-list li { padding: .7em 0; border-bottom: 1px solid var(--panel-2); }
+.thread-list li .chip { margin-left: .3em; }
+.thread-list a { font-weight: 600; }
+.thread-summary { margin-top: -1.2rem; margin-bottom: 1.8rem; }
+.thread-floor {
+  border-left: 2px solid var(--panel-2); padding: .6em 0 .6em 1em;
+  margin: .8em 0;
+}
+.thread-floor.thread-root { border-left-color: var(--accent-deep); border-left-width: 3px; }
+.thread-floor .floor-meta { font-size: .82rem; color: var(--ink-3); margin-bottom: .3em; }
+/* 逐层描边配色：一组与暖纸主题同调的低饱和大地色，相邻层永远可分。
+   左边框 + 级数标记同色，缩进封顶后深楼仍一眼看清在第几层。 */
+.thread-floor.fl-d1 { border-left-color: #2f6d62; } /* 青瓷绿 */
+.thread-floor.fl-d2 { border-left-color: #a4593d; } /* 赭陶红 */
+.thread-floor.fl-d3 { border-left-color: #8a7b32; } /* 苍黄 */
+.thread-floor.fl-d4 { border-left-color: #4a6d8c; } /* 黛蓝 */
+.thread-floor.fl-d5 { border-left-color: #855a78; } /* 紫檀 */
+.thread-floor.fl-d6 { border-left-color: #6e6557; } /* 深墨（6 级及更深封顶同色） */
+.fl-d1 .floor-depth { color: #2f6d62; border-color: #2f6d62; }
+.fl-d2 .floor-depth { color: #a4593d; border-color: #a4593d; }
+.fl-d3 .floor-depth { color: #8a7b32; border-color: #8a7b32; }
+.fl-d4 .floor-depth { color: #4a6d8c; border-color: #4a6d8c; }
+.fl-d5 .floor-depth { color: #855a78; border-color: #855a78; }
+.fl-d6 .floor-depth { color: #6e6557; border-color: #6e6557; }
+/* 级数标记：缩进封顶后仍能一眼看出嵌套第几层 */
+.floor-depth {
+  display: inline-block; font-size: .68rem; color: var(--ink-3);
+  border: 1px solid var(--panel-2); border-radius: 4px;
+  padding: 0 .35em; margin-right: .4em; vertical-align: middle;
+}
+.thread-floor .floor-text { line-height: 1.85; }
+.thread-floor .floor-text p { margin: 0 0 .7em; }
+.thread-floor .floor-text p:last-child { margin-bottom: 0; }
+
+/* 折叠：钮切最近的 .floor-branch，藏掉它的 .floor-kids 子树 */
+.floor-toggle {
+  background: none; border: none; cursor: pointer; font: inherit;
+  color: var(--ink-3); padding: 0 .35em 0 0; line-height: 1; vertical-align: middle;
+}
+.floor-toggle:hover { color: var(--accent-deep); }
+.floor-toggle .caret::before { content: "▾"; font-size: .7rem; }
+.floor-toggle .fold-n { display: none; font-size: .68rem; margin-left: .2em; }
+.floor-branch.collapsed > .thread-floor .floor-toggle .caret::before { content: "▸"; }
+.floor-branch.collapsed > .thread-floor .floor-toggle .fold-n { display: inline; }
+.floor-branch.collapsed > .floor-kids { display: none; }
+.thread-foldall { margin-left: .6em; padding: .15em .7em; font-size: .75rem; }
+/* 立场变化：暖底色一格，配合「改变了判断」章，深楼里也一眼看见谁改了主意 */
+.floor-branch.stance-shift > .thread-floor {
+  background: var(--warm-soft); border-radius: 0 6px 6px 0;
+}
+.shift-count { color: var(--warm); font-weight: 600; }
+
+/* 赞/踩：▲青绿=赞、▼赭红=踩，颜色+方向+字三重区分 */
+.vup { color: var(--accent-deep); font-weight: 600; }
+.vdown { color: var(--warm); font-weight: 600; }
+/* 加精：相对判断的正向信号，比 ▲ 更有区分度，给足视觉分量 */
+.vbest { color: #a8842c; font-weight: 700; }
+/* 顺势票：弱信号，灰显、小一号，跟主动票拉开层级 */
+.vpig { color: var(--ink-3); font-size: .82em; margin-left: .3em; }
+
+/* ---------- 词云 ---------- */
+/* 破出窄栏、贴近满宽（不受居中窄 main 限制），暖纸底、墨字、青瓷/赭双色 */
+.wc { width: 94vw; position: relative; left: 50%; transform: translateX(-50%); }
+
+.wc-head {
+  display: flex; align-items: flex-end; justify-content: space-between;
+  gap: 1.5rem; flex-wrap: wrap; margin-bottom: 1.2rem;
+  width: min(70rem, 92vw); margin-left: auto; margin-right: auto;
+}
+.wc-eyebrow {
+  font-size: .72rem; letter-spacing: .34em; text-transform: uppercase;
+  color: var(--ink-3); margin-bottom: .5em;
+}
+.wc-title { font-size: 2.1rem; letter-spacing: .18em; color: var(--ink); line-height: 1.2; }
+.wc-sub { font-size: .92rem; color: var(--ink-2); margin-top: .4em; }
+.wc-sub b { color: var(--accent-deep); font-weight: 600; }
+
+/* 段控：青瓷胶囊，选中填色——是页头考究布局的一部分，不是孤立的顶部按钮 */
+.wc-switch { display: inline-flex; background: var(--panel-2); border-radius: 999px;
+  padding: .28rem; gap: .2rem; border: 1px solid var(--line); }
+.wc-switch button {
+  font: inherit; font-size: .88rem; letter-spacing: .06em; cursor: pointer;
+  border: 0; background: transparent; color: var(--ink-2);
+  padding: .42rem 1.15rem; border-radius: 999px; transition: all .2s;
+}
+.wc-switch button:hover { color: var(--accent-deep); }
+.wc-switch button.on { background: var(--accent); color: #fdfaf3; box-shadow: 0 1px 4px rgba(47,109,98,.28); }
+
+.wc-stage {
+  position: relative;
+  height: clamp(420px, 66vh, 720px);
+  width: min(70rem, 92vw); margin: 0 auto;
+  border: 1px solid var(--line); border-radius: 14px;
+  background:
+    radial-gradient(120% 100% at 50% 0%, var(--panel) 0%, var(--paper) 70%);
+  overflow: hidden;
+}
+.wc-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+/* 悬停诗句卡：浮层，跟随词、不挡视线 */
+.wc-card {
+  position: absolute; z-index: 3; max-width: 20rem; pointer-events: none;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+  padding: .7rem .9rem; box-shadow: 0 6px 22px rgba(43,38,32,.14);
+  opacity: 0; transform: translateY(4px); transition: opacity .16s, transform .16s;
+  font-size: .9rem; line-height: 1.7;
+}
+.wc-card.show { opacity: 1; transform: translateY(0); }
+.wc-card .wc-card-w { font-size: 1.05rem; color: var(--accent-deep); font-weight: 600; letter-spacing: .04em; }
+.wc-card .wc-card-c { color: var(--ink-3); font-size: .8rem; font-variant-numeric: tabular-nums; }
+.wc-card .wc-card-ex { color: var(--ink); margin-top: .35em; }
+.wc-card .wc-card-ex.empty { color: var(--ink-3); font-style: italic; }
+
+.wc-hint {
+  position: absolute; left: 0; right: 0; bottom: .7rem; z-index: 2;
+  text-align: center; font-size: .78rem; color: var(--ink-3);
+  letter-spacing: .06em; pointer-events: none;
+}
+
+/* 词频榜：诚实条形——字号会骗眼睛，这里给真实次数 */
+.wc-bars { width: min(52rem, 92vw); margin: 3rem auto 1rem; }
+.wc-bars .wc-note { font-size: .88rem; color: var(--ink-2); margin: .3em 0 1.2em; }
+.wc-barlist { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
+.wc-barrow { display: grid; grid-template-columns: 1.6rem 5.5rem 1fr auto; align-items: center; gap: .7rem; }
+.wc-barrow .wc-rank { color: var(--ink-3); font-size: .8rem; text-align: right; font-variant-numeric: tabular-nums; }
+.wc-barrow .wc-word { color: var(--ink); font-size: .96rem; letter-spacing: .04em; }
+.wc-bartrack { height: .7rem; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
+.wc-barfill { display: block; height: 100%; border-radius: 999px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-deep)); }
+.wc-barrow .wc-cnt { color: var(--ink-2); font-size: .84rem; font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }

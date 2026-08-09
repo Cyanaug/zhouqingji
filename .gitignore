@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.pyc
+
+# IDE
+.vscode/
+.idea/
+
+# Temp / scratch
+temp.txt
+task-*.txt
+/scratch/
+/.update-backups/
+/.update-stage-*/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude Code session data (keep agent defs)
+.claude/projects/
+.claude/plans/
+.claude/sessions/
+.claude/scheduled_tasks.lock
+
+# Local safety snapshots (git history is the real backup now)
+corpus/.backups/
+results/reads/*.bak-*
+results/.write.lock
+
+# Stray run logs
+collect_tmp.log
+
+# Dispatch batch working dirs: tasks/prompts/inbox responses are reproducible
+# intermediates; ingested data lives in results/. Never commit these.
+theater/runners/batches/
+
+# Your own data — corpus/ and results/ are generated locally by you,
+# never committed. See 01_corpus_schema.md / 03_runner_and_coverage.md.
+/corpus/
+/results/
+
+# Internal fork-audit working doc — not meant for the public repo
+/FORK_REPORT.md
+
+# Sanitizer audit report - local only
+/SANITIZATION_REPORT.md
