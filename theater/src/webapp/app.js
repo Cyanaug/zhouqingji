@@ -97,16 +97,16 @@ const VENDOR_NAMES = {
 
 function modelAlias(m) {
   if (!m) return "未知";
-  let x = String(m).toLowerCase().replace(/-\d{8}$/, "");
-  if (x === "claude-3-5-sonnet") x = "claude-3.5-sonnet";
-  // 规范归并表（calibrate.py 随 scores.json 下发）：gemini 碎片归 2.5-pro 等，
-  // 展示层与校准口径永远同一套合并规则
+  let x = String(m).toLowerCase().replace(/-\d{8}$/, "").replace(/-(?:thinking|high|medium|low|minimal|extended)$/, "");
+  // 规范归并表由校准结果下发；公开发行版不内置精确模型 ID。
   const canon = (S && S.calibration && S.calibration.meta && S.calibration.meta.aliases) || {};
   x = canon[x] || x;
-  // Claude 系列版本号是连字符切的（sonnet-4-6），单独拼回点号：claude-sonnet-4-6 → "Claude Sonnet 4.6"
+  x = x.replace(/-(?:thinking|high|medium|low|minimal|extended)$/, "");
+  x = canon[x] || x;
+  // 某些模型家族用连字符拆分版本号，显示时拼回点号。
   const cm = x.match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:-(\d+))?$/);
   if (cm) return "Claude " + cm[1][0].toUpperCase() + cm[1].slice(1) + " " + cm[2] + (cm[3] ? "." + cm[3] : "");
-  // 其余厂商：版本号本来就用点号（gemini-2.5-pro），按连字符分段查厂商名+逐段首字母大写
+  // 其余厂商按连字符分段，查厂商名并逐段格式化。
   const parts = x.split("-");
   const vendor = VENDOR_NAMES[parts[0]];
   if (!vendor) return x; // 没见过的家族，原样显示，不瞎猜大小写

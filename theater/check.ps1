@@ -7,6 +7,8 @@ try {
         @('python', @('-m', 'compileall', '-q', 'theater/runners', 'theater/src', 'theater/tests')),
         @('python', @('theater/tests/test_sidecars.py')),
         @('python', @('theater/tests/test_project_config.py')),
+        @('python', @('theater/tests/test_public_sanitization.py')),
+        @('python', @('theater/tests/test_model_canon.py')),
         @('python', @('theater/tests/test_thread.py')),
         @('python', @('theater/tests/test_votes.py')),
         @('python', @('theater/tests/test_update.py')),

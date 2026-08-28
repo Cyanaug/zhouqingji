@@ -771,9 +771,9 @@ def cmd_plan(args):
             }
             tasks.append(t)
 
-    BATCHES.mkdir(exist_ok=True)
     out = Path(args.out) if args.out else \
         BATCHES / f"batch-{time.strftime('%Y%m%d-%H%M%S')}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(tasks, ensure_ascii=False, indent=2),
                    encoding="utf-8")
     kind = "批注本" if with_note else "盲读"
@@ -790,7 +790,7 @@ def cmd_plan(args):
 def cmd_collect(args):
     """信箱流程：subagent 把各自的读稿结果写到 inbox/task-NN.response.json，
     这里与任务元数据合并成冻结 schema 记录并落盘——中间没有任何人手/大模型转录。
-    response 文件格式：{"model": "claude-...", "score": 7.0, "reaction": "...", "long_form": null}
+    response 文件格式：{"model": "<运行时返回的模型 ID>", "score": 7.0, "reaction": "...", "long_form": null}
     """
     tdir = Path(args.tasks)
     inbox = Path(args.inbox)

@@ -25,6 +25,7 @@ import argparse
 import bisect
 import json
 import time
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -37,22 +38,12 @@ REFERENCE = OUT_DIR / "reference-v1.json"
 REPORT = OUT_DIR / "report.md"
 SCORES = OUT_DIR / "scores.json"
 
-# 模型标签规范化：不改写 reads.jsonl 历史记录，只在读取时映射。
-# 不明 gemini 碎片按约定归入 gemini-2.5-pro；haiku 两个写法合并；
-# 2024 年代的 claude 标签（疑似派发方误报）归入最近的 sonnet。
-MODEL_ALIASES = {
-    "claude-haiku-4-5-20251001": "claude-haiku-4-5",
-    "claude-3.5-sonnet": "claude-sonnet-4-6",
-    "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
-    "gemini": "gemini-2.5-pro",
-    "gemini-1.5-pro": "gemini-2.5-pro",
-    "gemini-1.5-flash": "gemini-2.5-pro",
-    "gemini-2.0": "gemini-2.5-pro",
-    "gemini-2.0-pro": "gemini-2.5-pro",
-    "gemini-2.0-pro-exp": "gemini-2.5-pro",
-    "gemini-exp-1121": "gemini-2.5-pro",
-    "gemini-2.5-flash": "gemini-2.5-pro",
-}
+# 剥离思考/推理档位与 thinking 后缀：如 -thinking, -high, -medium, -low, -minimal, -extended
+THINKING_SUFFIX_RE = re.compile(r"-(?:thinking|high|medium|low|minimal|extended)$", re.IGNORECASE)
+
+# 公开发行版不内置任何厂商或版本的精确模型别名。reads.jsonl 保留运行时
+# 返回的原始 ID；这里只做供应商无关的思考档位后缀清理。
+MODEL_ALIASES = {}
 
 # —— 校准池按"评判标准"分界，不按作品当前文体 ——
 # v1.3（2026-07-17）起，非诗文体经设置页勾选后可被读，读者 prompt 带「体裁转换」段，
@@ -72,7 +63,9 @@ D_TRUST = 0.6             # 偏差感知信任半径：|proxy_dev| 达此值时�
 
 
 def canon_model(m):
-    m = (m or "unknown").strip()
+    m = (m or "unknown").strip().lower()
+    m = MODEL_ALIASES.get(m, m)
+    m = THINKING_SUFFIX_RE.sub("", m)
     return MODEL_ALIASES.get(m, m)
 
 

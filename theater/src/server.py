@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -41,7 +42,8 @@ PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 WEBAPP = Path(__file__).resolve().parent / "webapp"
 VERSION_FILE = ROOT / "VERSION"
 PUBLIC_VERSION_URL = "https://raw.githubusercontent.com/Cyanaug/zhouqingji/main/VERSION"
-PUBLIC_ARCHIVE_URL = "https://github.com/Cyanaug/zhouqingji/archive/refs/heads/main.zip"
+PUBLIC_ARCHIVE_URL = "https://github.com/Cyanaug/zhouqingji/archive/refs/tags/v{version}.zip"
+PUBLIC_REPO_URL = "https://github.com/Cyanaug/zhouqingji"
 UPDATE_MAX_DOWNLOAD = 50 * 1024 * 1024
 UPDATE_MAX_EXPANDED = 120 * 1024 * 1024
 UPDATE_MAX_FILES = 5000
@@ -665,6 +667,30 @@ def _own_git_repo():
         return False
 
 
+def _normalized_git_url(url):
+    """把官方仓库常见 HTTPS/SSH 写法归一，供更新前做来源校验。"""
+    value = (url or "").strip().replace("\\", "/")
+    lower = value.lower()
+    if lower.startswith("git@github.com:"):
+        value = "https://github.com/" + value.split(":", 1)[1]
+    elif lower.startswith("ssh://git@github.com/"):
+        value = "https://github.com/" + value[len("ssh://git@github.com/"):]
+    return value.rstrip("/").removesuffix(".git").lower()
+
+
+def _official_upstream():
+    """返回官方上游名；拒绝让一键更新跟随被改写的远端。"""
+    rc, upstream, _ = _git(
+        ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=10)
+    if rc != 0 or "/" not in upstream:
+        return None, "没有配置远端上游分支，无法检查更新。"
+    remote = upstream.split("/", 1)[0]
+    rc, url, _ = _git(["remote", "get-url", remote], timeout=10)
+    if rc != 0 or _normalized_git_url(url) != _normalized_git_url(PUBLIC_REPO_URL):
+        return None, "当前上游不是昼青集官方公开仓库；为避免拉取未知代码，已中止。"
+    return upstream, None
+
+
 def _download_url(url, max_bytes=UPDATE_MAX_DOWNLOAD, timeout=60):
     req = urllib.request.Request(url, headers={"User-Agent": "zhouqingji-updater/1"})
     try:
@@ -698,7 +724,7 @@ def _updatable_path(rel):
     return any(posix.startswith(prefix) for prefix in UPDATE_PREFIXES)
 
 
-def _validated_archive_files(data):
+def _validated_archive_files(data, expected_version=None):
     """返回 {仓内相对路径: bytes}；拒绝越界、链接和异常膨胀包。"""
     try:
         archive = zipfile.ZipFile(io.BytesIO(data))
@@ -731,12 +757,20 @@ def _validated_archive_files(data):
     required = {PurePosixPath("VERSION"), PurePosixPath("theater/src/server.py")}
     if not required.issubset(files):
         raise ValueError("更新包缺少 VERSION 或 server.py，已中止")
+    if expected_version is not None:
+        try:
+            archive_version = files[PurePosixPath("VERSION")].decode("utf-8").strip()
+        except UnicodeDecodeError as exc:
+            raise ValueError("更新包 VERSION 不是有效 UTF-8") from exc
+        if archive_version != expected_version:
+            raise ValueError(
+                f"更新包版本 {archive_version or '?'} 与预期 {expected_version} 不一致")
     return files
 
 
-def install_update_archive(data, root=ROOT):
+def install_update_archive(data, root=ROOT, expected_version=None):
     """把已下载公开发行包事务式安装到 ZIP 版；返回更新与备份信息。"""
-    files = _validated_archive_files(data)
+    files = _validated_archive_files(data, expected_version=expected_version)
     root = Path(root).resolve()
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup_root = root / ".update-backups" / stamp
@@ -790,7 +824,7 @@ def update_check():
         except (RuntimeError, ValueError, UnicodeDecodeError) as exc:
             return {"ok": False, "error": str(exc), "local_version": app_version(),
                     "install_type": "archive"}
-        if not remote_ver or len(remote_ver) > 40:
+        if not remote_ver or len(remote_ver) > 40 or _version_key(remote_ver) is None:
             return {"ok": False, "error": "远端 VERSION 内容异常",
                     "local_version": app_version(), "install_type": "archive"}
         local_ver = app_version()
@@ -799,9 +833,9 @@ def update_check():
         return {"ok": True, "behind": int(newer),
                 "local_version": local_ver, "remote_version": remote_ver,
                 "install_type": "archive"}
-    rc, upstream, _ = _git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"], timeout=10)
-    if rc != 0:
-        return {"ok": False, "error": "没有配置远端上游分支，无法检查更新。",
+    upstream, upstream_error = _official_upstream()
+    if upstream_error:
+        return {"ok": False, "error": upstream_error,
                 "local_version": app_version()}
     rc, _, err = _git(["fetch", "--quiet"], timeout=60)
     if rc != 0:
@@ -819,13 +853,26 @@ def update_check():
 def update_pull():
     """clone 快进拉取；ZIP 安装校验允许清单、备份后原子替换。"""
     if not _own_git_repo():
+        check = update_check()
+        if not check.get("ok"):
+            return check
+        if not check.get("behind"):
+            return {"ok": True, "message": "已是最新版本。",
+                    "new_version": app_version(), "restart_needed": False,
+                    "install_type": "archive"}
+        remote_ver = check["remote_version"]
         try:
-            result = install_update_archive(_download_url(PUBLIC_ARCHIVE_URL), ROOT)
+            archive_url = PUBLIC_ARCHIVE_URL.format(version=remote_ver)
+            result = install_update_archive(
+                _download_url(archive_url), ROOT, expected_version=remote_ver)
         except (RuntimeError, ValueError, OSError, zipfile.BadZipFile) as exc:
             return {"ok": False, "error": f"ZIP 更新已中止：{exc}"}
         return {"ok": True, "message": f"已更新 {result['changed']} 个发行文件。",
                 "new_version": app_version(), "restart_needed": True,
                 "install_type": "archive", "backup": result["backup"]}
+    _, upstream_error = _official_upstream()
+    if upstream_error:
+        return {"ok": False, "error": upstream_error}
     rc, dirty, _ = _git(["status", "--porcelain"], timeout=15)
     if rc != 0:
         return {"ok": False, "error": "读不到 git 状态，已中止。"}
@@ -842,6 +889,25 @@ def update_pull():
             "new_version": app_version(), "restart_needed": True}
 
 
+def _is_local_host_header(value, port):
+    """拒绝 DNS rebinding：Host 必须明确指向当前回环服务。"""
+    host = (value or "").strip().lower()
+    return host in {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+
+def _is_local_origin(value, port):
+    """有 Origin 时只接受当前回环源；无 Origin 留给本地 CLI。"""
+    if not value:
+        return True
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        return (parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost"}
+                and parsed.port == port and parsed.username is None
+                and parsed.password is None)
+    except ValueError:
+        return False
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 安静
@@ -853,10 +919,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
         self.end_headers()
         self.wfile.write(data)
 
+    def _local_request_allowed(self):
+        port = int(self.server.server_address[1])
+        return (_is_local_host_header(self.headers.get("Host"), port)
+                and _is_local_origin(self.headers.get("Origin"), port))
+
     def do_GET(self):
+        if not self._local_request_allowed():
+            return self._send(403, {"error": "forbidden origin"})
         path = self.path.split("?")[0]
         if path == "/api/wordcloud":
             return self._send(200, load_wordcloud())
@@ -888,6 +964,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._local_request_allowed():
+            return self._send(403, {"error": "forbidden origin"})
         length = int(self.headers.get("Content-Length", 0))
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")

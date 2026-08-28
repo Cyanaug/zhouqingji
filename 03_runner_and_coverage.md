@@ -10,7 +10,7 @@
   "poem_id": "zq-0001",
   "reader": {
     "persona_id": "classical-scholar",
-    "model": "claude-...",
+    "model": "<运行时返回的模型 ID>",
     "knows_诠释": false,
     "knows_date": false
   },

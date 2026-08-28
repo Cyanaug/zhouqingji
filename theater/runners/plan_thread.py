@@ -177,9 +177,12 @@ def cmd_collect(args):
             silence_files.append(rf)
             continue
 
+        def _clean_quotes(s: str) -> str:
+            return s.replace("“", '"').replace("”", '"').replace("‘", '"').replace("’", '"').replace("'", '"')
+
         quote = (resp.get("quote") or "").strip()
-        parent_norm = " ".join(t["parent_text"].split())
-        quote_norm = " ".join(quote.split())
+        parent_norm = _clean_quotes(" ".join(t["parent_text"].split()))
+        quote_norm = _clean_quotes(" ".join(quote.split()))
         if not quote or quote_norm not in parent_norm:
             rejected.mkdir(parents=True, exist_ok=True)
             rf.rename(rejected / rf.name)

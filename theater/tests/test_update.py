@@ -65,7 +65,46 @@ def test_archive_rejects_traversal():
     print("[ok] ZIP 路径穿越拒绝")
 
 
+def test_archive_version_must_match_expected_tag():
+    data = _archive({
+        "VERSION": "9.1\n",
+        "theater/src/server.py": "new server",
+    })
+    try:
+        S._validated_archive_files(data, expected_version="9.2")
+        assert False, "归档版本与目标 tag 不一致时必须拒绝"
+    except ValueError:
+        pass
+    assert S._validated_archive_files(data, expected_version="9.1")
+    print("[ok] ZIP 版本与目标 tag 一致性校验")
+
+
+def test_local_request_guards():
+    port = 8737
+    assert S._is_local_host_header("127.0.0.1:8737", port)
+    assert S._is_local_host_header("localhost:8737", port)
+    assert not S._is_local_host_header("example.test:8737", port)
+    assert S._is_local_origin(None, port)
+    assert S._is_local_origin("http://127.0.0.1:8737", port)
+    assert S._is_local_origin("http://localhost:8737", port)
+    assert not S._is_local_origin("https://example.test", port)
+    print("[ok] 本地 Host / Origin 防护")
+
+
+def test_official_remote_url_normalization():
+    official = "https://github.com/Cyanaug/zhouqingji"
+    assert S._normalized_git_url(official + ".git") == S._normalized_git_url(official)
+    assert S._normalized_git_url("git@github.com:Cyanaug/zhouqingji.git") == \
+        S._normalized_git_url(official)
+    assert S._normalized_git_url("https://example.test/other/repo.git") != \
+        S._normalized_git_url(official)
+    print("[ok] Git 更新仅接受官方远端")
+
+
 if __name__ == "__main__":
     test_safe_archive_update()
     test_archive_rejects_traversal()
+    test_archive_version_must_match_expected_tag()
+    test_local_request_guards()
+    test_official_remote_url_normalization()
     print("ALL PASS")

@@ -46,7 +46,7 @@ python runner.py plan --poem-ids "<逗号分隔的id>" --readers <每首几读> 
 ```
 PROMPT 文件：<仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt
 RESPONSE 输出文件：<仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json
-回执 model 字段填：claude-haiku-4-5
+回执 model 字段填：<运行时实际返回的模型 ID>
 ```
 
 - **波次并发**：一个回复里并行发 15–20 个 Agent 调用为一波，波与波之间紧接着发，吃提示缓存。不要一个一个串行发。
@@ -83,7 +83,7 @@ Rules:
 - 用「」做中文引号
 - long_form 为 null，除非真的有超出短评的话要说
 - 只写 JSON 文件
-- model 填你实际运行的底层模型 ID（如 glm-5v、gemini-2.5-pro），**不是派发工具/平台名**（codebuddy、cursor 是工具名，不是模型）。此字段保持模型自报、不由派发方代填：平台悄悄降级换模型时（名义 3.1-pro 实跑 2.5-pro 之类），代填会把真实出处盖掉
+- model 填运行时实际返回的底层模型 ID，**不是派发工具/平台名**。此字段保持模型自报、不由派发方代填：平台名义型号与实际返回值不一致时，代填会把真实出处盖掉
 ```
 
 ## 4. 质检（collect 之前，必做）

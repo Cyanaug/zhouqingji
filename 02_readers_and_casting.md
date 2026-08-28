@@ -7,7 +7,7 @@
 ```json
 {
   "persona_id": "classical-scholar",
-  "model": "claude-... | gpt-... | gemini-... | ...",
+  "model": "<运行时返回的模型 ID>",
   "persona": "老学究，重格律与用典，读诗先看结构",
   "knows_诠释": false,      // 是否预先读过 昼青·诠释.md（知情 vs 初见）
   "knows_date": false,     // 是否知道写作时间（时序感 vs 时间盲）

@@ -28,14 +28,10 @@ def enable_paddle():
     try:
         import paddle
     except ImportError:
-        default_logger.debug("Installing paddle-tiny, please wait a minute......")
-        os.system("pip install paddlepaddle-tiny")
-        try:
-            import paddle
-        except ImportError:
-            default_logger.debug(
-                "Import paddle error, please use command to install: pip install paddlepaddle-tiny==1.6.1."
-                "Now, back to jieba basic cut......")
+        default_logger.debug(
+            "Paddle is unavailable. Automatic package installation is disabled; "
+            "falling back to jieba basic cut.")
+        return
     if paddle.__version__ < '1.6.1':
         default_logger.debug("Find your own paddle version doesn't satisfy the minimum requirement (1.6.1), "
                              "please install paddle tiny by 'pip install --upgrade paddlepaddle-tiny', "
