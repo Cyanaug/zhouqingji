@@ -12,6 +12,7 @@ try {
         @('python', @('theater/tests/test_thread.py')),
         @('python', @('theater/tests/test_votes.py')),
         @('python', @('theater/tests/test_update.py')),
+        @('python', @('theater/tests/test_mobile.py')),
         @('python', @('theater/runners/audit_data.py'))
     )
     foreach ($check in $checks) {

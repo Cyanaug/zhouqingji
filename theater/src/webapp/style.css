@@ -497,6 +497,142 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 /* 顺势票：弱信号，灰显、小一号，跟主动票拉开层级 */
 .vpig { color: var(--ink-3); font-size: .82em; margin-left: .3em; }
 
+/* ---------- 掌中册 / 手机连接签 ---------- */
+
+.mobile-ribbon {
+  display: flex; align-items: center; justify-content: center; gap: .8em;
+  min-height: 2.2rem; padding: .34rem 1rem;
+  border-bottom: 1px solid #cfded8; background: #edf4f1;
+  color: var(--accent-deep); font-size: .76rem; letter-spacing: .06em;
+}
+.mobile-ribbon[hidden] { display: none; }
+.mobile-ribbon b { font-weight: 600; }
+.mobile-ribbon span:last-child { color: var(--ink-3); }
+.mobile-ribbon-mark {
+  padding: .05em .55em; border: 1px solid #9dbdb3; border-radius: 999px;
+  letter-spacing: .18em; font-size: .68rem;
+}
+
+.mobile-mode .author-tools,
+.mobile-mode .curate-btn,
+.mobile-mode #rd-new,
+.mobile-mode [data-restore],
+.mobile-mode #pa-edit,
+.mobile-mode #pa-del,
+.mobile-mode #pa-revert,
+.mobile-mode #pa-hide,
+.mobile-mode #promote { display: none !important; }
+
+.mobile-poem-tools {
+  display: flex; justify-content: center; gap: .55rem; flex-wrap: wrap;
+  margin: 1.2rem 0 .4rem;
+}
+.mobile-note {
+  max-width: 39rem; margin: 1.4rem auto 0; padding: 1rem 1.15rem;
+  background: linear-gradient(135deg, var(--panel), #f1f5f2);
+  border: 1px solid #cfddd7; border-radius: 10px;
+}
+.mobile-note summary { cursor: pointer; color: var(--accent-deep); font-size: .85rem; letter-spacing: .12em; }
+.mobile-note textarea {
+  width: 100%; resize: vertical; margin-top: .9rem; padding: .75rem .85rem;
+  border: 1px solid var(--line); border-radius: 8px; background: rgba(252,249,242,.88);
+  color: var(--ink); font: .92rem/1.8 var(--serif);
+}
+.mobile-note p { color: var(--ink-3); font-size: .72rem; margin-top: .35rem; }
+
+.pocket-kicker {
+  color: var(--accent-deep); font-size: .72rem; letter-spacing: .28em;
+  margin-bottom: .4rem;
+}
+.pocket-status {
+  display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 1rem;
+  padding: 1.15rem 1.2rem; margin: 1.3rem 0;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+}
+.pocket-status.online { border-color: #b7cfc6; background: #f1f6f3; }
+.pocket-status.offline { border-color: #dbcdb8; background: #faf5eb; }
+.pocket-status b { display: block; font-size: .95rem; letter-spacing: .06em; }
+.pocket-status p { color: var(--ink-3); font-size: .77rem; line-height: 1.55; margin-top: .2rem; }
+.pocket-seal {
+  width: 2.55rem; height: 2.55rem; display: grid; place-items: center;
+  border: 1px solid currentColor; border-radius: 50%; color: var(--accent-deep);
+  font-size: 1.05rem; box-shadow: inset 0 0 0 3px var(--panel);
+}
+.offline .pocket-seal { color: var(--warm); }
+.pocket-counts {
+  display: grid; grid-template-columns: repeat(3, 1fr); margin: 1rem 0 1.6rem;
+  border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+}
+.pocket-counts div { text-align: center; padding: 1rem .5rem; border-right: 1px solid var(--line); }
+.pocket-counts div:last-child { border-right: 0; }
+.pocket-counts b { display: block; font-size: 1.35rem; color: var(--accent-deep); font-variant-numeric: tabular-nums; }
+.pocket-counts span { color: var(--ink-3); font-size: .72rem; letter-spacing: .08em; }
+.pocket-recent, .pocket-manage, .pocket-install { margin-top: 1.1rem; }
+.pocket-recent p { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem 0; border-top: 1px dashed var(--line); }
+.pocket-recent p span { color: var(--ink-3); font-size: .74rem; white-space: nowrap; }
+.pocket-actions, .mobile-access-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
+.file-btn input { display: none; }
+.pocket-install-hint { color: var(--ink-3); font-size: .78rem; }
+
+.mobile-access-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.mobile-access-head h2 { font-size: 1.12rem; letter-spacing: .1em; }
+.mobile-access-light {
+  flex: 0 0 auto; padding: .25em .75em; border-radius: 999px;
+  background: var(--panel-2); color: var(--ink-3); font-size: .72rem;
+}
+.mobile-access-light.on { background: var(--accent-soft); color: var(--accent-deep); }
+.mobile-access-status { margin: 1.2rem 0; }
+.mobile-access-empty {
+  padding: 1rem; border: 1px dashed var(--line); border-radius: 8px;
+  text-align: center; color: var(--ink-3); font-size: .82rem;
+}
+.connection-slip {
+  display: grid; grid-template-columns: minmax(9rem, 12rem) 1fr; gap: 1.35rem; align-items: center;
+  padding: 1.2rem; border: 1px solid #cbdad4; border-radius: 12px;
+  background: linear-gradient(145deg, #fdfbf5, #edf4f1);
+}
+.connection-qr { display: block; width: 100%; aspect-ratio: 1; padding: .35rem; background: var(--panel); border-radius: 8px; }
+.connection-copy > b { display: block; color: var(--accent-deep); font-size: 1rem; margin-bottom: .15rem; }
+.connection-copy > p, .connection-copy > small { color: var(--ink-3); font-size: .74rem; line-height: 1.6; }
+.connection-copy > small { display: block; margin-top: .55rem; }
+.connection-url {
+  width: 100%; display: grid; grid-template-columns: auto 1fr auto; gap: .6em;
+  margin-top: .55rem; padding: .55rem .65rem; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 7px; background: rgba(252,249,242,.82);
+  color: var(--ink-2); text-align: left; font: .72rem/1.4 ui-monospace, "Cascadia Mono", monospace;
+}
+.connection-url span, .connection-url em { color: var(--ink-3); font: normal .7rem/1.4 var(--serif); }
+.connection-url em { color: var(--accent-deep); }
+.mobile-access-actions > span { color: var(--ink-3); font-size: .75rem; }
+.mobile-tradeoff { margin-top: 1rem; padding-top: .85rem; border-top: 1px dashed var(--line); }
+.mobile-tradeoff summary { cursor: pointer; color: var(--ink-2); font-size: .8rem; }
+.mobile-tradeoff p { color: var(--ink-3); font-size: .75rem; margin-top: .65rem; line-height: 1.7; }
+.mobile-private { margin-top: .75rem; padding-top: .75rem; border-top: 1px dashed var(--line); }
+.mobile-private summary { cursor: pointer; color: var(--ink-2); font-size: .8rem; }
+.mobile-private > p { color: var(--ink-3); font-size: .75rem; line-height: 1.7; }
+.mobile-private-row { display: grid; grid-template-columns: 1fr auto; gap: .65rem; align-items: center; }
+.mobile-private-row input { min-width: 0; }
+.private-slip { margin-top: .8rem; }
+
+@media (max-width: 46rem) {
+  .site-head { display: block; padding: .9rem 4vw .55rem; }
+  .brand { display: block; margin: 0 0 .55rem .35rem; }
+  .site-head nav {
+    display: flex; gap: 1.15rem; overflow-x: auto; padding: .15rem .35rem .45rem;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+  }
+  .site-head nav::-webkit-scrollbar { display: none; }
+  .site-head nav a { margin-left: 0; white-space: nowrap; font-size: .82rem; }
+  main { width: min(42rem, 90vw); padding-top: 1.7rem; }
+  .mobile-ribbon { justify-content: flex-start; overflow: hidden; white-space: nowrap; }
+  .mobile-ribbon span:last-child { overflow: hidden; text-overflow: ellipsis; }
+  .pocket-status { grid-template-columns: auto 1fr; }
+  .pocket-status .btn { grid-column: 1 / -1; justify-self: stretch; }
+  .connection-slip { grid-template-columns: 1fr; }
+  .connection-qr { width: min(14rem, 72vw); margin: 0 auto; }
+  .mobile-private-row { grid-template-columns: 1fr; }
+}
+
 /* ---------- 词云 ---------- */
 /* 破出窄栏、贴近满宽（不受居中窄 main 限制），暖纸底、墨字、青瓷/赭双色 */
 .wc { width: 94vw; position: relative; left: 50%; transform: translateX(-50%); }

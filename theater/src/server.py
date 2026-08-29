@@ -9,12 +9,18 @@
 
 启动：python theater/src/server.py  →  http://localhost:8737
 """
+import base64
 import hashlib
+import hmac
+import importlib.util
 import io
+import ipaddress
 import json
 import os
 import re
+import secrets
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
@@ -52,7 +58,7 @@ UPDATE_ROOT_FILES = {
     ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "README.md", "VERSION",
     "00_START_HERE.md", "01_corpus_schema.md", "02_readers_and_casting.md",
     "03_runner_and_coverage.md", "04_app_and_design.md", "05_run_modes.md",
-    "PROGRESS.md",
+    "MOBILE_ACCESS.md", "PROGRESS.md",
 }
 UPDATE_PREFIXES = (
     ".agents/skills/", ".codex/agents/", ".claude/agents/", ".claude/skills/",
@@ -75,6 +81,7 @@ DEFAULT_SETTINGS = {
     "read_genres": [],           # 诗（现代诗/词/歌词）永远在读者池；其他文体勾选才读
     "genre_notes": {},           # 文体 → 作者补充的评判要求（附进读者 prompt）
     "port": 8737,                # 重启后生效
+    "mobile_port": 8738,         # 手机临时访问端口；只读服务，运行中可开关
     "dispatch": {                # 派发 agent 的默认偏好
         "default_model": "",    # 不替用户预设供应商；首次派发时明确选择
         "default_transport": "auto",
@@ -87,6 +94,7 @@ SETTINGS = ROOT / "corpus" / "settings.json"
 MIME = {".html": "text/html; charset=utf-8",
         ".css": "text/css; charset=utf-8",
         ".js": "text/javascript; charset=utf-8",
+        ".webmanifest": "application/manifest+json; charset=utf-8",
         ".svg": "image/svg+xml",
         ".png": "image/png",
         ".ico": "image/x-icon",
@@ -506,14 +514,15 @@ def set_settings(payload):
             cur["genre_notes"] = v
         else:
             cur.pop("genre_notes", None)
-    if "port" in payload:
-        v = payload["port"]
-        if v in (None, ""):
-            cur.pop("port", None)
-        elif not isinstance(v, int) or not 1024 <= v <= 65535:
-            raise ValueError("port 需为 1024–65535 的整数")
-        else:
-            cur["port"] = v
+    for port_key in ("port", "mobile_port"):
+        if port_key in payload:
+            v = payload[port_key]
+            if v in (None, ""):
+                cur.pop(port_key, None)
+            elif not isinstance(v, int) or not 1024 <= v <= 65535:
+                raise ValueError(f"{port_key} 需为 1024–65535 的整数")
+            else:
+                cur[port_key] = v
     if "dispatch" in payload:
         dp = payload["dispatch"]
         if not isinstance(dp, dict):
@@ -889,6 +898,304 @@ def update_pull():
             "new_version": app_version(), "restart_needed": True}
 
 
+def build_author_state():
+    """桌面作者模式的完整状态。集中在一处，避免导出/手机视图各抄一份。"""
+    return {
+        "poems": load_corpus(),
+        "reads": load_reads(),
+        "personas": load_personas(),
+        "personas_defaults": json.loads(PERSONAS.read_text(encoding="utf-8")),
+        "personas_sidecar": load_personas_sidecar(),
+        "curation": load_curation(),
+        "thread_meta": load_thread_meta(),
+        "votes": load_vote_tally(),
+        "voter_votes": load_voter_votes(),
+        "favs": load_favs(),
+        "stanzas": load_stanzas(),
+        "calibration": load_calibration(),
+        "settings": load_settings(),
+        "version": app_version(),
+    }
+
+
+def build_mobile_snapshot(include_wordcloud=True):
+    """生成只读移动快照；不落盘、不维护第二份真源。
+
+    快照保留作者在手机阅读所需的正文、自注、评论和派生统计，但移除设备 GUID、
+    原始来源清单、人设编辑底稿、派发设置与本地端口。手机自己的偏爱/进度/随记由
+    浏览器独立保存，不进入这份从电脑生成的状态，因此下次刷新不会覆盖它们。
+    """
+    state = build_author_state()
+    poems = [{k: v for k, v in poem.items() if k not in {"guid", "source"}}
+             for poem in state["poems"]]
+    settings = state.get("settings") or {}
+    mobile = {
+        "poems": poems,
+        "reads": state["reads"],
+        "personas": state["personas"],
+        "personas_defaults": [],
+        "personas_sidecar": [],
+        "curation": state["curation"],
+        "thread_meta": state["thread_meta"],
+        "votes": state["votes"],
+        "voter_votes": state["voter_votes"],
+        "favs": state["favs"],
+        "stanzas": state["stanzas"],
+        "calibration": state["calibration"],
+        "settings": {k: settings.get(k) for k in (
+            "site_title", "site_subtitle", "footer_text", "default_view", "score_badge")},
+        "version": state["version"],
+    }
+    if include_wordcloud:
+        try:
+            mobile["wordcloud"] = load_wordcloud()
+        except Exception as exc:
+            print(f"[mobile] 词云快照生成失败，已略过：{exc}")
+            mobile["wordcloud"] = None
+    canonical = json.dumps(mobile, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+    mobile["mobile"] = {
+        "schema": 1,
+        "mode": "readonly",
+        "generated_at": now_iso(),
+        "content_hash": hashlib.sha256(canonical).hexdigest(),
+        "poems": len(mobile["poems"]),
+        "reads": len(mobile["reads"]),
+    }
+    return mobile
+
+
+def render_mobile_snapshot_html(snapshot=None):
+    """把同一套前端与一份移动快照嵌成单 HTML；全程不引用外网资源。"""
+    snapshot = snapshot or build_mobile_snapshot(include_wordcloud=True)
+    index = (WEBAPP / "index.html").read_text(encoding="utf-8")
+    css = (WEBAPP / "style.css").read_text(encoding="utf-8")
+    app_js = (WEBAPP / "app.js").read_text(encoding="utf-8")
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
+    payload = payload.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
+    index = index.replace('content="author"', 'content="snapshot"')
+    index = index.replace('<link rel="manifest" href="manifest.webmanifest">', "")
+    index = index.replace('<link rel="stylesheet" href="style.css">', f"<style>\n{css}\n</style>")
+    inline = f"<script>window.__ZQ_SNAPSHOT__={payload};</script>\n<script>\n{app_js}\n</script>"
+    index = index.replace('<script src="app.js"></script>', inline)
+    icon = WEBAPP / "favicon.png"
+    if icon.exists():
+        uri = "data:image/png;base64," + base64.b64encode(icon.read_bytes()).decode("ascii")
+        index = index.replace('href="favicon.png"', f'href="{uri}"')
+        index = index.replace('href="apple-touch-icon.png"', f'href="{uri}"')
+    index = re.sub(r'<link rel="icon" href="favicon\.ico"[^>]*>\s*', "", index)
+    return index.encode("utf-8")
+
+
+def _local_ipv4s():
+    """列出可给手机打开的本机 IPv4；包含局域网与可选的 Tailscale 地址。"""
+    found = set()
+    try:
+        for item in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            found.add(item[4][0])
+    except OSError:
+        pass
+    try:
+        proc = subprocess.run(["tailscale", "ip", "-4"], cwd=ROOT,
+                              capture_output=True, text=True, timeout=5,
+                              creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        if proc.returncode == 0:
+            found.update(x.strip() for x in proc.stdout.splitlines() if x.strip())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    out = []
+    for value in found:
+        try:
+            ip = ipaddress.ip_address(value)
+        except ValueError:
+            continue
+        if ip.version == 4 and not ip.is_loopback and not ip.is_link_local and not ip.is_multicast:
+            out.append(value)
+    return sorted(out, key=lambda x: tuple(int(p) for p in x.split(".")))
+
+
+_QR_MODULE = None
+
+
+def qr_svg(text, border=4):
+    """用随发行包附带的 MIT 实现本机生成二维码；访问口令不会发送给第三方。"""
+    global _QR_MODULE
+    if _QR_MODULE is None:
+        path = ROOT / "theater" / "vendor" / "qrcodegen.py"
+        spec = importlib.util.spec_from_file_location("zhouqingji_qrcodegen", path)
+        if not spec or not spec.loader:
+            raise RuntimeError("二维码组件无法加载")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _QR_MODULE = module
+    qr = _QR_MODULE.QrCode.encode_text(text, _QR_MODULE.QrCode.Ecc.MEDIUM)
+    size = qr.get_size()
+    parts = []
+    for y in range(size):
+        for x in range(size):
+            if qr.get_module(x, y):
+                parts.append(f"M{x + border},{y + border}h1v1h-1z")
+    dim = size + border * 2
+    path_data = "".join(parts)
+    return (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {dim} {dim}" '
+            f'shape-rendering="crispEdges"><rect width="100%" height="100%" fill="#fcf9f2"/>'
+            f'<path d="{path_data}" fill="#24544c"/></svg>').encode("utf-8")
+
+
+class MobileHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class MobileHandler(BaseHTTPRequestHandler):
+    """手机观看专用服务：静态壳可见，数据需随机口令；所有 POST 一律拒绝。"""
+
+    def log_message(self, fmt, *args):
+        pass
+
+    def _send(self, code, body=b"", ctype="application/json; charset=utf-8",
+              cache="no-store", headers=None):
+        data = body if isinstance(body, bytes) else \
+            json.dumps(body, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", cache)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
+        self.end_headers()
+        if data:
+            self.wfile.write(data)
+
+    def _authorized(self):
+        supplied = self.headers.get("X-ZQ-Mobile-Token", "")
+        return bool(supplied) and hmac.compare_digest(supplied, self.server.mobile_token)
+
+    def do_GET(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path == "/api/mobile-state":
+            if not self._authorized():
+                return self._send(401, {"error": "手机访问口令无效，请从电脑重新扫码。"})
+            snapshot = build_mobile_snapshot(include_wordcloud=True)
+            etag = '"' + snapshot["mobile"]["content_hash"] + '"'
+            if self.headers.get("If-None-Match") == etag:
+                return self._send(304, b"", headers={"ETag": etag})
+            return self._send(200, snapshot, headers={"ETag": etag})
+        if path == "/api/wordcloud":
+            if not self._authorized():
+                return self._send(401, {"error": "手机访问口令无效。"})
+            return self._send(200, load_wordcloud())
+        if path == "/":
+            html = (WEBAPP / "index.html").read_text(encoding="utf-8")
+            html = html.replace('content="author"', 'content="mobile"')
+            return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
+        f = (WEBAPP / path.lstrip("/")).resolve()
+        if WEBAPP.resolve() in f.parents and f.is_file():
+            extra = {"Service-Worker-Allowed": "/"} if f.name == "sw.js" else None
+            return self._send(200, f.read_bytes(), MIME.get(f.suffix, "application/octet-stream"),
+                              cache="no-cache", headers=extra)
+        return self._send(404, {"error": "not found"})
+
+    def do_POST(self):
+        return self._send(405, {"error": "手机观看入口只读，不接受写入。"},
+                          headers={"Allow": "GET"})
+
+
+class MobileAccess:
+    """运行期临时开关：关闭桌面程序或点停止后，局域网入口立即消失。"""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.server = None
+        self.thread = None
+        self.token = None
+        self.port = None
+
+    def start(self, port):
+        if not isinstance(port, int) or not 1024 <= port <= 65535:
+            raise ValueError("手机访问端口需为 1024–65535 的整数")
+        with self._lock:
+            if self.server and self.port == port:
+                return self.status()
+            if self.server:
+                self.stop()
+            token = secrets.token_urlsafe(24)
+            try:
+                server = MobileHTTPServer(("0.0.0.0", port), MobileHandler)
+            except OSError as exc:
+                raise ValueError(f"端口 {port} 无法开启：{exc}") from exc
+            server.mobile_token = token
+            thread = threading.Thread(target=server.serve_forever,
+                                      name="zhouqingji-mobile", daemon=True)
+            self.server, self.thread, self.token, self.port = server, thread, token, port
+            thread.start()
+            return self.status()
+
+    def stop(self):
+        with self._lock:
+            server, thread = self.server, self.thread
+            self.server = self.thread = self.token = self.port = None
+        if server:
+            server.shutdown()
+            server.server_close()
+        if thread and thread is not threading.current_thread():
+            thread.join(timeout=3)
+        return self.status()
+
+    def status(self):
+        with self._lock:
+            running, port, token = bool(self.server), self.port, self.token
+        urls = []
+        if running:
+            urls = [f"http://{ip}:{port}/?pair={token}" for ip in _local_ipv4s()]
+        return {"running": running, "port": port, "urls": urls,
+                "token": token if running else None}
+
+    def valid_pair_url(self, value):
+        """只为本轮有效配对地址生成二维码，兼容 Tailscale Serve 的 HTTPS 域名。"""
+        with self._lock:
+            token = self.token if self.server else None
+        if not token or not isinstance(value, str) or len(value) > 2048:
+            return False
+        try:
+            parsed = urllib.parse.urlsplit(value)
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            return (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
+                    and parsed.username is None and parsed.password is None
+                    and len(query.get("pair", [])) == 1
+                    and hmac.compare_digest(query["pair"][0], token))
+        except (TypeError, ValueError):
+            return False
+
+    def private_pair_url(self, base):
+        """把 Tailscale Serve 的公开基址和本轮口令在服务端合成，避免嵌套查询歧义。"""
+        with self._lock:
+            token = self.token if self.server else None
+        if not token or not isinstance(base, str) or len(base) > 2048:
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(base)
+            if (parsed.scheme != "https" or not parsed.hostname
+                    or not parsed.hostname.lower().endswith(".ts.net")
+                    or parsed.username is not None or parsed.password is not None):
+                return None
+            query = [(k, v) for k, v in urllib.parse.parse_qsl(
+                parsed.query, keep_blank_values=True) if k != "pair"]
+            query.append(("pair", token))
+            return urllib.parse.urlunsplit(parsed._replace(
+                query=urllib.parse.urlencode(query), fragment=""))
+        except (TypeError, ValueError):
+            return None
+
+
+MOBILE_ACCESS = MobileAccess()
+
+
 def _is_local_host_header(value, port):
     """拒绝 DNS rebinding：Host 必须明确指向当前回环服务。"""
     host = (value or "").strip().lower()
@@ -912,7 +1219,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 安静
 
-    def _send(self, code, body, ctype="application/json; charset=utf-8"):
+    def _send(self, code, body, ctype="application/json; charset=utf-8", headers=None):
         data = body if isinstance(body, bytes) else \
             json.dumps(body, ensure_ascii=False).encode("utf-8")
         self.send_response(code)
@@ -922,6 +1229,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        for key, value in (headers or {}).items():
+            self.send_header(key, value)
         self.end_headers()
         self.wfile.write(data)
 
@@ -936,24 +1245,18 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/wordcloud":
             return self._send(200, load_wordcloud())
+        if path == "/api/mobile/status":
+            return self._send(200, MOBILE_ACCESS.status())
+        if path == "/api/mobile/qr":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            text = (query.get("text") or [""])[0]
+            if not text and query.get("base"):
+                text = MOBILE_ACCESS.private_pair_url(query["base"][0]) or ""
+            if not MOBILE_ACCESS.valid_pair_url(text):
+                return self._send(400, {"error": "二维码地址无效或手机入口已关闭"})
+            return self._send(200, qr_svg(text), "image/svg+xml")
         if path == "/api/state":
-            return self._send(200, {
-                "poems": load_corpus(),
-                "reads": load_reads(),
-                "personas": load_personas(),
-                # GUI 编辑人设要区分随附/自建/改写，并整份读改侧车
-                "personas_defaults": json.loads(PERSONAS.read_text(encoding="utf-8")),
-                "personas_sidecar": load_personas_sidecar(),
-                "curation": load_curation(),
-                "thread_meta": load_thread_meta(),
-                "votes": load_vote_tally(),
-                "voter_votes": load_voter_votes(),
-                "favs": load_favs(),
-                "stanzas": load_stanzas(),
-                "calibration": load_calibration(),
-                "settings": load_settings(),
-                "version": app_version(),
-            })
+            return self._send(200, build_author_state())
         # 静态文件
         if path == "/":
             path = "/index.html"
@@ -983,6 +1286,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, update_check())
             if self.path == "/api/update/pull":
                 return self._send(200, update_pull())
+            if self.path == "/api/mobile/start":
+                port = payload.get("port", load_settings().get("mobile_port", 8738))
+                return self._send(200, MOBILE_ACCESS.start(port))
+            if self.path == "/api/mobile/stop":
+                return self._send(200, MOBILE_ACCESS.stop())
+            if self.path == "/api/mobile/export":
+                html = render_mobile_snapshot_html()
+                stamp = time.strftime("%Y%m%d-%H%M")
+                return self._send(200, html, "text/html; charset=utf-8", headers={
+                    "Content-Disposition": f'attachment; filename="zhouqingji-mobile-{stamp}.html"'})
             if self.path == "/api/personas":
                 set_personas(payload)
                 return self._send(200, {"ok": True, "personas": load_personas()})

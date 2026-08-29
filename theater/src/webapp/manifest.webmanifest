@@ -1,0 +1,24 @@
+{
+  "name": "昼青集 · 读诗剧场",
+  "short_name": "昼青集",
+  "description": "把电脑里的读诗剧场带到手机上，只读同步并保留最近一次留影。",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f6f1e7",
+  "theme_color": "#f6f1e7",
+  "icons": [
+    {
+      "src": "icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}

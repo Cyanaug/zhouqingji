@@ -5,7 +5,10 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-TEXT_SUFFIXES = {".md", ".py", ".js", ".json", ".toml", ".ps1", ".yml", ".yaml", ".txt"}
+TEXT_SUFFIXES = {
+    ".md", ".py", ".js", ".json", ".toml", ".ps1", ".yml", ".yaml", ".txt",
+    ".html", ".css", ".webmanifest", ".svg",
+}
 FORBIDDEN_TRACKED_PREFIXES = ("corpus/", "results/", "batches/")
 
 EXACT_MODEL_ID = re.compile(

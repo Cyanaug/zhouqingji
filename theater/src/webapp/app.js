@@ -5,8 +5,69 @@
 "use strict";
 
 const app = document.getElementById("app");
+const APP_MODE = document.querySelector('meta[name="zq-mode"]')?.content || "author";
+const IS_MOBILE = APP_MODE === "mobile" || APP_MODE === "snapshot";
+const IS_SNAPSHOT = APP_MODE === "snapshot";
+const MOBILE_TOKEN_KEY = "zhouqingji.mobile.token.v1";
+const MOBILE_LOCAL_KEY = "zhouqingji.mobile.local.v1";
 let S = null; // {poems, reads, personas}
 let maps = {};
+let mobileConnection = { source: APP_MODE, online: false, savedAt: null, error: "" };
+let installPrompt = null;
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch (_) { return false; }
+}
+
+function loadMobileLocal() {
+  try {
+    const parsed = JSON.parse(storageGet(MOBILE_LOCAL_KEY) || "{}");
+    return {
+      favorites: parsed.favorites || {},
+      notes: parsed.notes || {},
+      viewed: parsed.viewed || {},
+      version: 1,
+    };
+  } catch (_) {
+    return { favorites: {}, notes: {}, viewed: {}, version: 1 };
+  }
+}
+let mobileLocal = loadMobileLocal();
+function saveMobileLocal() { return storageSet(MOBILE_LOCAL_KEY, JSON.stringify(mobileLocal)); }
+
+function snapshotDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("浏览器不支持离线快照"));
+    const req = indexedDB.open("zhouqingji-mobile", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("snapshots");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("离线快照库无法打开"));
+  });
+}
+
+async function snapshotRead() {
+  const db = await snapshotDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("snapshots", "readonly");
+    const req = tx.objectStore("snapshots").get("latest");
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function snapshotWrite(state, etag) {
+  const db = await snapshotDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("snapshots", "readwrite");
+    tx.objectStore("snapshots").put({ state, etag, savedAt: new Date().toISOString() }, "latest");
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
 
 /* ---------- 工具 ---------- */
 
@@ -57,9 +118,50 @@ async function post(path, body) {
   return data;
 }
 
-async function loadState() {
-  const res = await fetch("/api/state");
-  S = await res.json();
+async function loadMobileState() {
+  const params = new URLSearchParams(location.search);
+  const paired = params.get("pair");
+  if (paired) {
+    storageSet(MOBILE_TOKEN_KEY, paired);
+    params.delete("pair");
+    const query = params.toString();
+    history.replaceState(null, "", location.pathname + (query ? `?${query}` : "") + location.hash);
+  }
+  const token = storageGet(MOBILE_TOKEN_KEY) || "";
+  let cached = null;
+  try { cached = await snapshotRead(); } catch (_) { /* 首次使用或浏览器禁用存储 */ }
+  if (!token && cached) {
+    mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+      error: "没有配对口令，正在阅读上次留影。" };
+    return cached.state;
+  }
+  if (!token) throw new Error("还没有和电脑配对，请从电脑的“手机访问”页面重新扫码。");
+  try {
+    const headers = { "X-ZQ-Mobile-Token": token };
+    if (cached?.etag) headers["If-None-Match"] = cached.etag;
+    const res = await fetch("/api/mobile-state", { headers, cache: "no-store" });
+    if (res.status === 304 && cached) {
+      mobileConnection = { source: "computer", online: true, savedAt: cached.savedAt, error: "" };
+      return cached.state;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    const etag = res.headers.get("ETag") || "";
+    const savedAt = new Date().toISOString();
+    try { await snapshotWrite(data, etag); } catch (e) {
+      mobileConnection.error = "已取到最新内容，但浏览器没有保存离线留影。";
+    }
+    mobileConnection = { source: "computer", online: true, savedAt, error: mobileConnection.error || "" };
+    return data;
+  } catch (error) {
+    if (!cached) throw error;
+    mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+      error: `电脑暂时不可达，正在阅读上次留影。${error.message ? `（${error.message}）` : ""}` };
+    return cached.state;
+  }
+}
+
+function hydrateState() {
   S.curation = S.curation || {};
   S.favs = S.favs || {};
   S.stanzas = S.stanzas || {};
@@ -69,6 +171,7 @@ async function loadState() {
   S.votes = S.votes || {};
   S.voter_votes = S.voter_votes || {};
   applyBranding();
+  applyModeChrome();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
   maps._primary = null;
   maps.persona = new Map(S.personas.map(p => [p.persona_id, p]));
@@ -79,6 +182,20 @@ async function loadState() {
     if (!maps.readsByPoem.has(r.poem_id)) maps.readsByPoem.set(r.poem_id, []);
     maps.readsByPoem.get(r.poem_id).push(r);
   }
+}
+
+async function loadState() {
+  if (window.__ZQ_SNAPSHOT__) {
+    S = window.__ZQ_SNAPSHOT__;
+    mobileConnection = { source: "snapshot", online: false,
+      savedAt: S.mobile?.generated_at || null, error: "这是导出时的离线留影。" };
+  } else if (IS_MOBILE) {
+    S = await loadMobileState();
+  } else {
+    const res = await fetch("/api/state");
+    S = await res.json();
+  }
+  hydrateState();
 }
 
 function blindReads(poemId) {
@@ -124,8 +241,25 @@ function isHidden(readId) {
   return !!(S.curation[readId] && S.curation[readId].hidden);
 }
 
-function isFav(poemId) { return !!S.favs[poemId]; }
+function isFav(poemId) {
+  if (IS_MOBILE && Object.prototype.hasOwnProperty.call(mobileLocal.favorites, poemId))
+    return !!mobileLocal.favorites[poemId];
+  return !!S.favs[poemId];
+}
 const favMark = id => isFav(id) ? '<span class="fav-mark" title="作者偏爱">♥</span>' : "";
+
+function setMobileFavorite(poemId, value) {
+  mobileLocal.favorites[poemId] = !!value;
+  saveMobileLocal();
+}
+
+function markMobileViewed(poemId) {
+  if (!IS_MOBILE) return;
+  mobileLocal.viewed[poemId] = new Date().toISOString();
+  const ordered = Object.entries(mobileLocal.viewed).sort((a, b) => b[1].localeCompare(a[1]));
+  mobileLocal.viewed = Object.fromEntries(ordered.slice(0, 60));
+  saveMobileLocal();
+}
 
 /* 多作者：主作者（占多数者）在列表里不标注，只有他人作品才挂作者章，避免满屏重复 */
 function primaryAuthor() {
@@ -575,8 +709,12 @@ async function renderWordcloud() {
 
   if (!_wcData) {
     try {
-      const res = await fetch("/api/wordcloud");
-      _wcData = await res.json();
+      if (IS_MOBILE && S.wordcloud) _wcData = S.wordcloud;
+      else {
+        const headers = IS_MOBILE ? { "X-ZQ-Mobile-Token": storageGet(MOBILE_TOKEN_KEY) || "" } : {};
+        const res = await fetch("/api/wordcloud", { headers });
+        _wcData = await res.json();
+      }
     } catch (e) {
       document.getElementById("wc-sub").textContent = "词云数据加载失败：" + e;
       return;
@@ -813,6 +951,7 @@ async function route() {
   if (seg[0] === "poem" && seg[1]) return renderPoem(seg[1], seg[2] === "reads");
   if (seg[0] === "read" && seg[1]) return renderDeepRead(seg[1]);
   if (seg[0] === "board" && seg[1]) return renderBoardFull(seg[1]);
+  if (IS_MOBILE && (seg[0] === "reader-new" || seg[0] === "reader-edit")) return renderMobileDesk();
   if (seg[0] === "reader-new") return renderPersonaEdit(null);
   if (seg[0] === "reader-edit" && seg[1]) return renderPersonaEdit(seg[1]);
   if (seg[0] === "reader" && seg[1]) return renderReader(seg[1]);
@@ -840,6 +979,28 @@ function applyBranding() {
     const v = S.version ? `v${esc(S.version)}` : "";
     foot.innerHTML = `${esc(st.footer_text || "")}${v ? ` <span class="foot-ver">${v}</span>` : ""}`;
   }
+}
+
+function compactWhen(value) {
+  if (!value) return "未知时间";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).replace("T", " ").slice(0, 16);
+  return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function applyModeChrome() {
+  document.body.classList.toggle("mobile-mode", IS_MOBILE);
+  document.body.classList.toggle("snapshot-mode", IS_SNAPSHOT);
+  const ribbon = document.getElementById("mobile-ribbon");
+  if (!IS_MOBILE || !ribbon) return;
+  ribbon.hidden = false;
+  const label = mobileConnection.online ? "已连到电脑" : "离线留影";
+  const detail = mobileConnection.online
+    ? `内容已更新 · ${compactWhen(mobileConnection.savedAt)}`
+    : `留影时间 · ${compactWhen(mobileConnection.savedAt)}`;
+  ribbon.innerHTML = `<span class="mobile-ribbon-mark">掌中册</span><b>${label}</b><span>${detail}</span>`;
+  const settingsLink = document.querySelector('.site-head nav a[href="#/settings"]');
+  if (settingsLink) settingsLink.textContent = "掌中";
 }
 
 /* ---------- 榜单页 ---------- */
@@ -1408,6 +1569,7 @@ function renderPoem(id, goReads) {
   const hidden = all.filter(r => isHidden(r.read_id));
   const ann = annotatedReads(id).slice().sort((a, b) => a.ts.localeCompare(b.ts));
   const st = stats(id);
+  const mobileNote = mobileLocal.notes[id]?.text || "";
 
   app.innerHTML = `
     <article>
@@ -1418,20 +1580,28 @@ function renderPoem(id, goReads) {
           <span>写于 ${esc(whenOf(p))}</span> · <span>${p.id}</span>
           ${p.visibility === "private" ? '<span class="chip warm">私密 · 不进读者池</span>' : ""}
         </div>
-        <div class="author-tools">
+        ${IS_MOBILE ? `<div class="mobile-poem-tools">
+          <button class="btn ${isFav(p.id) ? "faved" : ""}" id="btn-mobile-fav">${isFav(p.id) ? "♥ 掌中偏爱" : "♡ 收进掌中偏爱"}</button>
+          <button class="btn" id="btn-mobile-note">${mobileNote ? "续写私人随记" : "写私人随记"}</button>
+        </div>` : `<div class="author-tools">
           <button class="btn" id="btn-vis">${p.visibility === "public" ? "设为私密" : "设为公开"}</button>
           <button class="btn" id="btn-edit">编辑</button>
           <button class="btn" id="btn-bg">背景小注</button>
           <button class="btn" id="btn-date">写作时间</button>
           <button class="btn" id="btn-genre">文体</button>
           <button class="btn ${isFav(p.id) ? "faved" : ""}" id="btn-fav">${isFav(p.id) ? "♥ 已偏爱" : "♡ 我觉得好"}</button>
-        </div>
+        </div>`}
         <div id="tool-panel"></div>
       </header>
       <div class="poem-body" id="poem-body">${renderPoemBody(p.content, p.id)}</div>
       ${p.background ? `<div class="bg-note">背景小注（读者可见）：${esc(p.background)}</div>` : ""}
       ${p.note ? `<details class="self-note"><summary>自注 · 仅作者可见</summary>
           <div class="note-text">${esc(p.note)}</div></details>` : ""}
+      ${IS_MOBILE ? `<details class="mobile-note" id="mobile-note"${mobileNote ? " open" : ""}>
+          <summary>掌中随记 · 只留在这台手机</summary>
+          <textarea id="mobile-note-text" rows="5" placeholder="写下此刻想到的；电脑内容更新时不会覆盖。">${esc(mobileNote)}</textarea>
+          <p id="mobile-note-status">${mobileNote ? `上次保存 ${compactWhen(mobileLocal.notes[id]?.updated_at)}` : "尚未写入"}</p>
+        </details>` : ""}
       <section class="reads-zone">
         <h2 style="font-size:1.2rem">众　目${st.n ? `<span style="color:#a4593d;margin-left:.55em;letter-spacing:.04em" title="${st.cal != null ? "校准分（按各读者松紧归一）" : "原始均分"}">${st.cal != null ? fmt2(st.cal) : fmt1(st.mean)}</span>` : ""}</h2>
         <div style="position:relative;text-align:center;font-size:.75rem;color:var(--ink-3);letter-spacing:.14em;margin:-.9rem 0 1.8rem">
@@ -1450,9 +1620,13 @@ function renderPoem(id, goReads) {
     </article>`;
 
   if (rs.length) renderDist(document.getElementById("dist"), rs, p);
-  wirePoemTools(p);
-  wireCutNote(p);
-  wireCuration(p);
+  if (IS_MOBILE) wireMobilePoem(p);
+  else {
+    wirePoemTools(p);
+    wireCutNote(p);
+    wireCuration(p);
+  }
+  markMobileViewed(p.id);
   if (goReads) {
     setTimeout(() => {
       const z = document.querySelector(".reads-zone");
@@ -1483,7 +1657,7 @@ function readCard(r, p) {
     <div class="reaction">${esc(r.reaction)}</div>
     <div class="rc-foot">
       ${leftLinks || "<span></span>"}
-      <button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>
+      ${IS_MOBILE ? "<span></span>" : `<button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>`}
     </div>
   </div>`;
 }
@@ -2266,9 +2440,128 @@ function renderDeepRead(rid) {
   };
 }
 
+/* ---------- 掌中册：手机本地偏爱 / 进度 / 随记 ---------- */
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1200);
+}
+
+function wireMobilePoem(p) {
+  document.getElementById("btn-mobile-fav").onclick = () => {
+    setMobileFavorite(p.id, !isFav(p.id));
+    renderPoem(p.id, false);
+    toast(isFav(p.id) ? "已收进这台手机的掌中偏爱" : "已移出掌中偏爱");
+  };
+  document.getElementById("btn-mobile-note").onclick = () => {
+    const details = document.getElementById("mobile-note");
+    details.open = true;
+    document.getElementById("mobile-note-text").focus();
+  };
+  const area = document.getElementById("mobile-note-text");
+  const status = document.getElementById("mobile-note-status");
+  let timer = null;
+  area.addEventListener("input", () => {
+    status.textContent = "正在记下…";
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const text = area.value;
+      if (text.trim()) mobileLocal.notes[p.id] = { text, updated_at: new Date().toISOString() };
+      else delete mobileLocal.notes[p.id];
+      if (saveMobileLocal()) status.textContent = `已留在这台手机 · ${compactWhen(new Date().toISOString())}`;
+      else status.textContent = "浏览器禁止本地保存；可复制文字后再离开。";
+    }, 450);
+  });
+}
+
+function renderMobileDesk() {
+  app.className = "";
+  const notes = Object.values(mobileLocal.notes).filter(x => x && x.text?.trim()).length;
+  const favs = Object.keys(mobileLocal.favorites).filter(id => isFav(id)).length;
+  const recent = Object.entries(mobileLocal.viewed)
+    .sort((a, b) => b[1].localeCompare(a[1])).slice(0, 8)
+    .map(([id, ts]) => ({ p: maps.poem.get(id), ts })).filter(x => x.p);
+  const installable = !!installPrompt;
+  const secure = window.isSecureContext;
+  app.innerHTML = `
+    <p class="pocket-kicker">掌中册 · 只在这台手机</p>
+    <h1 class="page-title">带走最近的一次观看</h1>
+    <p class="page-hint">电脑内容更新时，手机的偏爱、阅读足迹与私人随记留在本机，不会被新快照覆盖，也不会写回作品总集。</p>
+    <section class="pocket-status ${mobileConnection.online ? "online" : "offline"}">
+      <div class="pocket-seal">${mobileConnection.online ? "连" : "影"}</div>
+      <div><b>${mobileConnection.online ? "正连接电脑" : "正在阅读离线留影"}</b>
+        <p>${esc(mobileConnection.error || `最近更新：${compactWhen(mobileConnection.savedAt)}`)}</p></div>
+      ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-refresh">现在更新</button>' : ""}
+    </section>
+    <section class="pocket-counts">
+      <div><b>${favs}</b><span>手机偏爱</span></div>
+      <div><b>${notes}</b><span>私人随记</span></div>
+      <div><b>${Object.keys(mobileLocal.viewed).length}</b><span>阅读足迹</span></div>
+    </section>
+    <section class="board pocket-recent">
+      <h2>最近翻过</h2>
+      ${recent.length ? recent.map(x => `<p><a href="#/poem/${x.p.id}">${esc(x.p.title)}</a><span>${compactWhen(x.ts)}</span></p>`).join("")
+        : '<p class="empty">打开一首作品后，这里会留下书签。</p>'}
+    </section>
+    <section class="board pocket-manage">
+      <h2>这台手机的数据</h2>
+      <p class="board-note">刷新电脑快照不会动这些记录。更换浏览器、清除网站数据或卸载应用前，可以先导出一份小备份。</p>
+      <div class="pocket-actions">
+        <button class="btn" id="mobile-local-export">导出掌中记录</button>
+        <label class="btn file-btn">导入掌中记录<input id="mobile-local-import" type="file" accept="application/json,.json"></label>
+        ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-repair">重新配对</button>' : ""}
+      </div>
+    </section>
+    <section class="board pocket-install">
+      <h2>放到手机桌面</h2>
+      <p class="board-note">${secure
+        ? "当前连接满足安装条件。安装后可以像普通应用一样启动；电脑不在线时仍会打开最近留影。"
+        : "当前是同一 Wi‑Fi 的临时 HTTP 访问，可以直接阅读，但浏览器不会把它安装成完整 PWA。使用 Tailscale 的私密 HTTPS 后即可安装。"}</p>
+      ${installable ? '<button class="btn primary" id="mobile-install">安装昼青集</button>'
+        : '<p class="pocket-install-hint">若浏览器支持安装，请在浏览器菜单中选择“安装应用”或“添加到主屏幕”。</p>'}
+    </section>`;
+
+  document.getElementById("mobile-refresh")?.addEventListener("click", async e => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "更新中…";
+    try { await loadState(); renderMobileDesk(); toast("已检查电脑中的最新内容"); }
+    catch (err) { toast("更新失败：" + err.message); renderMobileDesk(); }
+  });
+  document.getElementById("mobile-local-export").onclick = () => {
+    const data = { kind: "zhouqingji-mobile-local", schema: 1,
+      exported_at: new Date().toISOString(), data: mobileLocal };
+    downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+      `昼青集-掌中记录-${new Date().toISOString().slice(0, 10)}.json`);
+  };
+  document.getElementById("mobile-local-import").onchange = async e => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed.kind !== "zhouqingji-mobile-local" || parsed.schema !== 1 || !parsed.data)
+        throw new Error("这不是昼青集掌中记录文件");
+      mobileLocal = {
+        favorites: { ...mobileLocal.favorites, ...(parsed.data.favorites || {}) },
+        notes: { ...mobileLocal.notes, ...(parsed.data.notes || {}) },
+        viewed: { ...mobileLocal.viewed, ...(parsed.data.viewed || {}) }, version: 1,
+      };
+      saveMobileLocal(); renderMobileDesk(); toast("掌中记录已合并");
+    } catch (err) { toast("导入失败：" + err.message); }
+  };
+  document.getElementById("mobile-repair")?.addEventListener("click", () => {
+    try { localStorage.removeItem(MOBILE_TOKEN_KEY); } catch (_) {}
+    toast("旧配对已移除，请回电脑重新扫码");
+  });
+  document.getElementById("mobile-install")?.addEventListener("click", async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; renderMobileDesk();
+  });
+}
+
 /* ---------- 设置页：作者偏好（corpus/settings.json 侧车，GUI 与派发 agent 共用） ---------- */
 
 function renderSettings() {
+  if (IS_MOBILE) return renderMobileDesk();
   app.className = "";
   const st = S.settings || {};
   const d = st.dispatch || {};
@@ -2308,6 +2601,8 @@ function renderSettings() {
           <option value="raw"${(st.score_badge || "cal") === "raw" ? " selected" : ""}>只看原始均分</option></select>`,
         "影响榜单排序与各处分数徽章；统计页另有自己的口径开关。")}
       ${row("端口", `<input id="set-port" style="${ic}" type="number" min="1024" max="65535" value="${st.port || 8737}">`, "重启服务器后生效。")}
+      ${row("手机临时访问端口", `<input id="set-mobile-port" style="${ic}" type="number" min="1024" max="65535" value="${st.mobile_port || 8738}">`,
+        "只读入口使用；开始访问时生效，通常不需要修改。")}
       <h2 style="font-size:1rem;margin-top:1.8rem">阅读文体</h2>
       <div style="font-size:.75rem;color:var(--ink-3);line-height:1.7;margin-bottom:1rem">
         诗（现代诗 / 词 / 歌词）总是会被读。勾选的其他文体也进读者池——同一批读者、同样欣赏的眼光，
@@ -2320,6 +2615,31 @@ function renderSettings() {
       ${row("目标覆盖层数", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth || 4}">`,
         "每首诗希望被盲读到的层数——agent 算缺口时的默认目标。")}
       <div style="margin-top:1.4rem"><button class="btn primary" id="set-save">保存</button></div>
+    </section>
+    <section class="board mobile-access-board" style="text-align:left;margin-top:1.6rem">
+      <div class="mobile-access-head">
+        <div><p class="pocket-kicker">手机访问</p><h2>临时展开一张连接签</h2></div>
+        <span class="mobile-access-light" id="mobile-access-light">未开启</span>
+      </div>
+      <p class="board-note">同一 Wi‑Fi 下，点“开始手机访问”后扫码即可；停止或关闭本程序，入口立即消失。手机服务只有观看接口，随机口令每次重开都会更换。</p>
+      <div id="mobile-access-status" class="mobile-access-status"><p>正在检查本机状态……</p></div>
+      <div class="mobile-access-actions">
+        <button class="btn primary" id="mobile-start">开始手机访问</button>
+        <button class="btn" id="mobile-stop">停止</button>
+        <button class="btn" id="mobile-export">导出离线 HTML</button>
+        <span id="mobile-export-status"></span>
+      </div>
+      <details class="mobile-tradeoff"><summary>局域网与私密网络怎么选</summary>
+        <p><b>家中 Wi‑Fi：</b>最省事，临时开启、扫码、看完关闭。传输是 HTTP，同网内极端情况下可能被监听，因此不要在陌生公共 Wi‑Fi 使用。</p>
+        <p><b>Tailscale：</b>适合异地访问与安装 PWA；两台设备需安装并登录，连接使用私密 HTTPS。它是可选通道，不是昼青集的强制依赖。</p>
+        <p><b>离线 HTML：</b>完全不开放网络，内容固定在导出时刻；手机偏爱与随记能否长期保留取决于手机浏览器对本地文件存储的支持。</p>
+      </details>
+      <details class="mobile-private"><summary>已经开启 Tailscale Serve？生成私密 HTTPS 二维码</summary>
+        <p>把 Tailscale 显示的 <code>https://……ts.net</code> 地址贴在下面。地址只在当前页面使用，不会写进设置；生成的二维码会自动带上本次随机口令。</p>
+        <div class="mobile-private-row"><input id="mobile-private-base" style="${ic}" inputmode="url"
+          placeholder="https://你的电脑名.你的网络名.ts.net"><button class="btn" id="mobile-private-qr">生成二维码</button></div>
+        <div id="mobile-private-result"></div>
+      </details>
     </section>
     <section class="board" style="text-align:left;margin-top:1.6rem">
       <h2 style="font-size:1rem">版本与更新</h2>
@@ -2351,6 +2671,7 @@ function renderSettings() {
       await post("/api/settings", {
         site_title: gv("set-title"), site_subtitle: gv("set-sub"), footer_text: gv("set-foot"),
         default_view: gv("set-view"), score_badge: gv("set-score"), port: num("set-port"),
+        mobile_port: num("set-mobile-port"),
         read_genres, genre_notes,
         dispatch: { default_model: gv("set-model"), default_transport: gv("set-transport"),
           target_depth: num("set-depth") } });
@@ -2359,6 +2680,93 @@ function renderSettings() {
       toast("已保存（端口改动需重启服务器后生效）");
     } catch (e) { toast("失败：" + e.message); }
   };
+
+  const mobileBox = document.getElementById("mobile-access-status");
+  const mobileLight = document.getElementById("mobile-access-light");
+  const renderMobileStatus = status => {
+    mobileLight.textContent = status.running ? "正在开放" : "未开启";
+    mobileLight.classList.toggle("on", !!status.running);
+    document.getElementById("mobile-start").disabled = !!status.running;
+    document.getElementById("mobile-stop").disabled = !status.running;
+    if (!status.running) {
+      mobileBox.innerHTML = '<p class="mobile-access-empty">入口关闭。作品仍只在电脑本机。</p>';
+      return;
+    }
+    const urls = status.urls || [];
+    if (!urls.length) {
+      mobileBox.innerHTML = `<p class="mobile-access-empty">入口已开启，但没有找到可用的局域网地址。请确认电脑已连接 Wi‑Fi；Windows 若询问防火墙，只允许“专用网络”。</p>`;
+      return;
+    }
+    const first = urls[0];
+    mobileBox.innerHTML = `<div class="connection-slip">
+      <img class="connection-qr" src="/api/mobile/qr?text=${encodeURIComponent(first)}" alt="手机访问二维码">
+      <div class="connection-copy"><b>用手机相机扫码</b><p>电脑和手机应连接同一 Wi‑Fi。</p>
+        ${urls.map((url, i) => `<button class="connection-url" data-url="${esc(url)}"><span>${i ? "备用地址" : "访问地址"}</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>`).join("")}
+        <small>二维码中含本次随机口令，不要转发；停止访问后立即失效。</small></div></div>`;
+    mobileBox.querySelectorAll(".connection-url").forEach(btn => btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(btn.dataset.url); toast("访问地址已复制"); }
+      catch (_) { toast("浏览器未允许复制，请用二维码"); }
+    });
+  };
+  document.getElementById("mobile-private-qr").onclick = () => {
+    const out = document.getElementById("mobile-private-result");
+    if (!lastMobileStatus?.running || !lastMobileStatus.token) {
+      out.innerHTML = '<p class="mobile-access-empty">请先开始手机访问。</p>';
+      return;
+    }
+    const raw = document.getElementById("mobile-private-base").value.trim();
+    let base;
+    try {
+      base = new URL(raw);
+      if (base.protocol !== "https:" || !base.hostname.endsWith(".ts.net") || base.username || base.password)
+        throw new Error("invalid");
+    } catch (_) {
+      out.innerHTML = '<p class="mobile-access-empty">请填写 Tailscale Serve 给出的 https://……ts.net 地址。</p>';
+      return;
+    }
+    base.searchParams.set("pair", lastMobileStatus.token);
+    const url = base.toString();
+    out.innerHTML = `<div class="connection-slip private-slip">
+      <img class="connection-qr" src="/api/mobile/qr?base=${encodeURIComponent(raw)}" alt="Tailscale 私密访问二维码">
+      <div class="connection-copy"><b>私密 HTTPS 连接签</b><p>手机也登录同一 Tailscale 网络后扫码。</p>
+        <button class="connection-url" data-url="${esc(url)}"><span>私密地址</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>
+        <small>口令随“停止手机访问”立即失效；Tailscale Serve 也应在不用时停止。</small></div></div>`;
+    out.querySelector(".connection-url").onclick = async e => {
+      try { await navigator.clipboard.writeText(e.currentTarget.dataset.url); toast("私密地址已复制"); }
+      catch (_) { toast("浏览器未允许复制，请用二维码"); }
+    };
+  };
+  let lastMobileStatus = null;
+  const refreshMobileStatus = async () => {
+    try { const res = await fetch("/api/mobile/status"); lastMobileStatus = await res.json(); renderMobileStatus(lastMobileStatus); }
+    catch (e) { mobileBox.innerHTML = `<p class="mobile-access-empty">状态读取失败：${esc(e.message)}</p>`; }
+  };
+  document.getElementById("mobile-start").onclick = async () => {
+    try {
+      const port = +document.getElementById("set-mobile-port").value || 8738;
+      lastMobileStatus = await post("/api/mobile/start", { port });
+      renderMobileStatus(lastMobileStatus);
+      toast("手机只读入口已开启");
+    } catch (e) { toast("开启失败：" + e.message); }
+  };
+  document.getElementById("mobile-stop").onclick = async () => {
+    try { lastMobileStatus = await post("/api/mobile/stop", {}); renderMobileStatus(lastMobileStatus); toast("手机入口已停止"); }
+    catch (e) { toast("停止失败：" + e.message); }
+  };
+  document.getElementById("mobile-export").onclick = async e => {
+    const btn = e.currentTarget, out = document.getElementById("mobile-export-status");
+    btn.disabled = true; out.textContent = "正在收拢作品与评论……";
+    try {
+      const res = await fetch("/api/mobile/export", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!res.ok) throw new Error((await res.json()).error || res.status);
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-");
+      downloadBlob(await res.blob(), `昼青集-离线留影-${stamp}.html`);
+      out.textContent = "已导出 ✓";
+    } catch (err) { out.textContent = "导出失败：" + err.message; }
+    finally { btn.disabled = false; }
+  };
+  refreshMobileStatus();
 
   const status = document.getElementById("upd-status");
   document.getElementById("upd-check").onclick = async () => {
@@ -2395,5 +2803,16 @@ function renderSettings() {
 }
 
 /* ---------- 启动 ---------- */
+
+window.addEventListener("beforeinstallprompt", event => {
+  event.preventDefault(); installPrompt = event;
+  if (IS_MOBILE && location.hash === "#/settings") renderMobileDesk();
+});
+
+if (!IS_SNAPSHOT && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register("./sw.js").catch(() => {
+    /* 同一 Wi-Fi 的普通 HTTP 不是安全上下文，临时浏览仍可正常使用。 */
+  });
+}
 
 route();

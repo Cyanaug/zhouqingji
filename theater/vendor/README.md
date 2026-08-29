@@ -14,3 +14,11 @@
   为便于日后原样更新 jieba，不改其源码，改在 `wordcloud_data.py` 的 import 处静音该 warning。
 
 若要升级 jieba：`pip download jieba==<ver> --no-deps`，解包后按上面的清单只拷核心文件覆盖即可。
+
+## qrcodegen.py
+
+手机临时访问的二维码生成器。
+
+- **许可**：MIT（完整版权与许可正文保留在 `qrcodegen.py` 文件头）。
+- **来源**：Project Nayuki，https://github.com/nayuki/QR-Code-generator 。
+- **隐私理由**：二维码完全在电脑本机生成，私人访问地址和随机配对口令不会发送给第三方二维码网站。

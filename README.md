@@ -44,6 +44,12 @@
 3. 盲读之外还有两个轻模式，都不评分、永不进榜单/校准：**跟帖**（`dispatch-thread`，对长评逐轮接楼）与**点赞**（`dispatch-votes`，对评论投认同/不认同/跳过）。Codex 配置在 `.agents/skills/` + `.codex/agents/`，Claude 配置在 `.claude/`；两套都是正式支持层，不互相取代。
 4. 进度看根目录 `PROGRESS.md`；实现方的设计决定看 `theater/NOTES.md`。
 
+## 在手机上看
+
+设置页可以临时开启只读手机入口：家中同一 Wi-Fi 直接扫码，不上传公网；可选用 Tailscale 私密 HTTPS 实现异地访问和安装 PWA；也可以导出一个完全离线的单 HTML 留影。手机自己的收藏、阅读足迹和私人随记不会被电脑下一次快照覆盖。
+
+第一次使用请看 [MOBILE_ACCESS.md](MOBILE_ACCESS.md)，里面有三条路线的逐步教程、隐私权衡和常见问题。
+
 ## AI 工具入口
 
 - `AGENTS.md` 是工具中立的项目共同规则，也是 Codex 的项目入口。
@@ -55,4 +61,4 @@
 
 ## 文档
 
-`00_START_HERE.md`–`04_app_and_design.md` 是这个项目最初的架构规格书，写给负责搭建/维护它的 AI agent 看的技术设计文档，不是新手教程——想直接上手用，从上面「怎么用」开始就够了。FROZEN 的部分（两张 schema、读者底线、榜单不得由 LLM 排名、content_hash 契约）不要改。
+`00_START_HERE.md`–`05_run_modes.md` 是架构规格书，写给负责搭建/维护它的 AI agent；`MOBILE_ACCESS.md` 是普通用户教程。FROZEN 的部分（两张 schema、读者底线、榜单不得由 LLM 排名、content_hash 契约）不要改。
