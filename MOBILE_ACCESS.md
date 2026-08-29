@@ -28,7 +28,7 @@ Tailscale 是可选通道，不是昼青集依赖。它在你的设备间建立�
 4. 回到昼青集「设置 → 手机访问」，展开“已经开启 Tailscale Serve？”，粘贴这个 HTTPS 地址并生成私密二维码。
 5. 手机保持 Tailscale 已连接，扫码打开。浏览器菜单中选择“安装应用”或“添加到主屏幕”。
 
-不用时，同时停止昼青集的手机入口和 Tailscale Serve。前台运行时，在命令所在终端按 `Ctrl+C` 即可；若你改用过后台模式，可运行 `tailscale serve reset` 清掉 Serve 配置。
+不用时，同时停止昼青集的手机入口和 Tailscale Serve。前台运行时，在命令所在终端按 `Ctrl+C` 即可；若你改用过后台模式，可运行 `tailscale serve off` 停止共享。
 
 Tailscale 官方教程：<https://tailscale.com/docs/features/tailscale-serve>
 
@@ -70,4 +70,3 @@ Tailscale 官方教程：<https://tailscale.com/docs/features/tailscale-serve>
 - 手机服务只提供观看接口，所有写入请求都会拒绝。
 - 搜索引擎无法凭空发现家中局域网地址；Tailscale Serve 也只对同一私密网络内的设备开放。
 - 口令不是公共 Wi-Fi 上的加密替代品：陌生网络用 Tailscale HTTPS，或改用离线 HTML。
-
