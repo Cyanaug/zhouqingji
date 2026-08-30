@@ -306,9 +306,9 @@ function pool() {
 }
 
 /* 最近评论：默认只展开一小页，可一直往下翻（批量跑完后作者要在这里扫一遍） */
-const RECENT_MAX = 300, RECENT_FIRST = 10, RECENT_STEP = 30;
+const RECENT_MAX = 1000, RECENT_FIRST = 10, RECENT_STEP = 30;
 let recentShown = RECENT_FIRST;
-let recentFilter = { model: "", persona: "", band: "" };
+let recentFilter = { model: "", persona: "", band: "", sort: "newest" };
 
 function recentReads() {
   const blind = S.reads.filter(r => r.context_mode === "blind");
@@ -325,10 +325,13 @@ function scoreBand(s) {
 /* 当前筛选（模型 / 读者 / 分数段）下的最近盲读子集 */
 function recentFiltered() {
   const f = recentFilter;
-  return recentReads().filter(r =>
+  const rows = recentReads().filter(r =>
     (!f.model || modelAlias(r.reader.model) === f.model) &&
     (!f.persona || r.reader.persona_id === f.persona) &&
     (!f.band || scoreBand(r.score) === f.band));
+  if (f.sort === "score-desc") rows.sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity) || (b.ts || "").localeCompare(a.ts || ""));
+  if (f.sort === "score-asc") rows.sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity) || (b.ts || "").localeCompare(a.ts || ""));
+  return rows;
 }
 
 /* 缓存池里各模型的条数与均分——放进下拉，一眼看出哪个模型整批偏高/偏低 */
@@ -358,10 +361,14 @@ function recentFilterBarHtml() {
       recentFilter.model === x.model)).join("");
   const personaOpts = opt("", "全部读者", !recentFilter.persona) +
     recentPersonaStats().map(x => opt(x.pid, `${x.name} · ${x.n}`, recentFilter.persona === x.pid)).join("");
+  const sortOpts = [
+    ["newest", "最新在前"], ["score-desc", "分数从高到低"], ["score-asc", "分数从低到高"],
+  ].map(([v, label]) => opt(v, label, recentFilter.sort === v)).join("");
   const band = (v, label) => `<button class="btn band-btn${recentFilter.band === v ? " on" : ""}" data-band="${esc(v)}">${label}</button>`;
   return `<div class="recent-filter">
     <select id="rf-model" class="rf-sel">${modelOpts}</select>
     <select id="rf-persona" class="rf-sel">${personaOpts}</select>
+    <select id="rf-sort" class="rf-sel" aria-label="评论排序">${sortOpts}</select>
     <span class="band-group">${band("", "全部")}${band("high", "高 ≥8")}${band("mid", "中 5–7")}${band("low", "低 <5")}</span>
   </div>`;
 }
@@ -369,9 +376,11 @@ function recentFilterBarHtml() {
 function wireRecentFilter() {
   const ms = document.getElementById("rf-model");
   const ps = document.getElementById("rf-persona");
+  const ss = document.getElementById("rf-sort");
   const reset = () => { recentShown = RECENT_FIRST; renderRecentInto(); };
   if (ms) ms.onchange = () => { recentFilter.model = ms.value; reset(); };
   if (ps) ps.onchange = () => { recentFilter.persona = ps.value; reset(); };
+  if (ss) ss.onchange = () => { recentFilter.sort = ss.value; reset(); };
   document.querySelectorAll(".band-btn").forEach(b => {
     b.onclick = () => {
       recentFilter.band = b.dataset.band;
@@ -702,8 +711,13 @@ async function renderWordcloud() {
     <section class="wc-bars">
       <p class="wc-eyebrow">诚实读数 · Honest Scale</p>
       <h2>词频榜</h2>
-      <p class="wc-note">字号会骗眼睛——同一个词，这里给它真实的出现次数。</p>
+      <p class="wc-note">字号会骗眼睛——同一个词，这里给它真实的出现次数。下方榜单可一直展开，也可直接寻找低频词。</p>
+      <div class="wc-list-tools">
+        <input id="wc-search" type="search" placeholder="在完整词频中找词" autocomplete="off">
+        <span id="wc-list-count"></span>
+      </div>
       <ol class="wc-barlist" id="wc-barlist"></ol>
+      <div class="wc-list-more" id="wc-list-more"></div>
     </section>
   </div>`;
 
@@ -747,6 +761,8 @@ function wcStart(data) {
   let hovered = -1;
   let t0 = performance.now();
   let raf = 0;
+  let barShown = 40;
+  let barQuery = "";
 
   function fit() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -894,21 +910,41 @@ function wcStart(data) {
   }
 
   function buildBars() {
-    const src = (data[mode] && data[mode].words) || [];
-    const rows = src.slice(0, 24);
-    const max = rows.length ? rows[0].c : 1;
+    const section = data[mode] || {};
+    const src = section.ranking || section.words || [];
+    const filtered = barQuery
+      ? src.filter(wd => String(wd.w).toLocaleLowerCase().includes(barQuery))
+      : src;
+    const rows = filtered.slice(0, barShown);
+    const max = src.length ? src[0].c : 1;
+    const count = document.getElementById("wc-list-count");
+    if (count) count.textContent = barQuery
+      ? `找到 ${filtered.length} 个 · 全榜 ${src.length} 个`
+      : `已显示 ${rows.length} / ${src.length}`;
     document.getElementById("wc-barlist").innerHTML = rows.map((wd, i) => `
       <li class="wc-barrow">
-        <span class="wc-rank">${i + 1}</span>
+        <span class="wc-rank">${barQuery ? src.indexOf(wd) + 1 : i + 1}</span>
         <span class="wc-word">${esc(wd.w)}</span>
         <span class="wc-bartrack"><span class="wc-barfill" style="width:${Math.max(4, wd.c / max * 100)}%"></span></span>
         <span class="wc-cnt">${wd.c}</span>
       </li>`).join("");
+    const more = document.getElementById("wc-list-more");
+    const left = filtered.length - rows.length;
+    more.innerHTML = left > 0
+      ? `<button class="btn" id="wc-more-btn">再展开 ${Math.min(100, left)} 个（还有 ${left} 个）</button>`
+      : (rows.length > 40 ? '<button class="btn" id="wc-fold-btn">收起词频榜</button>' : "");
+    document.getElementById("wc-more-btn")?.addEventListener("click", () => { barShown += 100; buildBars(); });
+    document.getElementById("wc-fold-btn")?.addEventListener("click", () => {
+      barShown = 40; buildBars(); document.querySelector(".wc-bars")?.scrollIntoView({ behavior: "smooth" });
+    });
   }
 
   function switchMode(m) {
     if (m === mode) return;
     mode = m;
+    barShown = 40; barQuery = "";
+    const search = document.getElementById("wc-search");
+    if (search) search.value = "";
     hovered = -1; card.classList.remove("show");
     t0 = performance.now();
     layout(); buildBars();
@@ -933,7 +969,18 @@ function wcStart(data) {
   raf = requestAnimationFrame(frame);
 }
 
-window.addEventListener("hashchange", route);
+function showRouteError(error) {
+  app.className = "";
+  const mobileHint = IS_MOBILE
+    ? "本轮入口可能已经停止或口令已更换。请回电脑重新开启手机访问并扫码；若浏览器留有上次快照，也可稍后重试。"
+    : "请确认本地服务仍在运行，然后刷新页面。";
+  app.innerHTML = `<section class="board load-error"><h1 class="page-title">这一页暂时没有展开</h1>
+    <p class="page-hint">${esc(error?.message || String(error || "未知错误"))}</p>
+    <p class="board-note">${mobileHint}</p><button class="btn primary" id="route-retry">重新尝试</button></section>`;
+  document.getElementById("route-retry").onclick = () => location.reload();
+}
+
+window.addEventListener("hashchange", () => route().catch(showRouteError));
 
 async function route() {
   if (!S) await loadState();
@@ -1001,6 +1048,13 @@ function applyModeChrome() {
   ribbon.innerHTML = `<span class="mobile-ribbon-mark">掌中册</span><b>${label}</b><span>${detail}</span>`;
   const settingsLink = document.querySelector('.site-head nav a[href="#/settings"]');
   if (settingsLink) settingsLink.textContent = "掌中";
+  const nav = document.querySelector(".site-head nav");
+  if (nav && !nav.dataset.mobileOrder) {
+    const links = new Map([...nav.querySelectorAll("a")].map(a => [a.getAttribute("href"), a]));
+    ["#/boards", "#/all", "#/wordcloud", "#/threads", "#/settings", "#/readers", "#/timeline", "#/stats"]
+      .forEach(href => { if (links.has(href)) nav.appendChild(links.get(href)); });
+    nav.dataset.mobileOrder = "primary-first";
+  }
 }
 
 /* ---------- 榜单页 ---------- */
@@ -1107,6 +1161,7 @@ function readerBoardHTML(rows, limit) {
 
 function boardSection(key, defs, cls) {
   const d = defs[key];
+  if (!d.items.length) return "";
   return `<section class="board ${cls || ""}">
     <h2>${d.title}<a class="full-link" href="#/board/${key}">完整 →</a></h2>
     <p class="board-note">${d.note}</p>
@@ -1148,9 +1203,9 @@ function renderBoards() {
       ${gbsHTML}
     </div>
     <section class="board hero" id="recent-reads" style="margin-top:2.5rem">
-      <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '缓存最近 ' + recentReads().length + ' 条' : ''}</span>
+      <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '可筛最近 ' + recentReads().length + ' 条' : ''}</span>
         <span class="recent-count" id="recent-count"></span></h2>
-      <p class="board-note">盲读按时间倒序，最新的在最前。点诗名到评论区，点读者名看这双眼睛。分数带 ▲/▼ 的是偏离这首诗共识 ≥2.5 分的评分——可能是跑偏的一条。</p>
+      <p class="board-note">先从最近一千条盲读中筛选，再按时间或分数排序。点诗名到评论区，点读者名看这双眼睛。分数带 ▲/▼ 的是偏离这首诗共识 ≥2.5 分的评分——可能是跑偏的一条。</p>
       ${recentFilterBarHtml()}
       <div class="recent-list" id="recent-list"></div>
       <div class="recent-more" id="recent-more"></div>
@@ -2474,6 +2529,11 @@ function wireMobilePoem(p) {
       else status.textContent = "浏览器禁止本地保存；可复制文字后再离开。";
     }, 450);
   });
+  document.getElementById("wc-search")?.addEventListener("input", e => {
+    barQuery = e.currentTarget.value.trim().toLocaleLowerCase();
+    barShown = 40;
+    buildBars();
+  });
 }
 
 function renderMobileDesk() {
@@ -2485,15 +2545,24 @@ function renderMobileDesk() {
     .map(([id, ts]) => ({ p: maps.poem.get(id), ts })).filter(x => x.p);
   const installable = !!installPrompt;
   const secure = window.isSecureContext;
+  const returnGuide = IS_SNAPSHOT
+    ? "这是一个独立离线文件。下次从手机的“文件”或浏览器下载记录中再次打开；电脑内容变化后需要重新导出。"
+    : secure
+      ? "把昼青集安装到桌面或添加主屏幕。以后直接点图标进入；打开页面或点“现在更新”时才向电脑拉取，不会一直在后台连接。"
+      : "把当前页面收藏，或用浏览器菜单“添加到主屏幕”建立快捷入口。只要电脑这一次的手机入口还开着，就能直接回来；电脑停止入口、退出程序或重新开启后，旧口令会失效，需要重新扫码。";
   app.innerHTML = `
     <p class="pocket-kicker">掌中册 · 只在这台手机</p>
     <h1 class="page-title">带走最近的一次观看</h1>
     <p class="page-hint">电脑内容更新时，手机的偏爱、阅读足迹与私人随记留在本机，不会被新快照覆盖，也不会写回作品总集。</p>
     <section class="pocket-status ${mobileConnection.online ? "online" : "offline"}">
       <div class="pocket-seal">${mobileConnection.online ? "连" : "影"}</div>
-      <div><b>${mobileConnection.online ? "正连接电脑" : "正在阅读离线留影"}</b>
+      <div><b>${mobileConnection.online ? "电脑入口可用" : "正在阅读离线留影"}</b>
         <p>${esc(mobileConnection.error || `最近更新：${compactWhen(mobileConnection.savedAt)}`)}</p></div>
       ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-refresh">现在更新</button>' : ""}
+    </section>
+    <section class="board pocket-return">
+      <h2>下次怎么回来</h2>
+      <p class="board-note">${returnGuide}</p>
     </section>
     <section class="pocket-counts">
       <div><b>${favs}</b><span>手机偏爱</span></div>
@@ -2507,7 +2576,7 @@ function renderMobileDesk() {
     </section>
     <section class="board pocket-manage">
       <h2>这台手机的数据</h2>
-      <p class="board-note">刷新电脑快照不会动这些记录。更换浏览器、清除网站数据或卸载应用前，可以先导出一份小备份。</p>
+      <p class="board-note">刷新电脑快照不会动这些记录。记录按“浏览器 + 访问地址”隔离：从局域网地址换到 Tailscale 地址时，请先在旧入口导出，再到新入口导入合并。更换浏览器、清除网站数据或卸载应用前，也建议先备份。</p>
       <div class="pocket-actions">
         <button class="btn" id="mobile-local-export">导出掌中记录</button>
         <label class="btn file-btn">导入掌中记录<input id="mobile-local-import" type="file" accept="application/json,.json"></label>
@@ -2518,7 +2587,7 @@ function renderMobileDesk() {
       <h2>放到手机桌面</h2>
       <p class="board-note">${secure
         ? "当前连接满足安装条件。安装后可以像普通应用一样启动；电脑不在线时仍会打开最近留影。"
-        : "当前是同一 Wi‑Fi 的临时 HTTP 访问，可以直接阅读，但浏览器不会把它安装成完整 PWA。使用 Tailscale 的私密 HTTPS 后即可安装。"}</p>
+        : "当前是同一 Wi‑Fi 的临时 HTTP 访问。可以收藏或添加一个主屏幕快捷入口，但它不是完整离线 PWA；使用 Tailscale 的私密 HTTPS 后才可完整安装。"}</p>
       ${installable ? '<button class="btn primary" id="mobile-install">安装昼青集</button>'
         : '<p class="pocket-install-hint">若浏览器支持安装，请在浏览器菜单中选择“安装应用”或“添加到主屏幕”。</p>'}
     </section>`;
@@ -2815,4 +2884,4 @@ if (!IS_SNAPSHOT && "serviceWorker" in navigator) {
   });
 }
 
-route();
+route().catch(showRouteError);

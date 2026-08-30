@@ -352,8 +352,8 @@ def load_wordcloud():
             print(f"[wordcloud] 计算失败，回退：{e}")
             if _WC_CACHE["data"] is not None:
                 return _WC_CACHE["data"]
-            return {"poems": {"meta": {}, "words": []},
-                    "reasons": {"meta": {}, "words": []}}
+            return {"poems": {"meta": {}, "words": [], "ranking": []},
+                    "reasons": {"meta": {}, "words": [], "ranking": []}}
 
 
 def load_favs():

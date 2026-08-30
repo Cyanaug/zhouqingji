@@ -134,6 +134,9 @@ main.wide { width: min(58rem, 94vw); }
 .btn:hover { border-color: var(--accent); color: var(--accent-deep); }
 .btn.primary { background: var(--accent); border-color: var(--accent); color: #fdfcf8; }
 .btn.primary:hover { background: var(--accent-deep); }
+.btn:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px;
+}
 
 h1.page-title {
   font-size: 1.5rem; font-weight: 600; letter-spacing: .1em;
@@ -144,7 +147,7 @@ h1.page-title {
 /* ---------- 榜单页 ---------- */
 
 .boards { display: grid; grid-template-columns: 1fr 1fr; gap: 2.2rem; }
-@media (max-width: 46rem) { .boards { grid-template-columns: 1fr; } }
+@media (max-width: 54rem) { .boards { grid-template-columns: 1fr; } }
 
 .board {
   background: var(--panel); border: 1px solid var(--line);
@@ -567,7 +570,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .pocket-counts div:last-child { border-right: 0; }
 .pocket-counts b { display: block; font-size: 1.35rem; color: var(--accent-deep); font-variant-numeric: tabular-nums; }
 .pocket-counts span { color: var(--ink-3); font-size: .72rem; letter-spacing: .08em; }
-.pocket-recent, .pocket-manage, .pocket-install { margin-top: 1.1rem; }
+.pocket-return, .pocket-recent, .pocket-manage, .pocket-install { margin-top: 1.1rem; }
 .pocket-recent p { display: flex; justify-content: space-between; gap: 1rem; padding: .5rem 0; border-top: 1px dashed var(--line); }
 .pocket-recent p span { color: var(--ink-3); font-size: .74rem; white-space: nowrap; }
 .pocket-actions, .mobile-access-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
@@ -619,15 +622,28 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
   .brand { display: block; margin: 0 0 .55rem .35rem; }
   .site-head nav {
     display: flex; gap: 1.15rem; overflow-x: auto; padding: .15rem .35rem .45rem;
-    scrollbar-width: none; -webkit-overflow-scrolling: touch;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch; scroll-snap-type: x proximity;
   }
   .site-head nav::-webkit-scrollbar { display: none; }
-  .site-head nav a { margin-left: 0; white-space: nowrap; font-size: .82rem; }
-  main { width: min(42rem, 90vw); padding-top: 1.7rem; }
+  .site-head nav a {
+    margin-left: 0; white-space: nowrap; font-size: .82rem; scroll-snap-align: start;
+    min-height: 2.4rem; display: inline-flex; align-items: center;
+  }
+  main, main.wide { width: min(42rem, 92vw); padding-top: 1.45rem; }
+  .mobile-mode main { padding-bottom: calc(4rem + env(safe-area-inset-bottom)); }
+  .mobile-mode .btn { min-height: 2.65rem; padding: .5em 1.1em; }
+  .mobile-mode .board { padding: 1.25rem 1.05rem 1.05rem; }
+  .mobile-mode .board h2 { gap: .7rem; flex-wrap: wrap; }
   .mobile-ribbon { justify-content: flex-start; overflow: hidden; white-space: nowrap; }
   .mobile-ribbon span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .pocket-status { grid-template-columns: auto 1fr; }
   .pocket-status .btn { grid-column: 1 / -1; justify-self: stretch; }
+  .pocket-counts div { min-width: 0; padding-inline: .25rem; }
+  .pocket-counts span { display: block; line-height: 1.45; letter-spacing: .04em; }
+  .recent-filter { align-items: stretch; }
+  .recent-filter .rf-sel { flex: 1 1 100%; min-height: 2.55rem; }
+  .band-group { width: 100%; display: grid; grid-template-columns: repeat(4, 1fr); }
+  .band-btn { min-width: 0; padding-inline: .25em !important; }
   .connection-slip { grid-template-columns: 1fr; }
   .connection-qr { width: min(14rem, 72vw); margin: 0 auto; }
   .mobile-private-row { grid-template-columns: 1fr; }
@@ -695,6 +711,13 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 /* 词频榜：诚实条形——字号会骗眼睛，这里给真实次数 */
 .wc-bars { width: min(52rem, 92vw); margin: 3rem auto 1rem; }
 .wc-bars .wc-note { font-size: .88rem; color: var(--ink-2); margin: .3em 0 1.2em; }
+.wc-list-tools { display: flex; align-items: center; gap: .8rem; margin-bottom: 1rem; }
+.wc-list-tools input {
+  width: min(22rem, 100%); min-height: 2.55rem; padding: .45rem .75rem;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
+  color: var(--ink); font: .84rem/1.5 var(--serif);
+}
+.wc-list-tools span { color: var(--ink-3); font-size: .76rem; white-space: nowrap; }
 .wc-barlist { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
 .wc-barrow { display: grid; grid-template-columns: 1.6rem 5.5rem 1fr auto; align-items: center; gap: .7rem; }
 .wc-barrow .wc-rank { color: var(--ink-3); font-size: .8rem; text-align: right; font-variant-numeric: tabular-nums; }
@@ -703,3 +726,15 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .wc-barfill { display: block; height: 100%; border-radius: 999px;
   background: linear-gradient(90deg, var(--accent), var(--accent-deep)); }
 .wc-barrow .wc-cnt { color: var(--ink-2); font-size: .84rem; font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }
+.wc-list-more { text-align: center; margin-top: 1.4rem; }
+
+@media (max-width: 46rem) {
+  .wc-list-tools { align-items: stretch; flex-direction: column; gap: .35rem; }
+  .wc-list-tools input { width: 100%; }
+  .wc-list-tools span { white-space: normal; }
+  .wc-barrow { grid-template-columns: 1.5rem 4.4rem minmax(3rem, 1fr) auto; gap: .45rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
+}

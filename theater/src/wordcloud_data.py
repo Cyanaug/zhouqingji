@@ -130,8 +130,9 @@ def _build(freq, docsets, examples_src, ex_len_lo, ex_len_hi, ex_ideal, meta):
         'ex': best.get(w, (0, ''))[1],
         'p': [[pw, pc] for pw, pc in partners.get(w, [])],
     } for w in top]
+    ranking = [{'w': w, 'c': c} for w, c in freq.most_common()]
     meta = dict(meta, vocab=len(freq), topn=len(top))
-    return {'meta': meta, 'words': words}
+    return {'meta': meta, 'words': words, 'ranking': ranking}
 
 
 def compute_poem_cloud(poems):
