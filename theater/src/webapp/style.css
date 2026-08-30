@@ -556,6 +556,13 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .pocket-status.offline { border-color: #dbcdb8; background: #faf5eb; }
 .pocket-status b { display: block; font-size: .95rem; letter-spacing: .06em; }
 .pocket-status p { color: var(--ink-3); font-size: .77rem; line-height: 1.55; margin-top: .2rem; }
+.pocket-delta {
+  display: flex; align-items: baseline; gap: .8rem; margin: -.25rem 0 1.35rem;
+  padding: .7rem 1rem; border-left: 3px solid var(--accent); background: #edf4f1;
+  color: var(--accent-deep);
+}
+.pocket-delta span { flex: 0 0 auto; font-size: .68rem; letter-spacing: .18em; }
+.pocket-delta b { font-size: .82rem; font-weight: 500; }
 .pocket-seal {
   width: 2.55rem; height: 2.55rem; display: grid; place-items: center;
   border: 1px solid currentColor; border-radius: 50%; color: var(--accent-deep);
@@ -576,6 +583,11 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .pocket-actions, .mobile-access-actions { display: flex; gap: .6rem; flex-wrap: wrap; align-items: center; }
 .file-btn input { display: none; }
 .pocket-install-hint { color: var(--ink-3); font-size: .78rem; }
+.pocket-backup-reminder, .pocket-backup-ok {
+  margin: .8rem 0; padding: .65rem .8rem; border-radius: 7px; font-size: .76rem; line-height: 1.55;
+}
+.pocket-backup-reminder { background: #faf1e7; border: 1px solid #e4cdb6; color: #7d4b34; }
+.pocket-backup-ok { background: #edf4f1; border: 1px solid #c9ddd5; color: var(--accent-deep); }
 
 .mobile-access-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
 .mobile-access-head h2 { font-size: 1.12rem; letter-spacing: .1em; }
@@ -585,6 +597,15 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 }
 .mobile-access-light.on { background: var(--accent-soft); color: var(--accent-deep); }
 .mobile-access-status { margin: 1.2rem 0; }
+.mobile-trust-choice {
+  display: grid; grid-template-columns: auto 1fr; gap: .7rem; align-items: start;
+  margin: -.25rem 0 1rem; padding: .8rem .9rem; border: 1px dashed #b7ccc4;
+  border-radius: 9px; background: rgba(237,244,241,.55); cursor: pointer;
+}
+.mobile-trust-choice input { margin-top: .2rem; accent-color: var(--accent); }
+.mobile-trust-choice b { display: block; color: var(--accent-deep); font-size: .82rem; }
+.mobile-trust-choice small { display: block; margin-top: .18rem; color: var(--ink-3); font-size: .7rem; line-height: 1.55; }
+.mobile-trust-choice:has(input:disabled) { cursor: default; opacity: .78; }
 .mobile-access-empty {
   padding: 1rem; border: 1px dashed var(--line); border-radius: 8px;
   text-align: center; color: var(--ink-3); font-size: .82rem;
@@ -638,6 +659,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
   .mobile-ribbon span:last-child { overflow: hidden; text-overflow: ellipsis; }
   .pocket-status { grid-template-columns: auto 1fr; }
   .pocket-status .btn { grid-column: 1 / -1; justify-self: stretch; }
+  .pocket-delta { align-items: flex-start; flex-direction: column; gap: .25rem; }
   .pocket-counts div { min-width: 0; padding-inline: .25rem; }
   .pocket-counts span { display: block; line-height: 1.45; letter-spacing: .04em; }
   .recent-filter { align-items: stretch; }

@@ -9,11 +9,13 @@ try {
         @('python', @('theater/tests/test_project_config.py')),
         @('python', @('theater/tests/test_public_sanitization.py')),
         @('python', @('theater/tests/test_model_canon.py')),
+        @('python', @('theater/tests/test_collect_safety.py')),
         @('python', @('theater/tests/test_thread.py')),
         @('python', @('theater/tests/test_votes.py')),
         @('python', @('theater/tests/test_update.py')),
         @('python', @('theater/tests/test_mobile.py')),
         @('python', @('theater/tests/test_wordcloud.py')),
+        @('python', @('theater/release/check_candidate.py')),
         @('python', @('theater/runners/audit_data.py'))
     )
     foreach ($check in $checks) {

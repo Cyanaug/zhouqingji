@@ -154,15 +154,29 @@ def cmd_collect(args):
     tdir, inbox = Path(args.tasks), Path(args.inbox)
     rejected = inbox / "rejected"
     done = inbox / "ingested"
-    ingested_lines, silences, rejects, missing = [], [], [], []
-    silence_files, ingested_files = [], []
+    ingested_lines, silences, rejects, missing, failed = [], [], [], [], []
+    silence_files, ingested_files, duplicates = [], [], []
 
     for tf in sorted(tdir.glob("task-*.json")):
         rf = inbox / (tf.stem + ".response.json")
         if not rf.exists():
             missing.append(tf.stem); continue
-        t = json.loads(tf.read_text(encoding="utf-8"))
-        resp = json.loads(rf.read_text(encoding="utf-8"))
+        try:
+            if R.response_already_ingested(rf, done):
+                duplicates.append(rf)
+                continue
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
+        t = json.loads(tf.read_text(encoding="utf-8-sig"))
+        # 回执解析「可以容错编码，不许猜内容」——与 runner.py / plan_votes.py 同一套纪律：
+        # BOM / GBK 之类的编码问题照常救回，但要报出来；结构坏到解析不出来就整批中止并
+        # 点名报错，一个字都不写。账本只追加不删，宁可重跑也不让猜出来的内容混进去。
+        try:
+            resp = R.parse_response_file(rf)
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
 
         if resp.get("silence"):
             silences.append({
@@ -226,6 +240,20 @@ def cmd_collect(args):
         print(f"引用校验未通过，静默重roll {len(rejects)} 条（已移入 "
               f"inbox/rejected/，原 task 未消耗，可重新派发同一任务）："
               f"{', '.join(rejects)}", file=sys.stderr)
+    # 完整校验后整批提交：只要有一份回执解析不出来就一个字都不写，回执留在 inbox 待重跑。
+    # 退出点必须在下面的 append_thread_silence / ingest 之前——坏回执也没有进
+    # silence_files / ingested_files，因此不会被 move 到 ingested/，可以原地重跑。
+    if failed:
+        print(f"\n✗ {len(failed)} 份回执无法解析，整批中止（未写入任何楼层）：",
+              file=sys.stderr)
+        for name, why in failed:
+            print(f"  - {name}: {why}", file=sys.stderr)
+        print("  回执未归档、留在 inbox，修好后重跑 collect 即可。", file=sys.stderr)
+        sys.exit(1)
+
+    for rf in duplicates:
+        rf.unlink()
+        print(f"↷ {rf.name} 与已归档回执完全相同，跳过重复入库", file=sys.stderr)
 
     for s in silences:
         R.append_thread_silence(s)

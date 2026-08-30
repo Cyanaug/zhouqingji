@@ -1,0 +1,69 @@
+{
+  "schema": 1,
+  "target_version": "1.7.1",
+  "private_base_commit": "9716e7f",
+  "receipts": [
+    {
+      "id": "mobile-trusted-v171",
+      "title": "可信手机入口、更新差异与掌中记录备份提示",
+      "status": "verified",
+      "public_release": true,
+      "files": [
+        ".gitignore",
+        "04_app_and_design.md",
+        "MOBILE_ACCESS.md",
+        "PROGRESS.md",
+        "README.md",
+        "VERSION",
+        "theater/NOTES.md",
+        "theater/check.ps1",
+        "theater/src/server.py",
+        "theater/src/webapp/app.js",
+        "theater/src/webapp/style.css",
+        "theater/tests/test_mobile.py",
+        "theater/tests/test_update.py"
+      ],
+      "tests": [
+        "python theater/tests/test_mobile.py",
+        "python theater/tests/test_update.py",
+        "node --check theater/src/webapp/app.js",
+        "手机 390px 与平板 834px 视觉检查"
+      ],
+      "notes": "可信的是 30 天连接签而非硬件身份；掌中记录备份只下载到手机，不写回电脑仓库。私有与公开 .gitignore/NOTES/check 保持各自脱敏版本。"
+    },
+    {
+      "id": "collect-safe-v171",
+      "title": "盲读、点赞与跟帖回执无损解析和整批拒收",
+      "status": "verified",
+      "public_release": true,
+      "files": [
+        "theater/runners/runner.py",
+        "theater/runners/plan_votes.py",
+        "theater/runners/plan_thread.py",
+        "theater/tests/test_collect_safety.py"
+      ],
+      "tests": [
+        "python theater/tests/test_collect_safety.py",
+        "python theater/tests/test_votes.py",
+        "python theater/tests/test_thread.py"
+      ],
+      "notes": "兼容 UTF-8 BOM、GB18030 和单层代码围栏；结构损坏不猜字段，一份失败则整批零写入；同名归档冲突保留并中止。"
+    },
+    {
+      "id": "release-receipts-v171",
+      "title": "多代理版本候选回执与发行差异闸门",
+      "status": "verified",
+      "public_release": true,
+      "files": [
+        "theater/release/README.md",
+        "theater/release/check_candidate.py",
+        "theater/release/candidate.json",
+        "theater/release/roadmap-v1.8-author-threads.md"
+      ],
+      "tests": [
+        "python theater/release/check_candidate.py --public-root <公开仓目录> --require-verified"
+      ],
+      "notes": "发布前要求所有公开项 verified，并拦截没有回执覆盖的发行文件差异。"
+    }
+  ]
+}

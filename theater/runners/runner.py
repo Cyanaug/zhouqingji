@@ -129,6 +129,67 @@ def load_json(p):
     return json.loads(Path(p).read_text(encoding="utf-8"))
 
 
+def parse_response_file(path):
+    """Losslessly decode one model receipt and parse a JSON object.
+
+    Encoding wrappers and a single Markdown fence are recoverable transport noise.
+    Missing braces, truncated strings, or field-like prose are content damage and must
+    never be guessed back into an append-only ledger.
+    """
+    path = Path(path)
+    raw = path.read_bytes()
+    decoded = None
+    used_encoding = None
+    candidates = ["utf-8-sig"]
+    if raw.startswith((b"\xff\xfe", b"\xfe\xff")):
+        candidates.append("utf-16")
+    candidates.append("gb18030")
+    decode_errors = []
+    for encoding in candidates:
+        try:
+            decoded = raw.decode(encoding)
+            used_encoding = encoding
+            break
+        except UnicodeDecodeError as exc:
+            decode_errors.append(f"{encoding}: {exc}")
+    if decoded is None:
+        raise ValueError("无法无损解码（" + "; ".join(decode_errors) + "）")
+    if used_encoding != "utf-8-sig":
+        print(f"⚠ {path.name} 需按 {used_encoding} 解码（非 UTF-8 回执）", file=sys.stderr)
+
+    candidate = decoded.strip()
+    fenced = candidate.startswith("```")
+    if fenced:
+        lines = candidate.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        candidate = "\n".join(lines).strip()
+    try:
+        parsed = json.loads(candidate)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"JSON 解析失败（按 {used_encoding} 解码，第 {exc.lineno} 行第 {exc.colno} 列）：{exc.msg}"
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("回执顶层必须是 JSON 对象")
+    if fenced:
+        print(f"⚠ {path.name} 剥离代码围栏后通过", file=sys.stderr)
+    return parsed
+
+
+def response_already_ingested(response_file, ingested_dir):
+    """Return True only for an identical archived receipt; reject same-name conflicts."""
+    response_file, ingested_dir = Path(response_file), Path(ingested_dir)
+    archived = ingested_dir / response_file.name
+    if not archived.exists():
+        return False
+    if archived.read_bytes() != response_file.read_bytes():
+        raise ValueError("同名回执已归档，但内容不同；为防重复或串批，整批中止")
+    return True
+
+
 def load_reads():
     if not READS.exists():
         return []
@@ -407,7 +468,7 @@ QUOTE_BLOCK = """—— 回复格式（内部草稿，不进最终稿）——
 THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
 
 如果沉默：
-{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是"没什么可说"这种空话"}
+{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是「没什么可说」这种空话"}
 
 如果回复：
 {
@@ -415,10 +476,12 @@ THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
   "restate": "【我的转述】",
   "reaction": "【回应】——只有这部分会被存档展示，不要带任何标签，两三句到几句话，像跟帖不像论文",
   "long_form": null,
-  "stance_changed": true 或 false,
+  "stance_changed": false,
   "stance_note": "一句话交代你的立场机制（见上）",
   "vote": "up 或 down —— 你认不认同你正在回复的这层楼本身说的（不是认不认同发帖人这个人）"
-}"""
+}
+（示例里的 false / up 只是占位，按你的真实判断填。stance_changed 只能填 true 或 false 两个布尔值之一，
+vote 只能填 "up" 或 "down"，都不要写成别的字。）"""
 
 # 一楼（直接回楼主长评）没有"旧立场"可言——立场惯性是回复回复时才有的机制。
 # 一楼回执不收 stance 字段：实测 892 层里 depth=1 占 886、stance_changed 仅 5 例，
@@ -426,7 +489,7 @@ THREAD_RESPONSE_FORMAT = """你的产出必须是一个 JSON 对象。
 THREAD_RESPONSE_FORMAT_FIRST = """你的产出必须是一个 JSON 对象。
 
 如果沉默：
-{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是"没什么可说"这种空话"}
+{"silence": true, "reason": "一句话，指出具体是哪一点已经被说尽了或者与你无关——不是「没什么可说」这种空话"}
 
 如果回复：
 {
@@ -790,18 +853,36 @@ def cmd_plan(args):
 def cmd_collect(args):
     """信箱流程：subagent 把各自的读稿结果写到 inbox/task-NN.response.json，
     这里与任务元数据合并成冻结 schema 记录并落盘——中间没有任何人手/大模型转录。
-    response 文件格式：{"model": "<运行时返回的模型 ID>", "score": 7.0, "reaction": "...", "long_form": null}
+    response 文件格式：{"model": "claude-...", "score": 7.0, "reaction": "...", "long_form": null}
+
+    回执解析「可以容错编码，不许猜内容」：BOM / GBK 之类的编码问题照常救回，但要报出来；
+    结构一旦坏到只能靠正则抠字，就整批中止并点名报错，一个字都不写。账本只追加不删，
+    宁可重跑也不让猜出来的分数混进去。
+    （2026-08 教训：旧版正则兜底静默造出 3 条假读数——r-006912 / r-006916 / r-006920，
+    其中 r-006916 通顺到无法从账本侧识别，只能靠回执侧穷举才发现。）
     """
     tdir = Path(args.tasks)
     inbox = Path(args.inbox)
-    merged, missing, processed = [], [], []
+    done = inbox / "ingested"
+    merged, missing, failed, processed, duplicates = [], [], [], [], []
     for tf in sorted(tdir.glob("task-*.json")):
         rf = inbox / (tf.stem + ".response.json")
         if not rf.exists():
             missing.append(tf.stem); continue
+        try:
+            if response_already_ingested(rf, done):
+                duplicates.append(rf)
+                continue
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
+        t = json.loads(tf.read_text(encoding="utf-8-sig"))
+        try:
+            r = parse_response_file(rf)
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
         processed.append(rf)
-        t = json.loads(tf.read_text(encoding="utf-8"))
-        r = json.loads(rf.read_text(encoding="utf-8"))
         reader = dict(t["reader"])
         reader["model"] = r.get("model") or args.model
         merged.append({
@@ -817,6 +898,15 @@ def cmd_collect(args):
         })
     if missing:
         print(f"缺 {len(missing)} 份回执：{', '.join(missing)}", file=sys.stderr)
+    # 完整校验后整批提交：只要有一份回执解析不出来就一个字都不写，回执留在 inbox 待重跑。
+    if failed:
+        print(f"\n✗ {len(failed)} 份回执无法解析，整批中止（未写入任何读数）：",
+              file=sys.stderr)
+        for name, why in failed:
+            print(f"  - {name}: {why}", file=sys.stderr)
+        print("  回执未归档、留在 inbox，修好后重跑 collect 即可。"
+              "账本只追加不删，宁可重跑也不让猜出来的分数入库。", file=sys.stderr)
+        sys.exit(1)
     if merged:
         # 展示本批回执的 model 分布，供派发方核对出处：应是真实底层模型 ID，
         # 不是派发工具/平台名（如 codebuddy）。reads.jsonl 只追加不删，入库前是最后一道人眼关。
@@ -835,10 +925,13 @@ def cmd_collect(args):
     cmd_ingest(_A)
 
     # 幂等：已入库的回执移入 inbox/ingested/，重复 collect 不会二次落盘
-    done = inbox / "ingested"
     done.mkdir(exist_ok=True)
     for rf in processed:
-        rf.rename(done / rf.name)
+        target = done / rf.name
+        rf.rename(target)
+    for rf in duplicates:
+        rf.unlink()
+        print(f"↷ {rf.name} 与已归档回执完全相同，跳过重复入库", file=sys.stderr)
 
 
 def next_read_id(existing):

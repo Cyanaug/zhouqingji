@@ -173,13 +173,24 @@ def cmd_invite(args):
 def cmd_collect(args):
     tdir, inbox = Path(args.tasks), Path(args.inbox)
     done = inbox / "ingested"
-    new_votes, missing, processed = [], [], []
+    new_votes, missing, failed, processed, duplicates = [], [], [], [], []
     for tf in sorted(tdir.glob("task-*.json")):
         rf = inbox / (tf.stem + ".response.json")
         if not rf.exists():
             missing.append(tf.stem); continue
-        t = json.loads(tf.read_text(encoding="utf-8"))
-        resp = json.loads(rf.read_text(encoding="utf-8"))
+        try:
+            if R.response_already_ingested(rf, done):
+                duplicates.append(rf)
+                continue
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
+        t = json.loads(tf.read_text(encoding="utf-8-sig"))
+        try:
+            resp = R.parse_response_file(rf)
+        except ValueError as exc:
+            failed.append((rf.name, str(exc)))
+            continue
         model = resp.get("model") or args.model
         voter_id = t["voter"]["persona_id"]
         ballot_id = "b-" + hashlib.sha1(
@@ -252,13 +263,25 @@ def cmd_collect(args):
 
     if missing:
         print(f"缺/无效 {len(missing)} 份回执：{', '.join(missing)}", file=sys.stderr)
+    # 与 runner.py 同一套纪律：完整校验后整批提交，坏回执一律拒收并点名，不靠 traceback 糊过去。
+    if failed:
+        print(f"\n✗ {len(failed)} 份回执无法解析，整批中止（未写入任何票）：",
+              file=sys.stderr)
+        for name, why in failed:
+            print(f"  - {name}: {why}", file=sys.stderr)
+        print("  回执未归档、留在 inbox，修好后重跑 collect 即可。", file=sys.stderr)
+        sys.exit(1)
     if new_votes:
         n = R.append_comment_votes(new_votes)
         print(f"{n} 条投票落盘 → {R.VOTES}")
     if processed:
         done.mkdir(exist_ok=True)
         for rf in processed:
-            rf.rename(done / rf.name)
+            target = done / rf.name
+            rf.rename(target)
+    for rf in duplicates:
+        rf.unlink()
+        print(f"↷ {rf.name} 与已归档回执完全相同，跳过重复入库", file=sys.stderr)
 
 
 def cmd_tally(args):

@@ -57,7 +57,7 @@
 - `.agents/skills/` / `.codex/agents/` 是 Codex 原生适配；`.claude/` 是 Claude Code 原生适配。
 - Antigravity 与 CodeBuddy 都能读取根目录 `AGENTS.md`，可担任主代理；也可作为外部执行通道，按一 task 一独立上下文运行。并发数由当前运行时和额度决定，项目不写死。
 
-版本与更新页同时支持 Git clone 和 ZIP 安装。Git 只做 `pull --ff-only`；ZIP 只从固定公开仓库更新发行允许清单，覆盖前备份，永不触碰 corpus、results、个人设置与批次回执。
+版本与更新页同时支持 Git clone 和 ZIP 安装。Git 只做 `pull --ff-only`；ZIP 只从固定公开仓库更新发行允许清单，覆盖前备份，永不触碰 corpus、results、个人设置与批次回执。v1.7.1 起可选 30 天可信手机连接签，掌中页会显示更新差异，并把手机记录备份下载到手机本地。
 
 ## 文档
 

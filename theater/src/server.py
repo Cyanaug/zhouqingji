@@ -62,8 +62,8 @@ UPDATE_ROOT_FILES = {
 }
 UPDATE_PREFIXES = (
     ".agents/skills/", ".codex/agents/", ".claude/agents/", ".claude/skills/",
-    ".github/workflows/", "theater/assets/", "theater/src/", "theater/tests/",
-    "theater/vendor/",
+    ".github/workflows/", "theater/assets/", "theater/release/", "theater/src/",
+    "theater/tests/", "theater/vendor/",
 )
 UPDATE_THEATER_FILES = {
     "theater/NOTES.md", "theater/check.ps1", "theater/open-theater.ps1",
@@ -90,6 +90,8 @@ DEFAULT_SETTINGS = {
 }
 VIEW_CHOICES = ("boards", "readers", "timeline", "stats", "all")
 SETTINGS = ROOT / "corpus" / "settings.json"
+MOBILE_TRUST = ROOT / "corpus" / "mobile_trust.json"
+MOBILE_TRUST_SECONDS = 30 * 24 * 60 * 60
 
 MIME = {".html": "text/html; charset=utf-8",
         ".css": "text/css; charset=utf-8",
@@ -1107,7 +1109,7 @@ class MobileHandler(BaseHTTPRequestHandler):
 
 
 class MobileAccess:
-    """运行期临时开关：关闭桌面程序或点停止后，局域网入口立即消失。"""
+    """手机只读入口；默认一次性，也可由作者明确保存为 30 天可信入口。"""
 
     def __init__(self):
         self._lock = threading.RLock()
@@ -1115,16 +1117,70 @@ class MobileAccess:
         self.thread = None
         self.token = None
         self.port = None
+        self.trusted = False
+        self.trust_expires_at = None
 
-    def start(self, port):
+    @staticmethod
+    def _load_trust():
+        if not MOBILE_TRUST.exists():
+            return None
+        try:
+            data = json.loads(MOBILE_TRUST.read_text(encoding="utf-8"))
+            token = data.get("token")
+            port = data.get("port")
+            expires_at = float(data.get("expires_at", 0))
+            if (data.get("schema") != 1 or not isinstance(token, str) or len(token) < 24
+                    or not isinstance(port, int) or not 1024 <= port <= 65535
+                    or expires_at <= time.time()):
+                return None
+            return {"token": token, "port": port, "expires_at": expires_at}
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _save_trust(token, port, expires_at):
+        MOBILE_TRUST.parent.mkdir(parents=True, exist_ok=True)
+        tmp = MOBILE_TRUST.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "schema": 1,
+            "token": token,
+            "port": port,
+            "expires_at": expires_at,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        try:
+            os.chmod(tmp, 0o600)
+        except OSError:
+            pass
+        tmp.replace(MOBILE_TRUST)
+
+    @staticmethod
+    def _delete_trust():
+        try:
+            MOBILE_TRUST.unlink()
+        except FileNotFoundError:
+            pass
+
+    def restore_trusted(self):
+        """应用启动时恢复尚未过期的可信入口；失败不妨碍桌面应用启动。"""
+        saved = self._load_trust()
+        if not saved:
+            return None
+        return self.start(saved["port"], trusted=True, _saved=saved)
+
+    def start(self, port, trusted=False, _saved=None):
         if not isinstance(port, int) or not 1024 <= port <= 65535:
             raise ValueError("手机访问端口需为 1024–65535 的整数")
+        if not isinstance(trusted, bool):
+            raise ValueError("可信入口选项格式无效")
         with self._lock:
-            if self.server and self.port == port:
+            if self.server and self.port == port and self.trusted == trusted:
                 return self.status()
             if self.server:
                 self.stop()
-            token = secrets.token_urlsafe(24)
+            saved = _saved or (self._load_trust() if trusted else None)
+            token = saved["token"] if saved else secrets.token_urlsafe(24)
+            expires_at = saved["expires_at"] if saved else (
+                time.time() + MOBILE_TRUST_SECONDS if trusted else None)
             try:
                 server = MobileHTTPServer(("0.0.0.0", port), MobileHandler)
             except OSError as exc:
@@ -1133,13 +1189,21 @@ class MobileAccess:
             thread = threading.Thread(target=server.serve_forever,
                                       name="zhouqingji-mobile", daemon=True)
             self.server, self.thread, self.token, self.port = server, thread, token, port
+            self.trusted, self.trust_expires_at = trusted, expires_at
+            if trusted:
+                self._save_trust(token, port, expires_at)
             thread.start()
             return self.status()
 
-    def stop(self):
+    def stop(self, revoke=False):
+        if not isinstance(revoke, bool):
+            raise ValueError("撤销可信入口选项格式无效")
         with self._lock:
             server, thread = self.server, self.thread
             self.server = self.thread = self.token = self.port = None
+            self.trusted, self.trust_expires_at = False, None
+            if revoke:
+                self._delete_trust()
         if server:
             server.shutdown()
             server.server_close()
@@ -1150,11 +1214,15 @@ class MobileAccess:
     def status(self):
         with self._lock:
             running, port, token = bool(self.server), self.port, self.token
+            trusted, expires_at = self.trusted, self.trust_expires_at
         urls = []
         if running:
             urls = [f"http://{ip}:{port}/?pair={token}" for ip in _local_ipv4s()]
         return {"running": running, "port": port, "urls": urls,
-                "token": token if running else None}
+                "token": token if running else None, "trusted": trusted,
+                "trust_expires_at": (time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                     time.localtime(expires_at))
+                                     if trusted and expires_at else None)}
 
     def valid_pair_url(self, value):
         """只为本轮有效配对地址生成二维码，兼容 Tailscale Serve 的 HTTPS 域名。"""
@@ -1288,9 +1356,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, update_pull())
             if self.path == "/api/mobile/start":
                 port = payload.get("port", load_settings().get("mobile_port", 8738))
-                return self._send(200, MOBILE_ACCESS.start(port))
+                trusted = payload.get("trusted", False)
+                return self._send(200, MOBILE_ACCESS.start(port, trusted=trusted))
             if self.path == "/api/mobile/stop":
-                return self._send(200, MOBILE_ACCESS.stop())
+                return self._send(200, MOBILE_ACCESS.stop(
+                    revoke=payload.get("revoke", False)))
             if self.path == "/api/mobile/export":
                 html = render_mobile_snapshot_html()
                 stamp = time.strftime("%Y%m%d-%H%M")
@@ -1327,4 +1397,10 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     st = load_settings()
     print(f"{st['site_title']}·{st['site_subtitle']}  →  http://localhost:{st['port']}")
+    try:
+        restored = MOBILE_ACCESS.restore_trusted()
+        if restored:
+            print(f"可信手机入口已恢复（有效至 {restored['trust_expires_at']}）")
+    except (OSError, ValueError) as exc:
+        print(f"可信手机入口未能自动恢复：{exc}")
     ThreadingHTTPServer(("127.0.0.1", st["port"]), Handler).serve_forever()

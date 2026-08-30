@@ -3,6 +3,8 @@
 import json
 import socket
 import sys
+import tempfile
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -84,6 +86,52 @@ def test_private_pair_url_requires_current_token():
     print("[ok] 私密 HTTPS 二维码仅接受本轮有效口令")
 
 
+def test_ephemeral_token_rotates():
+    access = S.MobileAccess()
+    port = _free_port()
+    try:
+        first = access.start(port)["token"]
+        access.stop()
+        second = access.start(port)["token"]
+        assert first != second
+    finally:
+        access.stop()
+    print("[ok] 一次性入口停止重开后口令轮换")
+
+
+def test_trusted_token_survives_restart_and_revokes():
+    old_path = S.MOBILE_TRUST
+    with tempfile.TemporaryDirectory(prefix="zq-mobile-trust-") as td:
+        S.MOBILE_TRUST = Path(td) / "mobile_trust.json"
+        port = _free_port()
+        first = S.MobileAccess()
+        second = S.MobileAccess()
+        try:
+            status = first.start(port, trusted=True)
+            token = status["token"]
+            assert status["trusted"] and S.MOBILE_TRUST.exists()
+            assert "token" not in S.build_mobile_snapshot(include_wordcloud=False).get("mobile", {})
+            first.stop()
+
+            restored = second.restore_trusted()
+            assert restored and restored["trusted"]
+            assert restored["token"] == token, "可信入口重启后应沿用同一张连接签"
+            second.stop(revoke=True)
+            assert not S.MOBILE_TRUST.exists()
+            assert S.MobileAccess().restore_trusted() is None
+
+            S.MOBILE_TRUST.write_text(json.dumps({
+                "schema": 1, "token": "x" * 32, "port": port,
+                "expires_at": time.time() - 1,
+            }), encoding="utf-8")
+            assert S.MobileAccess().restore_trusted() is None
+        finally:
+            first.stop()
+            second.stop(revoke=True)
+            S.MOBILE_TRUST = old_path
+    print("[ok] 可信入口跨重启复用 / 撤销与过期失效 / 口令不进快照")
+
+
 def _free_port():
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
@@ -127,5 +175,7 @@ if __name__ == "__main__":
     test_single_html_is_self_contained()
     test_qr_is_local_svg()
     test_private_pair_url_requires_current_token()
+    test_ephemeral_token_rotates()
+    test_trusted_token_survives_restart_and_revokes()
     test_mobile_server_rejects_writes_and_requires_token()
     print("ALL PASS")

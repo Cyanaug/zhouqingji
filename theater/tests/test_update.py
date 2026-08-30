@@ -23,10 +23,12 @@ def test_safe_archive_update():
     with tempfile.TemporaryDirectory(prefix="zqj-update-test-") as td:
         root = Path(td)
         (root / "theater/src").mkdir(parents=True)
+        (root / "theater/runners").mkdir(parents=True)
         (root / "corpus").mkdir()
         (root / "results").mkdir()
         (root / "VERSION").write_text("1.5\n", encoding="utf-8")
         (root / "theater/src/server.py").write_text("old", encoding="utf-8")
+        (root / "theater/runners/runner.py").write_text("old runner", encoding="utf-8")
         (root / "corpus/诗稿.json").write_text("PRIVATE", encoding="utf-8")
         (root / "results/reads.jsonl").write_text("PRIVATE", encoding="utf-8")
 
@@ -34,14 +36,16 @@ def test_safe_archive_update():
             "VERSION": "1.6\n",
             "README.md": "new docs",
             "theater/src/server.py": "new server",
+            "theater/runners/runner.py": "new runner",
             "corpus/诗稿.json": "PUBLIC SHOULD NEVER COPY",
             "results/reads.jsonl": "PUBLIC SHOULD NEVER COPY",
             "theater/runners/batches/task.json": "SHOULD NEVER COPY",
         })
         result = S.install_update_archive(data, root)
-        assert result["changed"] == 3
+        assert result["changed"] == 4
         assert (root / "VERSION").read_text(encoding="utf-8") == "1.6\n"
         assert (root / "theater/src/server.py").read_text(encoding="utf-8") == "new server"
+        assert (root / "theater/runners/runner.py").read_text(encoding="utf-8") == "new runner"
         assert (root / "corpus/诗稿.json").read_text(encoding="utf-8") == "PRIVATE"
         assert (root / "results/reads.jsonl").read_text(encoding="utf-8") == "PRIVATE"
         assert not (root / "theater/runners/batches/task.json").exists()

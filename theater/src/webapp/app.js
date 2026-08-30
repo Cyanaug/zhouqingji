@@ -12,7 +12,7 @@ const MOBILE_TOKEN_KEY = "zhouqingji.mobile.token.v1";
 const MOBILE_LOCAL_KEY = "zhouqingji.mobile.local.v1";
 let S = null; // {poems, reads, personas}
 let maps = {};
-let mobileConnection = { source: APP_MODE, online: false, savedAt: null, error: "" };
+let mobileConnection = { source: APP_MODE, online: false, savedAt: null, error: "", delta: null };
 let installPrompt = null;
 
 function storageGet(key) {
@@ -29,10 +29,11 @@ function loadMobileLocal() {
       favorites: parsed.favorites || {},
       notes: parsed.notes || {},
       viewed: parsed.viewed || {},
+      last_exported_at: parsed.last_exported_at || null,
       version: 1,
     };
   } catch (_) {
-    return { favorites: {}, notes: {}, viewed: {}, version: 1 };
+    return { favorites: {}, notes: {}, viewed: {}, last_exported_at: null, version: 1 };
   }
 }
 let mobileLocal = loadMobileLocal();
@@ -67,6 +68,30 @@ async function snapshotWrite(state, etag) {
     tx.oncomplete = () => { db.close(); resolve(); };
     tx.onerror = () => { db.close(); reject(tx.error); };
   });
+}
+
+function summarizeMobileDelta(before, after) {
+  if (!before || !after) return null;
+  const oldPoems = new Map((before.poems || []).map(p => [p.id, p]));
+  const oldReads = new Set((before.reads || []).map(r => r.read_id).filter(Boolean));
+  let poems = 0, changed = 0, reads = 0;
+  for (const p of (after.poems || [])) {
+    if (!oldPoems.has(p.id)) poems++;
+    else if ((oldPoems.get(p.id).content_hash || "") !== (p.content_hash || "")) changed++;
+  }
+  for (const r of (after.reads || [])) if (r.read_id && !oldReads.has(r.read_id)) reads++;
+  return { poems, changed, reads, fromVersion: before.version || "", toVersion: after.version || "" };
+}
+
+function mobileDeltaText(delta) {
+  if (!delta) return "";
+  const bits = [];
+  if (delta.poems) bits.push(`新增 ${delta.poems} 首作品`);
+  if (delta.reads) bits.push(`新增 ${delta.reads} 条评论或跟帖`);
+  if (delta.changed) bits.push(`修改 ${delta.changed} 首作品`);
+  if (!bits.length && delta.fromVersion !== delta.toVersion)
+    bits.push(`程序 ${delta.fromVersion || "旧版"} → ${delta.toVersion || "新版"}`);
+  return bits.join(" · ");
 }
 
 /* ---------- 工具 ---------- */
@@ -141,17 +166,21 @@ async function loadMobileState() {
     if (cached?.etag) headers["If-None-Match"] = cached.etag;
     const res = await fetch("/api/mobile-state", { headers, cache: "no-store" });
     if (res.status === 304 && cached) {
-      mobileConnection = { source: "computer", online: true, savedAt: cached.savedAt, error: "" };
+      mobileConnection = { source: "computer", online: true, savedAt: cached.savedAt,
+        error: "", delta: { poems: 0, changed: 0, reads: 0,
+          fromVersion: cached.state?.version || "", toVersion: cached.state?.version || "" } };
       return cached.state;
     }
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || res.status);
     const etag = res.headers.get("ETag") || "";
     const savedAt = new Date().toISOString();
+    const delta = summarizeMobileDelta(cached?.state, data);
     try { await snapshotWrite(data, etag); } catch (e) {
       mobileConnection.error = "已取到最新内容，但浏览器没有保存离线留影。";
     }
-    mobileConnection = { source: "computer", online: true, savedAt, error: mobileConnection.error || "" };
+    mobileConnection = { source: "computer", online: true, savedAt,
+      error: mobileConnection.error || "", delta };
     return data;
   } catch (error) {
     if (!cached) throw error;
@@ -2545,6 +2574,11 @@ function renderMobileDesk() {
     .map(([id, ts]) => ({ p: maps.poem.get(id), ts })).filter(x => x.p);
   const installable = !!installPrompt;
   const secure = window.isSecureContext;
+  const localCount = favs + notes + Object.keys(mobileLocal.viewed).length;
+  const lastExport = mobileLocal.last_exported_at;
+  const exportAge = lastExport ? Date.now() - new Date(lastExport).getTime() : Infinity;
+  const backupDue = localCount > 0 && (!lastExport || exportAge > 30 * 24 * 60 * 60 * 1000);
+  const deltaText = mobileDeltaText(mobileConnection.delta);
   const returnGuide = IS_SNAPSHOT
     ? "这是一个独立离线文件。下次从手机的“文件”或浏览器下载记录中再次打开；电脑内容变化后需要重新导出。"
     : secure
@@ -2560,6 +2594,7 @@ function renderMobileDesk() {
         <p>${esc(mobileConnection.error || `最近更新：${compactWhen(mobileConnection.savedAt)}`)}</p></div>
       ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-refresh">现在更新</button>' : ""}
     </section>
+    ${deltaText ? `<section class="pocket-delta"><span>本次带回</span><b>${esc(deltaText)}</b></section>` : ""}
     <section class="board pocket-return">
       <h2>下次怎么回来</h2>
       <p class="board-note">${returnGuide}</p>
@@ -2576,7 +2611,9 @@ function renderMobileDesk() {
     </section>
     <section class="board pocket-manage">
       <h2>这台手机的数据</h2>
-      <p class="board-note">刷新电脑快照不会动这些记录。记录按“浏览器 + 访问地址”隔离：从局域网地址换到 Tailscale 地址时，请先在旧入口导出，再到新入口导入合并。更换浏览器、清除网站数据或卸载应用前，也建议先备份。</p>
+      <p class="board-note">刷新电脑快照不会动这些记录。导出会把一个很小的 JSON 备份文件下载到手机“下载/文件”中，不会上传电脑，也不会进入作品仓库。换入口、换浏览器或清除网站数据前，可用它恢复偏爱、足迹和随记。</p>
+      ${backupDue ? `<p class="pocket-backup-reminder">这些掌中记录还没有近期备份。它不是作品版本回滚，只保护这台手机上的使用痕迹。</p>`
+        : lastExport ? `<p class="pocket-backup-ok">上次备份：${compactWhen(lastExport)}</p>` : ""}
       <div class="pocket-actions">
         <button class="btn" id="mobile-local-export">导出掌中记录</button>
         <label class="btn file-btn">导入掌中记录<input id="mobile-local-import" type="file" accept="application/json,.json"></label>
@@ -2594,14 +2631,18 @@ function renderMobileDesk() {
 
   document.getElementById("mobile-refresh")?.addEventListener("click", async e => {
     e.currentTarget.disabled = true; e.currentTarget.textContent = "更新中…";
-    try { await loadState(); renderMobileDesk(); toast("已检查电脑中的最新内容"); }
+    try { await loadState(); const summary = mobileDeltaText(mobileConnection.delta);
+      renderMobileDesk(); toast(summary || "已经是电脑中的最新内容"); }
     catch (err) { toast("更新失败：" + err.message); renderMobileDesk(); }
   });
   document.getElementById("mobile-local-export").onclick = () => {
+    mobileLocal.last_exported_at = new Date().toISOString();
+    saveMobileLocal();
     const data = { kind: "zhouqingji-mobile-local", schema: 1,
-      exported_at: new Date().toISOString(), data: mobileLocal };
+      exported_at: mobileLocal.last_exported_at, data: mobileLocal };
     downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
       `昼青集-掌中记录-${new Date().toISOString().slice(0, 10)}.json`);
+    renderMobileDesk(); toast("掌中记录已下载到这台手机");
   };
   document.getElementById("mobile-local-import").onchange = async e => {
     const file = e.target.files?.[0]; if (!file) return;
@@ -2612,7 +2653,8 @@ function renderMobileDesk() {
       mobileLocal = {
         favorites: { ...mobileLocal.favorites, ...(parsed.data.favorites || {}) },
         notes: { ...mobileLocal.notes, ...(parsed.data.notes || {}) },
-        viewed: { ...mobileLocal.viewed, ...(parsed.data.viewed || {}) }, version: 1,
+        viewed: { ...mobileLocal.viewed, ...(parsed.data.viewed || {}) },
+        last_exported_at: mobileLocal.last_exported_at || null, version: 1,
       };
       saveMobileLocal(); renderMobileDesk(); toast("掌中记录已合并");
     } catch (err) { toast("导入失败：" + err.message); }
@@ -2687,11 +2729,15 @@ function renderSettings() {
     </section>
     <section class="board mobile-access-board" style="text-align:left;margin-top:1.6rem">
       <div class="mobile-access-head">
-        <div><p class="pocket-kicker">手机访问</p><h2>临时展开一张连接签</h2></div>
+        <div><p class="pocket-kicker">手机访问</p><h2>展开一张连接签</h2></div>
         <span class="mobile-access-light" id="mobile-access-light">未开启</span>
       </div>
-      <p class="board-note">同一 Wi‑Fi 下，点“开始手机访问”后扫码即可；停止或关闭本程序，入口立即消失。手机服务只有观看接口，随机口令每次重开都会更换。</p>
+      <p class="board-note">同一 Wi‑Fi 下开始后扫码即可。默认是一次性入口；也可以明确保存为 30 天可信入口，让昼青集下次启动时沿用同一张连接签。</p>
       <div id="mobile-access-status" class="mobile-access-status"><p>正在检查本机状态……</p></div>
+      <label class="mobile-trust-choice">
+        <input type="checkbox" id="mobile-trusted">
+        <span><b>信任这台手机，30 天内免重新扫码</b><small>实际信任的是这张连接签：任何拿到完整二维码的人都能使用。停止并撤销后立即失效。</small></span>
+      </label>
       <div class="mobile-access-actions">
         <button class="btn primary" id="mobile-start">开始手机访问</button>
         <button class="btn" id="mobile-stop">停止</button>
@@ -2753,10 +2799,13 @@ function renderSettings() {
   const mobileBox = document.getElementById("mobile-access-status");
   const mobileLight = document.getElementById("mobile-access-light");
   const renderMobileStatus = status => {
-    mobileLight.textContent = status.running ? "正在开放" : "未开启";
+    mobileLight.textContent = status.running ? (status.trusted ? "可信入口" : "本次开放") : "未开启";
     mobileLight.classList.toggle("on", !!status.running);
     document.getElementById("mobile-start").disabled = !!status.running;
     document.getElementById("mobile-stop").disabled = !status.running;
+    document.getElementById("mobile-stop").textContent = status.trusted ? "停止并撤销" : "停止";
+    document.getElementById("mobile-trusted").disabled = !!status.running;
+    document.getElementById("mobile-trusted").checked = !!status.trusted;
     if (!status.running) {
       mobileBox.innerHTML = '<p class="mobile-access-empty">入口关闭。作品仍只在电脑本机。</p>';
       return;
@@ -2769,9 +2818,11 @@ function renderSettings() {
     const first = urls[0];
     mobileBox.innerHTML = `<div class="connection-slip">
       <img class="connection-qr" src="/api/mobile/qr?text=${encodeURIComponent(first)}" alt="手机访问二维码">
-      <div class="connection-copy"><b>用手机相机扫码</b><p>电脑和手机应连接同一 Wi‑Fi。</p>
+      <div class="connection-copy"><b>${status.trusted ? "可信连接签" : "用手机相机扫码"}</b><p>${status.trusted
+        ? `30 天内重启昼青集仍沿用此签，有效至 ${esc(compactWhen(status.trust_expires_at))}。`
+        : "电脑和手机应连接同一 Wi‑Fi。"}</p>
         ${urls.map((url, i) => `<button class="connection-url" data-url="${esc(url)}"><span>${i ? "备用地址" : "访问地址"}</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>`).join("")}
-        <small>二维码中含本次随机口令，不要转发；停止访问后立即失效。</small></div></div>`;
+        <small>二维码含只读口令，不要转发；${status.trusted ? "点“停止并撤销”后立即失效。" : "停止访问后立即失效。"}</small></div></div>`;
     mobileBox.querySelectorAll(".connection-url").forEach(btn => btn.onclick = async () => {
       try { await navigator.clipboard.writeText(btn.dataset.url); toast("访问地址已复制"); }
       catch (_) { toast("浏览器未允许复制，请用二维码"); }
@@ -2799,7 +2850,7 @@ function renderSettings() {
       <img class="connection-qr" src="/api/mobile/qr?base=${encodeURIComponent(raw)}" alt="Tailscale 私密访问二维码">
       <div class="connection-copy"><b>私密 HTTPS 连接签</b><p>手机也登录同一 Tailscale 网络后扫码。</p>
         <button class="connection-url" data-url="${esc(url)}"><span>私密地址</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>
-        <small>口令随“停止手机访问”立即失效；Tailscale Serve 也应在不用时停止。</small></div></div>`;
+        <small>${lastMobileStatus.trusted ? "可信口令在撤销前保持不变；" : "口令随停止访问立即失效；"}Tailscale Serve 也应在不用时停止。</small></div></div>`;
     out.querySelector(".connection-url").onclick = async e => {
       try { await navigator.clipboard.writeText(e.currentTarget.dataset.url); toast("私密地址已复制"); }
       catch (_) { toast("浏览器未允许复制，请用二维码"); }
@@ -2813,14 +2864,22 @@ function renderSettings() {
   document.getElementById("mobile-start").onclick = async () => {
     try {
       const port = +document.getElementById("set-mobile-port").value || 8738;
-      lastMobileStatus = await post("/api/mobile/start", { port });
+      const trusted = document.getElementById("mobile-trusted").checked;
+      lastMobileStatus = await post("/api/mobile/start", { port, trusted });
       renderMobileStatus(lastMobileStatus);
-      toast("手机只读入口已开启");
+      toast(trusted ? "30 天可信入口已开启" : "本次手机只读入口已开启");
     } catch (e) { toast("开启失败：" + e.message); }
   };
-  document.getElementById("mobile-stop").onclick = async () => {
-    try { lastMobileStatus = await post("/api/mobile/stop", {}); renderMobileStatus(lastMobileStatus); toast("手机入口已停止"); }
+  const stopMobile = async revoke => {
+    try { lastMobileStatus = await post("/api/mobile/stop", { revoke });
+      renderMobileStatus(lastMobileStatus); toast(revoke ? "可信入口已停止并撤销" : "手机入口已停止"); }
     catch (e) { toast("停止失败：" + e.message); }
+  };
+  document.getElementById("mobile-stop").onclick = () => {
+    if (!lastMobileStatus?.trusted) return stopMobile(false);
+    confirmPopup({ title: "停止并撤销可信入口？",
+      bodyHtml: "<p>手机上已保存的作品留影、偏爱和随记不会被删除；只是这张连接签将立刻失效，下次需要重新扫码。</p>",
+      okLabel: "停止并撤销", onOk: () => stopMobile(true) });
   };
   document.getElementById("mobile-export").onclick = async e => {
     const btn = e.currentTarget, out = document.getElementById("mobile-export-status");
