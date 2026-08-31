@@ -7,7 +7,7 @@ description: 昼青集盲读批量派发。计算覆盖缺口 → plan 生成任
 
 工作目录：仓库根目录下的 `theater/runners`。所有命令在此目录执行（下面路径都是相对这个目录写的）。
 
-**开工前确认**：若用户没有明确给出（a）要读哪些诗 / 目标层数、（b）用什么模型，先算好缺口后**向用户报告缺口并确认范围与模型**，再动手派发。用户已明确给全的，直接执行。默认值先看 `corpus/settings.json` 的 `dispatch` 段（`default_model` / `default_transport` / `target_depth`，作者在网页设置页维护；文件或字段缺失才用本 SOP 里写的默认）；用户当场说的永远优先。
+**开工前确认**：若用户没有明确给出（a）要读哪些诗 / 目标层数、（b）用什么模型，先算好缺口后**向用户报告缺口并确认范围与模型**，再动手派发。用户已明确给全的，直接执行。可选偏好先看 `corpus/settings.json` 的 `dispatch` 段；字段为空时，不猜历史模型/通道：覆盖目标按当前最薄层建议“再加一层”，模型与通道按本次实际可用项报告。用户当场说的永远优先。
 
 **文体（v1.3 起）**：读者池 = 诗类（现代诗/词/歌词）+ 设置页勾选的 `read_genres` 文体，runner 的 `pool()` 自动生效，派发方不用做任何额外处理。非诗任务的 prompt 已自带「体裁转换」段（同一批读者换该文体的判据读）与作者写在 `genre_notes` 里的补充要求；plan 会打印本批非诗文体构成，照常派发即可。
 
@@ -40,13 +40,13 @@ python runner.py plan --poem-ids "<逗号分隔的id>" --readers <每首几读> 
 
 ## 3. 派发
 
-- 用 Agent 工具，`subagent_type: "poem-reader"`，`model: "haiku"`（默认，成本最低；sonnet 约 3.5–4 倍价，仅特批时用）。
+- 用 Agent 工具，`subagent_type: "poem-reader"`；模型使用本轮已向用户报告并确认的可用型号，不再把 Haiku 或任何供应商写成永久默认。
 - 派发指令全文只有三行（`<仓库根目录>` 换成你实际的路径）：
 
 ```
 PROMPT 文件：<仓库根目录>/theater/runners/batches/<批次>/tasks/task-NNN.prompt.txt
 RESPONSE 输出文件：<仓库根目录>/theater/runners/batches/<批次>/inbox/task-NNN.response.json
-回执 model 字段填：<运行时实际返回的模型 ID>
+回执 `model` 字段填本次真实底层模型 ID（不能照抄旧示例，也不能只填 `haiku` / `sonnet` 这类别名）。
 ```
 
 - **波次并发**：一个回复里并行发 15–20 个 Agent 调用为一波，波与波之间紧接着发，吃提示缓存。不要一个一个串行发。
@@ -83,7 +83,7 @@ Rules:
 - 用「」做中文引号
 - long_form 为 null，除非真的有超出短评的话要说
 - 只写 JSON 文件
-- model 填运行时实际返回的底层模型 ID，**不是派发工具/平台名**。此字段保持模型自报、不由派发方代填：平台名义型号与实际返回值不一致时，代填会把真实出处盖掉
+- model 填当次执行器实际返回的底层模型 ID，**不是派发工具/平台名**（codebuddy、cursor 是工具名，不是模型）。此字段保持模型自报、不由派发方代填：平台悄悄降级换模型时，代填会把真实出处盖掉
 ```
 
 ## 4. 质检（collect 之前，必做）

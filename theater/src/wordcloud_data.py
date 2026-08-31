@@ -131,8 +131,12 @@ def _build(freq, docsets, examples_src, ex_len_lo, ex_len_hi, ex_ideal, meta):
         'p': [[pw, pc] for pw, pc in partners.get(w, [])],
     } for w in top]
     ranking = [{'w': w, 'c': c} for w, c in freq.most_common()]
+    docfreq = collections.Counter()
+    for words_in_doc in docsets:
+        docfreq.update(words_in_doc)
+    coverage = [{'w': w, 'c': c} for w, c in docfreq.most_common()]
     meta = dict(meta, vocab=len(freq), topn=len(top))
-    return {'meta': meta, 'words': words, 'ranking': ranking}
+    return {'meta': meta, 'words': words, 'ranking': ranking, 'coverage': coverage}
 
 
 def compute_poem_cloud(poems):

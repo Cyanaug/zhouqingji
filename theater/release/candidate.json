@@ -1,69 +1,57 @@
 {
   "schema": 1,
-  "target_version": "1.7.1",
-  "private_base_commit": "9716e7f",
+  "target_version": "1.7.2",
+  "private_base_commit": "f9774e5",
   "receipts": [
     {
-      "id": "mobile-trusted-v171",
-      "title": "可信手机入口、更新差异与掌中记录备份提示",
+      "id": "reader-echo-v172",
+      "title": "掌中册修复、读者回声、词云广度与榜单开关",
       "status": "verified",
       "public_release": true,
       "files": [
-        ".gitignore",
+        ".claude/skills/dispatch-reads/SKILL.md",
+        "00_START_HERE.md",
         "04_app_and_design.md",
         "MOBILE_ACCESS.md",
-        "PROGRESS.md",
         "README.md",
         "VERSION",
-        "theater/NOTES.md",
+        "theater/release/archive/v1.7.1.json",
+        "theater/release/candidate.json",
+        "theater/release/check_candidate.py",
+        "theater/release/README.md",
         "theater/check.ps1",
         "theater/src/server.py",
+        "theater/src/wordcloud_data.py",
         "theater/src/webapp/app.js",
         "theater/src/webapp/style.css",
         "theater/tests/test_mobile.py",
-        "theater/tests/test_update.py"
+        "theater/tests/test_release_candidate.py",
+        "theater/tests/test_sidecars.py",
+        "theater/tests/test_wordcloud.py"
       ],
       "tests": [
         "python theater/tests/test_mobile.py",
-        "python theater/tests/test_update.py",
+        "python theater/tests/test_release_candidate.py",
+        "python theater/tests/test_sidecars.py",
+        "python theater/tests/test_wordcloud.py",
         "node --check theater/src/webapp/app.js",
+        "powershell -ExecutionPolicy Bypass -File theater/check.ps1",
         "手机 390px 与平板 834px 视觉检查"
       ],
-      "notes": "可信的是 30 天连接签而非硬件身份；掌中记录备份只下载到手机，不写回电脑仓库。私有与公开 .gitignore/NOTES/check 保持各自脱敏版本。"
+      "notes": "回声只数未折叠盲读收到的主动票，顺势票不计；作者藏印写后回读核验，只写 curation 侧车，与 AI 加精分列。点赞率仅使用方向票且设 20 票门槛，不制造缺少曝光分母的加精率。词频榜新增作品覆盖口径，词句索引点击后才加载。iPad 扫码器转 Safari/主屏幕时保留连接签，并把展示质分与逐条校准均值的差别写入悬停说明。榜单首页可关闭诗类专榜或逐项隐藏非诗文体榜，数据与直达页保持不变。跟帖索引按最近活动、回复数、深度和作品筛选，详情返回后保留筛选，不制造含义不清的“激烈度”。派发高级偏好不再写死历史模型、通道或固定覆盖层数。"
     },
     {
-      "id": "collect-safe-v171",
-      "title": "盲读、点赞与跟帖回执无损解析和整批拒收",
-      "status": "verified",
-      "public_release": true,
+      "id": "private-ledgers-v172",
+      "title": "私有进度与设计日志",
+      "status": "private",
+      "public_release": false,
       "files": [
-        "theater/runners/runner.py",
-        "theater/runners/plan_votes.py",
-        "theater/runners/plan_thread.py",
-        "theater/tests/test_collect_safety.py"
-      ],
-      "tests": [
-        "python theater/tests/test_collect_safety.py",
-        "python theater/tests/test_votes.py",
-        "python theater/tests/test_thread.py"
-      ],
-      "notes": "兼容 UTF-8 BOM、GB18030 和单层代码围栏；结构损坏不猜字段，一份失败则整批零写入；同名归档冲突保留并中止。"
-    },
-    {
-      "id": "release-receipts-v171",
-      "title": "多代理版本候选回执与发行差异闸门",
-      "status": "verified",
-      "public_release": true,
-      "files": [
-        "theater/release/README.md",
-        "theater/release/check_candidate.py",
-        "theater/release/candidate.json",
+        "PROGRESS.md",
+        "theater/NOTES.md",
         "theater/release/roadmap-v1.8-author-threads.md"
       ],
-      "tests": [
-        "python theater/release/check_candidate.py --public-root <公开仓目录> --require-verified"
-      ],
-      "notes": "发布前要求所有公开项 verified，并拦截没有回执覆盖的发行文件差异。"
+      "tests": [],
+      "notes": "含私有开发过程与批次语境，不整文件复制到公开仓；公开用户所需说明已分别写入 README、应用设计和手机教程。"
     }
   ]
 }

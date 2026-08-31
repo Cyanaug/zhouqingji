@@ -54,6 +54,7 @@ def candidate_changes(root, base_commit):
     """Tracked changes since the declared base plus current untracked files."""
     commands = [
         ["git", "diff", "--name-only", f"{base_commit}..HEAD"],
+        ["git", "diff", "--cached", "--name-only"],
         ["git", "diff", "--name-only"],
         ["git", "ls-files", "--others", "--exclude-standard"],
     ]
@@ -97,7 +98,7 @@ def main():
     if not isinstance(base_commit, str) or not base_commit:
         errors.append("candidate.json 缺少 private_base_commit")
 
-    ids, covered = set(), set()
+    ids, accounted, covered = set(), set(), set()
     for index, receipt in enumerate(data.get("receipts") or []):
         rid = receipt.get("id")
         if not rid or rid in ids:
@@ -106,6 +107,8 @@ def main():
         status = receipt.get("status")
         if status not in STATUSES:
             errors.append(f"{rid}: status 无效：{status!r}")
+        if status == "private" and receipt.get("public_release"):
+            errors.append(f"{rid}: private 回执不能同时标记 public_release=true")
         if args.require_verified and receipt.get("public_release") and status != "verified":
             errors.append(f"{rid}: 公开发行项尚未 verified")
         for value in receipt.get("files") or []:
@@ -115,6 +118,7 @@ def main():
                 continue
             if receipt.get("public_release"):
                 covered.add(value)
+            accounted.add(value)
             if status != "deferred" and not (ROOT / path).exists():
                 errors.append(f"{rid}: 文件不存在：{value}")
 
@@ -126,25 +130,28 @@ def main():
             errors.append(f"私有基准提交不存在：{base_commit}")
     except ValueError as exc:
         errors.append(str(exc))
+    unaccounted = sorted(changed - accounted)
+    if unaccounted:
+        errors.append("以下候选变更没有任何回执（公开/私有/延期均未声明）：\n  - " +
+                      "\n  - ".join(unaccounted))
     pending_sync = set()
     if args.public_root:
         public_root = args.public_root.resolve()
         if not (public_root / "VERSION").exists():
             errors.append("--public-root 不是有效的公开仓目录")
         else:
-            pending_sync = {rel for rel in changed
+            pending_sync = {rel for rel in changed & covered
                             if differs_from_public(ROOT, public_root, rel)}
-            uncovered = sorted(pending_sync - covered)
-            if uncovered:
-                errors.append("以下待同步候选变更没有公开回执：\n  - " + "\n  - ".join(uncovered))
 
     if errors:
         print("候选回执检查失败：", file=sys.stderr)
         for error in errors:
             print("- " + error, file=sys.stderr)
         raise SystemExit(1)
-    print(f"候选回执通过：{len(ids)} 张；登记发行文件 {len(covered)} 个；"
-          f"候选变更 {len(changed)} 个；待同步 {len(pending_sync)} 个")
+    private_or_deferred = accounted - covered
+    print(f"候选回执通过：{len(ids)} 张；候选变更 {len(changed)} 个；"
+          f"公开文件 {len(covered)} 个；私有/延期文件 {len(private_or_deferred)} 个；"
+          f"待同步 {len(pending_sync)} 个")
 
 
 if __name__ == "__main__":

@@ -124,6 +124,21 @@ main.wide { width: min(58rem, 94vw); }
   font-size: .95rem; color: var(--accent-deep);
   font-variant-numeric: tabular-nums; letter-spacing: 0;
 }
+.score-pair {
+  display: inline-flex; align-items: baseline; gap: .42em;
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.cal-score {
+  color: var(--ink-3); font-size: .68rem; letter-spacing: .04em;
+  padding-left: .42em; border-left: 1px solid var(--line);
+}
+.author-seal {
+  display: inline-grid; place-items: center; width: 1.55rem; height: 1.55rem;
+  border: 1px solid var(--warm); color: var(--warm); border-radius: 3px;
+  font-size: .7rem; line-height: 1; font-weight: 600; transform: rotate(-2deg);
+  background: rgba(242, 226, 217, .32); letter-spacing: 0;
+}
+.author-seal.mini { width: 1.25rem; height: 1.25rem; font-size: .62rem; vertical-align: middle; }
 
 .btn {
   font-family: var(--serif); font-size: .82rem;
@@ -287,7 +302,8 @@ details.self-note .note-text { margin-top: .8em; white-space: pre-wrap; line-hei
 }
 .read-card .rname { font-weight: 600; letter-spacing: .05em; }
 .read-card .rc-head .chip { font-size: .68rem; }
-.read-card .rc-head .score-badge { margin-left: auto; }
+.read-card .rc-head > .score-badge,
+.read-card .rc-head > .score-pair { margin-left: auto; }
 .read-card .reaction { color: var(--ink); line-height: 1.95; }
 .read-card .deep-link { font-size: .8rem; margin-top: .5em; display: inline-block; }
 
@@ -300,8 +316,17 @@ details.self-note .note-text { margin-top: .8em; white-space: pre-wrap; line-hei
   background: none; border: none; cursor: pointer; letter-spacing: .08em;
   opacity: 0; transition: opacity .15s;
 }
-.read-card:hover .curate-btn { opacity: 1; }
+.read-actions { display: inline-flex; align-items: center; gap: .85em; }
+.read-card .author-mark-btn {
+  font-family: var(--serif); font-size: .72rem; color: var(--ink-3);
+  background: none; border: none; cursor: pointer; letter-spacing: .08em;
+  opacity: 0; transition: opacity .15s, color .15s;
+}
+.read-card:hover .curate-btn, .read-card:hover .author-mark-btn,
+.read-card .author-mark-btn.marked,
+.read-card .curate-btn:focus-visible, .read-card .author-mark-btn:focus-visible { opacity: 1; }
 .read-card .curate-btn:hover { color: var(--warm); }
+.read-card .author-mark-btn:hover, .read-card .author-mark-btn.marked { color: var(--warm); }
 .read-card.dim { opacity: .75; background: var(--panel-2); }
 
 details.hidden-reads { margin-top: 2rem; }
@@ -385,6 +410,50 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .reader-card .rc-stats { margin-top: .8em; font-size: .78rem; color: var(--ink-3); font-variant-numeric: tabular-nums; }
 .reader-card.idle { opacity: .62; }
 
+/* ---------- 读者回声簿：是统计边注，不做成喧宾夺主的奖台 ---------- */
+
+.reader-summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }
+.reader-echo-inline { color: var(--ink-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.echo-board { background: rgba(252, 249, 242, .58); }
+.echo-tools { display: flex; gap: .45rem; flex-wrap: wrap; margin: .1rem 0 .9rem; }
+.echo-tools .btn { font-size: .72rem; padding: .28em .85em; }
+.echo-more { position: relative; color: var(--ink-3); font-size: .72rem; }
+.echo-more summary {
+  min-height: 1.9rem; display: inline-flex; align-items: center; cursor: pointer;
+  padding: .1em .8em; border: 1px dashed var(--line); border-radius: 99px;
+}
+.echo-more[open] { flex-basis: 100%; }
+.echo-more > div { display: flex; align-items: center; gap: .65rem; padding: .55rem 0 .15rem; }
+.echo-more small { color: var(--ink-3); line-height: 1.5; }
+.echo-ledger { border-top: 1px solid var(--line); }
+.echo-row {
+  display: grid; grid-template-columns: minmax(12rem, 1fr) repeat(4, 3.1rem);
+  align-items: center; min-height: 3rem; border-bottom: 1px dashed var(--line);
+  color: var(--ink-2); text-decoration: none;
+}
+.echo-row:not(.echo-head):hover { background: var(--accent-soft); text-decoration: none; }
+.echo-row > span:not(.echo-name), .echo-row > b { text-align: center; }
+.echo-head { min-height: 2rem; color: var(--ink-3); font-size: .7rem; letter-spacing: .12em; }
+.echo-name { display: grid; grid-template-columns: 2rem 1fr; align-items: baseline; padding-right: .8rem; color: var(--ink); }
+.echo-name i { color: var(--ink-3); font: normal .72rem/1 var(--serif); text-align: center; }
+.echo-name small { grid-column: 2; color: var(--ink-3); font-size: .68rem; line-height: 1.4; }
+.echo-row b { font-size: .82rem; font-weight: 500; font-variant-numeric: tabular-nums; }
+.echo-up { color: var(--accent-deep); }
+.echo-down { color: var(--warm); }
+.echo-best { color: #8b6a2f; }
+.echo-author { color: var(--warm); }
+.deep-mark-tools { margin-top: 2.5rem; display: flex; gap: .8rem; align-items: center; flex-wrap: wrap; }
+.deep-mark-tools span { font-size: .78rem; color: var(--ink-3); }
+
+@media (max-width: 38rem) {
+  .echo-row { grid-template-columns: minmax(8rem, 1fr) repeat(4, 2.25rem); }
+  .echo-name { grid-template-columns: 1.55rem 1fr; padding-right: .25rem; }
+  .echo-name small { font-size: .62rem; }
+  .echo-head { letter-spacing: .04em; }
+  .read-card .rc-head > .score-pair { margin-left: 0; }
+  .read-card .rc-head > .score-badge { margin-left: 0; }
+}
+
 /* ---------- 分段编辑器 ---------- */
 
 .stanza-edit p { margin: 0; }
@@ -431,13 +500,17 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .toast.show { opacity: .95; }
 
 /* 跟帖（thread）：与盲读是两种信号，视觉上刻意朴素、不做成打分卡片 */
-.thread-search {
-  width: 100%; max-width: 22em; box-sizing: border-box;
-  padding: .5em .8em; margin: 0 0 .6em; font: inherit;
+.thread-tools { display: grid; grid-template-columns: minmax(12em, 1.7fr) repeat(4, minmax(8.5em, 1fr)); gap: .55em; align-items: center; }
+.thread-search, .thread-tools select {
+  width: 100%; box-sizing: border-box;
+  padding: .5em .8em; margin: 0; font: inherit; font-size: .86rem;
   border: 1px solid var(--panel-2); border-radius: 8px;
   background: var(--panel); color: var(--ink);
 }
-.thread-search:focus { outline: none; border-color: var(--accent-deep); }
+.thread-search:focus, .thread-tools select:focus { outline: none; border-color: var(--accent-deep); }
+.thread-activity { margin-left: .5em; color: var(--ink-3); font-size: .76rem; }
+@media (max-width: 62rem) { .thread-tools { grid-template-columns: 1fr 1fr; } .thread-search { grid-column: 1 / -1; } }
+@media (max-width: 34rem) { .thread-tools { grid-template-columns: 1fr; } .thread-search { grid-column: auto; } }
 .thread-count { margin-bottom: 1.4rem; }
 .thread-list { list-style: none; padding: 0; }
 .thread-list li { padding: .7em 0; border-bottom: 1px solid var(--panel-2); }
@@ -733,7 +806,9 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 /* 词频榜：诚实条形——字号会骗眼睛，这里给真实次数 */
 .wc-bars { width: min(52rem, 92vw); margin: 3rem auto 1rem; }
 .wc-bars .wc-note { font-size: .88rem; color: var(--ink-2); margin: .3em 0 1.2em; }
-.wc-list-tools { display: flex; align-items: center; gap: .8rem; margin-bottom: 1rem; }
+.wc-list-tools { display: flex; align-items: center; gap: .8rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.wc-metric { display: inline-flex; gap: .3rem; }
+.wc-metric .btn { font-size: .74rem; padding: .3em .8em; }
 .wc-list-tools input {
   width: min(22rem, 100%); min-height: 2.55rem; padding: .45rem .75rem;
   border: 1px solid var(--line); border-radius: 8px; background: var(--panel);
@@ -743,18 +818,36 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .wc-barlist { list-style: none; display: flex; flex-direction: column; gap: .5rem; }
 .wc-barrow { display: grid; grid-template-columns: 1.6rem 5.5rem 1fr auto; align-items: center; gap: .7rem; }
 .wc-barrow .wc-rank { color: var(--ink-3); font-size: .8rem; text-align: right; font-variant-numeric: tabular-nums; }
-.wc-barrow .wc-word { color: var(--ink); font-size: .96rem; letter-spacing: .04em; }
+.wc-barrow .wc-word {
+  color: var(--ink); font: inherit; font-size: .96rem; letter-spacing: .04em;
+  text-align: left; border: 0; background: none; cursor: pointer; padding: 0;
+}
+.wc-barrow .wc-word:hover { color: var(--accent-deep); text-decoration: underline; text-underline-offset: 4px; }
 .wc-bartrack { height: .7rem; background: var(--panel-2); border-radius: 999px; overflow: hidden; }
 .wc-barfill { display: block; height: 100%; border-radius: 999px;
   background: linear-gradient(90deg, var(--accent), var(--accent-deep)); }
 .wc-barrow .wc-cnt { color: var(--ink-2); font-size: .84rem; font-variant-numeric: tabular-nums; min-width: 3ch; text-align: right; }
 .wc-list-more { text-align: center; margin-top: 1.4rem; }
 
+.wc-context-modal { max-width: 42rem; max-height: min(78vh, 46rem); display: flex; flex-direction: column; }
+.wc-context-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.wc-context-head h2 { font-size: 1.45rem; letter-spacing: .1em; color: var(--accent-deep); }
+.wc-context-body { min-height: 8rem; overflow: auto; margin-top: .8rem; padding-right: .25rem; }
+.wc-context-count { color: var(--ink-3); font-size: .78rem; margin-bottom: .8rem; }
+.wc-context-list { border-top: 1px solid var(--line); }
+.wc-context-row { display: grid; grid-template-columns: 8rem 1fr; gap: 1rem; padding: .7rem 0; border-bottom: 1px dashed var(--line); }
+.wc-context-row:hover { text-decoration: none; background: var(--accent-soft); }
+.wc-context-row b { color: var(--ink-2); font-size: .78rem; font-weight: 500; }
+.wc-context-row span { color: var(--ink); font-size: .88rem; line-height: 1.75; }
+
 @media (max-width: 46rem) {
   .wc-list-tools { align-items: stretch; flex-direction: column; gap: .35rem; }
   .wc-list-tools input { width: 100%; }
   .wc-list-tools span { white-space: normal; }
+  .wc-metric { width: 100%; display: grid; grid-template-columns: 1fr 1fr; }
   .wc-barrow { grid-template-columns: 1.5rem 4.4rem minmax(3rem, 1fr) auto; gap: .45rem; }
+  .wc-context-modal { max-height: 84vh; }
+  .wc-context-row { grid-template-columns: 1fr; gap: .15rem; }
 }
 
 @media (prefers-reduced-motion: reduce) {

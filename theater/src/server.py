@@ -3,7 +3,7 @@
 
 职责边界（README 硬边界的机器侧执行）：
 - 读 corpus，读 results；
-- 写 corpus 仅限作者在 GUI 里明确触发的动作（切可见性/剪自注/背景小注/诠释升格），
+- 写 corpus 仅限作者在 GUI 里明确触发的作品动作（切可见性/剪自注/背景小注等），
   且每次写前把 诗稿.json 备份到 corpus/.backups/（只进不毁、可回滚）；
 - 绝不由代码自动改动任何作品内容。
 
@@ -34,7 +34,6 @@ from pathlib import Path, PurePosixPath
 
 ROOT = Path(__file__).resolve().parents[2]
 CORPUS = ROOT / "corpus" / "诗稿.json"
-INTERP = ROOT / "corpus" / "昼青·诠释.md"
 BACKUPS = ROOT / "corpus" / ".backups"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
 CURATION = ROOT / "results" / "curation.json"
@@ -78,6 +77,8 @@ DEFAULT_SETTINGS = {
     "footer_text": "由世间所有的所见将它命名。",
     "default_view": "boards",    # boards | readers | timeline | stats | all
     "score_badge": "cal",        # cal = 质分优先；raw = 只看原始均分
+    "show_poetry_boards": True,   # 榜单首页是否显示诗词/长诗/短诗三个诗类专榜
+    "hidden_genre_boards": [],    # 不在榜单首页显示的非诗文体榜（数据与直达页不删除）
     "read_genres": [],           # 诗（现代诗/词/歌词）永远在读者池；其他文体勾选才读
     "genre_notes": {},           # 文体 → 作者补充的评判要求（附进读者 prompt）
     "port": 8737,                # 重启后生效
@@ -85,7 +86,7 @@ DEFAULT_SETTINGS = {
     "dispatch": {                # 派发 agent 的默认偏好
         "default_model": "",    # 不替用户预设供应商；首次派发时明确选择
         "default_transport": "auto",
-        "target_depth": 4,
+        "target_depth": None,    # 留空时按当前覆盖账计算“最薄层 + 1”，不把历史数字钉死
     },
 }
 VIEW_CHOICES = ("boards", "readers", "timeline", "stats", "all")
@@ -302,6 +303,38 @@ def load_voter_votes():
     return idx
 
 
+def build_persona_echo(reads, personas, curation, vote_tally):
+    """按评论作者聚合收到的主动赞与加精，供统计页只读展示。
+
+    这里只数未折叠的盲读评语；顺势票 pg_* 不混进来。原始票仍以 votes.jsonl 为
+    唯一真源，本函数只是可重建视图，不参与作品排名、校准或自动撤评。
+    """
+    rows = {
+        p["persona_id"]: {"comments": 0, "voted_comments": 0,
+                          "up": 0, "down": 0, "best": 0, "author_marks": 0}
+        for p in personas if not p.get("superseded_by")
+    }
+    for read in reads:
+        if read.get("context_mode") != "blind":
+            continue
+        read_id = read.get("read_id")
+        if (curation.get(read_id) or {}).get("hidden"):
+            continue
+        persona_id = (read.get("reader") or {}).get("persona_id")
+        if persona_id not in rows:
+            continue
+        row = rows[persona_id]
+        row["comments"] += 1
+        tally = vote_tally.get(read_id) or {}
+        row["up"] += int(tally.get("up") or 0)
+        row["down"] += int(tally.get("down") or 0)
+        row["best"] += int(tally.get("best") or 0)
+        row["author_marks"] += int(bool((curation.get(read_id) or {}).get("author_marked")))
+        if any(int(tally.get(k) or 0) for k in ("up", "down", "skip", "best")):
+            row["voted_comments"] += 1
+    return rows
+
+
 _calib_lock = threading.Lock()
 
 _wc_lock = threading.Lock()
@@ -354,8 +387,58 @@ def load_wordcloud():
             print(f"[wordcloud] 计算失败，回退：{e}")
             if _WC_CACHE["data"] is not None:
                 return _WC_CACHE["data"]
-            return {"poems": {"meta": {}, "words": [], "ranking": []},
-                    "reasons": {"meta": {}, "words": [], "ranking": []}}
+            return {"poems": {"meta": {}, "words": [], "ranking": [], "coverage": []},
+                    "reasons": {"meta": {}, "words": [], "ranking": [], "coverage": []}}
+
+
+def load_word_context(mode, word, limit=100):
+    """按需查一个词出现在哪些诗句/投票理由中；不进入启动快照。"""
+    if mode not in {"poems", "reasons"}:
+        raise ValueError("词句索引模式无效")
+    if not isinstance(word, str):
+        raise ValueError("词不能为空")
+    word = word.strip()
+    if not word or len(word) > 32 or any(ord(ch) < 32 for ch in word):
+        raise ValueError("词不能为空且不能超过 32 个字符")
+    needle = word.casefold()
+    rows, documents, hits = [], set(), 0
+
+    if mode == "poems":
+        for poem in load_corpus():
+            if poem.get("visibility") != "public":
+                continue
+            matched = []
+            for raw in re.split(r"[\r\n]+", poem.get("content") or ""):
+                line = re.sub(r"\s+", " ", raw).strip()
+                if line and needle in line.casefold() and line not in matched:
+                    matched.append(line)
+            if not matched:
+                continue
+            documents.add(poem["id"])
+            hits += len(matched)
+            for line in matched:
+                if len(rows) < limit:
+                    rows.append({"poem_id": poem["id"], "title": poem.get("title") or poem["id"],
+                                 "text": line[:240]})
+    else:
+        read_poems = {r["read_id"]: r.get("poem_id") for r in load_reads()}
+        poems = {p["id"]: p.get("title") or p["id"] for p in load_corpus()}
+        for vote in _iter_votes():
+            if vote.get("source") == "piggyback":
+                continue
+            reason = re.sub(r"\s+", " ", (vote.get("reason") or "")).strip()
+            if not reason or needle not in reason.casefold():
+                continue
+            vote_id = vote.get("vote_id") or f"row-{hits}"
+            documents.add(vote_id)
+            hits += 1
+            if len(rows) < limit:
+                poem_id = read_poems.get(vote.get("target_read_id"))
+                rows.append({"poem_id": poem_id, "title": poems.get(poem_id, "读者反应"),
+                             "read_id": vote.get("target_read_id"), "text": reason[:320]})
+
+    return {"mode": mode, "word": word, "documents": len(documents), "hits": hits,
+            "rows": rows, "truncated": hits > len(rows)}
 
 
 def load_favs():
@@ -497,6 +580,23 @@ def set_settings(payload):
         if v and v not in ("cal", "raw"):
             raise ValueError("score_badge 只能是 cal/raw")
         put(cur, "score_badge", v)
+    if "show_poetry_boards" in payload:
+        v = payload["show_poetry_boards"]
+        if not isinstance(v, bool):
+            raise ValueError("show_poetry_boards 必须是布尔值")
+        if v == DEFAULT_SETTINGS["show_poetry_boards"]:
+            cur.pop("show_poetry_boards", None)
+        else:
+            cur["show_poetry_boards"] = v
+    if "hidden_genre_boards" in payload:
+        v = payload["hidden_genre_boards"] or []
+        if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
+            raise ValueError("hidden_genre_boards 必须是字符串数组")
+        v = sorted({x.strip() for x in v if x.strip()})
+        if v:
+            cur["hidden_genre_boards"] = v
+        else:
+            cur.pop("hidden_genre_boards", None)
     if "read_genres" in payload:
         v = payload["read_genres"] or []
         if not isinstance(v, list) or not all(isinstance(x, str) for x in v):
@@ -534,7 +634,11 @@ def set_settings(payload):
             if k in dp:
                 if dp[k] is not None and not isinstance(dp[k], str):
                     raise ValueError(f"{k} 必须是字符串")
-                put(cd, k, dp[k])
+                value = dp[k].strip() if isinstance(dp[k], str) else dp[k]
+                if value in (None, "", DEFAULT_SETTINGS["dispatch"][k]):
+                    cd.pop(k, None)
+                else:
+                    cd[k] = value
         if "target_depth" in dp:
             v = dp["target_depth"]
             if v in (None, ""):
@@ -613,36 +717,34 @@ def set_personas(payload):
 
 
 def curate(payload):
-    """作者折叠/恢复某条阅读记录（侧车文件，绝不改 reads.jsonl）。"""
+    """作者折叠/恢复或给评论落藏印；都只写侧车，不改 reads.jsonl。"""
     read_id = payload.get("read_id")
     if not read_id or read_id not in {r["read_id"] for r in load_reads()}:
         raise ValueError("找不到该阅读记录")
     cur = load_curation()
-    if payload.get("hidden"):
-        cur[read_id] = {"hidden": True,
-                        "reason": str(payload.get("reason", "")),
-                        "ts": now_iso()}
+    entry = dict(cur.get(read_id) or {})
+    if "hidden" in payload:
+        if payload.get("hidden"):
+            entry.update({"hidden": True,
+                          "reason": str(payload.get("reason", "")),
+                          "ts": now_iso()})
+        else:
+            for key in ("hidden", "reason", "ts"):
+                entry.pop(key, None)
+    if "author_marked" in payload:
+        if payload.get("author_marked"):
+            entry.update({"author_marked": True, "author_marked_ts": now_iso()})
+        else:
+            for key in ("author_marked", "author_marked_ts"):
+                entry.pop(key, None)
+    if entry:
+        cur[read_id] = entry
     else:
         cur.pop(read_id, None)
     CURATION.parent.mkdir(parents=True, exist_ok=True)
     CURATION.write_text(json.dumps(cur, ensure_ascii=False, indent=1),
                         encoding="utf-8")
-
-
-def promote_interpretation(payload):
-    """诠释升格：作者亲手把一篇深读追加进 昼青·诠释.md。"""
-    read_id = payload.get("read_id")
-    reads = {r["read_id"]: r for r in load_reads()}
-    r = reads.get(read_id)
-    if not r or not r.get("long_form"):
-        raise ValueError("找不到该深读")
-    poems = {p["id"]: p for p in load_corpus()}
-    poem = poems.get(r["poem_id"], {})
-    block = (f"\n\n---\n\n## 升格深读 · 《{poem.get('title','?')}》"
-             f"（{r['reader']['persona_id']} · {r['reader']['model']} · {r['ts'][:10]}）\n\n"
-             f"{r['long_form']}\n")
-    with INTERP.open("a", encoding="utf-8") as f:
-        f.write(block)
+    return cur.get(read_id) or {}
 
 
 # ---------- 版本 & 更新（对 git-clone 了本仓的读者：显示版本 / 检查 / 一键快进拉取）----------
@@ -902,16 +1004,21 @@ def update_pull():
 
 def build_author_state():
     """桌面作者模式的完整状态。集中在一处，避免导出/手机视图各抄一份。"""
+    reads = load_reads()
+    personas = load_personas()
+    curation = load_curation()
+    votes = load_vote_tally()
     return {
         "poems": load_corpus(),
-        "reads": load_reads(),
-        "personas": load_personas(),
+        "reads": reads,
+        "personas": personas,
         "personas_defaults": json.loads(PERSONAS.read_text(encoding="utf-8")),
         "personas_sidecar": load_personas_sidecar(),
-        "curation": load_curation(),
+        "curation": curation,
         "thread_meta": load_thread_meta(),
-        "votes": load_vote_tally(),
+        "votes": votes,
         "voter_votes": load_voter_votes(),
+        "persona_echo": build_persona_echo(reads, personas, curation, votes),
         "favs": load_favs(),
         "stanzas": load_stanzas(),
         "calibration": load_calibration(),
@@ -941,11 +1048,13 @@ def build_mobile_snapshot(include_wordcloud=True):
         "thread_meta": state["thread_meta"],
         "votes": state["votes"],
         "voter_votes": state["voter_votes"],
+        "persona_echo": state["persona_echo"],
         "favs": state["favs"],
         "stanzas": state["stanzas"],
         "calibration": state["calibration"],
         "settings": {k: settings.get(k) for k in (
-            "site_title", "site_subtitle", "footer_text", "default_view", "score_badge")},
+            "site_title", "site_subtitle", "footer_text", "default_view", "score_badge",
+            "show_poetry_boards", "hidden_genre_boards")},
         "version": state["version"],
     }
     if include_wordcloud:
@@ -1078,12 +1187,20 @@ class MobileHandler(BaseHTTPRequestHandler):
         supplied = self.headers.get("X-ZQ-Mobile-Token", "")
         return bool(supplied) and hmac.compare_digest(supplied, self.server.mobile_token)
 
+    def _query_pair(self):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query,
+                                      keep_blank_values=True)
+        values = query.get("pair") or []
+        supplied = values[0] if len(values) == 1 else ""
+        return supplied if supplied and hmac.compare_digest(
+            supplied, self.server.mobile_token) else ""
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/mobile-state":
             if not self._authorized():
                 return self._send(401, {"error": "手机访问口令无效，请从电脑重新扫码。"})
-            snapshot = build_mobile_snapshot(include_wordcloud=True)
+            snapshot = build_mobile_snapshot(include_wordcloud=False)
             etag = '"' + snapshot["mobile"]["content_hash"] + '"'
             if self.headers.get("If-None-Match") == etag:
                 return self._send(304, b"", headers={"ETag": etag})
@@ -1092,9 +1209,32 @@ class MobileHandler(BaseHTTPRequestHandler):
             if not self._authorized():
                 return self._send(401, {"error": "手机访问口令无效。"})
             return self._send(200, load_wordcloud())
+        if path == "/api/word-context":
+            if not self._authorized():
+                return self._send(401, {"error": "手机访问口令无效。"})
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                data = load_word_context((query.get("mode") or [""])[0],
+                                         (query.get("word") or [""])[0])
+            except ValueError as exc:
+                return self._send(400, {"error": str(exc)})
+            return self._send(200, data)
+        if path == "/manifest.webmanifest":
+            manifest = json.loads((WEBAPP / "manifest.webmanifest").read_text(encoding="utf-8"))
+            pair = self._query_pair()
+            if pair:
+                # iPad“添加到主屏幕”可能把 Web App 与 Safari 存储隔离；安装启动地址
+                # 自带当前连接签，才不依赖 Safari 预览页的 localStorage。
+                manifest["start_url"] = f"./?pair={urllib.parse.quote(pair)}#/settings"
+            return self._send(200, manifest, "application/manifest+json; charset=utf-8",
+                              cache="no-store")
         if path == "/":
             html = (WEBAPP / "index.html").read_text(encoding="utf-8")
             html = html.replace('content="author"', 'content="mobile"')
+            pair = self._query_pair()
+            if pair:
+                href = "manifest.webmanifest?pair=" + urllib.parse.quote(pair)
+                html = html.replace('href="manifest.webmanifest"', f'href="{href}"')
             return self._send(200, html.encode("utf-8"), "text/html; charset=utf-8")
         f = (WEBAPP / path.lstrip("/")).resolve()
         if WEBAPP.resolve() in f.parents and f.is_file():
@@ -1313,6 +1453,14 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?")[0]
         if path == "/api/wordcloud":
             return self._send(200, load_wordcloud())
+        if path == "/api/word-context":
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            try:
+                data = load_word_context((query.get("mode") or [""])[0],
+                                         (query.get("word") or [""])[0])
+            except ValueError as exc:
+                return self._send(400, {"error": str(exc)})
+            return self._send(200, data)
         if path == "/api/mobile/status":
             return self._send(200, MOBILE_ACCESS.status())
         if path == "/api/mobile/qr":
@@ -1344,9 +1492,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad json"})
 
         try:
-            if self.path == "/api/promote":
-                promote_interpretation(payload)
-                return self._send(200, {"ok": True})
             if self.path == "/api/settings":
                 set_settings(payload)
                 return self._send(200, {"ok": True, "settings": load_settings()})
@@ -1370,8 +1515,8 @@ class Handler(BaseHTTPRequestHandler):
                 set_personas(payload)
                 return self._send(200, {"ok": True, "personas": load_personas()})
             if self.path == "/api/curate":
-                curate(payload)
-                return self._send(200, {"ok": True})
+                entry = curate(payload)
+                return self._send(200, {"ok": True, "curation": entry})
             if self.path == "/api/favorite":
                 set_favorite(payload)
                 return self._send(200, {"ok": True})

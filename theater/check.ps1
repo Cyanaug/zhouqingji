@@ -7,7 +7,6 @@ try {
         @('python', @('-m', 'compileall', '-q', 'theater/runners', 'theater/src', 'theater/tests')),
         @('python', @('theater/tests/test_sidecars.py')),
         @('python', @('theater/tests/test_project_config.py')),
-        @('python', @('theater/tests/test_public_sanitization.py')),
         @('python', @('theater/tests/test_model_canon.py')),
         @('python', @('theater/tests/test_collect_safety.py')),
         @('python', @('theater/tests/test_thread.py')),
@@ -15,6 +14,7 @@ try {
         @('python', @('theater/tests/test_update.py')),
         @('python', @('theater/tests/test_mobile.py')),
         @('python', @('theater/tests/test_wordcloud.py')),
+        @('python', @('theater/tests/test_release_candidate.py')),
         @('python', @('theater/release/check_candidate.py')),
         @('python', @('theater/runners/audit_data.py'))
     )

@@ -85,7 +85,55 @@ def test_set_personas():
     print("[ok] set_personas 写 API（upsert/必填/去重/类型/空则删）")
 
 
+def test_board_visibility_settings():
+    """板单开关只写设置侧车；默认值不冗余固化，非法类型明确拒绝。"""
+    old_settings = SV.SETTINGS
+    with tempfile.TemporaryDirectory(prefix="zq-settings-") as td:
+        SV.SETTINGS = Path(td) / "settings.json"
+        try:
+            assert SV.load_settings()["show_poetry_boards"] is True
+            SV.set_settings({
+                "show_poetry_boards": False,
+                "hidden_genre_boards": ["杂文", "散文", "杂文"],
+            })
+            got = SV.load_settings()
+            assert got["show_poetry_boards"] is False
+            assert got["hidden_genre_boards"] == ["散文", "杂文"]
+
+            defaults = SV.load_settings()["dispatch"]
+            assert defaults == {"default_model": "", "default_transport": "auto",
+                                "target_depth": None}
+            SV.set_settings({"dispatch": {
+                "default_model": "model-current", "default_transport": "tool-current",
+                "target_depth": 7,
+            }})
+            assert SV.load_settings()["dispatch"] == {
+                "default_model": "model-current", "default_transport": "tool-current",
+                "target_depth": 7,
+            }
+            SV.set_settings({"dispatch": {
+                "default_model": "", "default_transport": "auto", "target_depth": None,
+            }})
+
+            SV.set_settings({"show_poetry_boards": True, "hidden_genre_boards": []})
+            assert not SV.SETTINGS.exists(), "恢复全部默认后应移除空设置侧车"
+
+            for bad, kw in [
+                ({"show_poetry_boards": "no"}, "布尔值"),
+                ({"hidden_genre_boards": "杂文"}, "字符串数组"),
+            ]:
+                try:
+                    SV.set_settings(bad)
+                    assert False, f"应报错：{kw}"
+                except ValueError as exc:
+                    assert kw in str(exc)
+        finally:
+            SV.SETTINGS = old_settings
+    print("[ok] 诗类专榜与非诗文体榜开关（默认/持久化/校验）")
+
+
 if __name__ == "__main__":
     test_load_personas_merge()
     test_set_personas()
+    test_board_visibility_settings()
     print("ALL PASS")

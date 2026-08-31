@@ -148,11 +148,13 @@ async function loadMobileState() {
   const paired = params.get("pair");
   if (paired) {
     storageSet(MOBILE_TOKEN_KEY, paired);
-    params.delete("pair");
-    const query = params.toString();
-    history.replaceState(null, "", location.pathname + (query ? `?${query}` : "") + location.hash);
   }
-  const token = storageGet(MOBILE_TOKEN_KEY) || "";
+  /* 保留地址里的连接签，并把它直接作为本次请求凭据。
+     iPad 的系统扫码器预览、Safari、Edge 与“添加到主屏幕”可能是彼此隔离的浏览环境：
+     若预览页先用 replaceState 抹掉 ?pair=，转去 Safari 时会只剩无签地址；若 Safari
+     禁止本地存储，先写 localStorage 再读也会把一张有效签误判为缺失。连接签本来就
+     在二维码里，服务端另有 no-referrer，保留它才能让跨浏览器打开与主屏幕入口可靠。 */
+  const token = paired || storageGet(MOBILE_TOKEN_KEY) || "";
   let cached = null;
   try { cached = await snapshotRead(); } catch (_) { /* 首次使用或浏览器禁用存储 */ }
   if (!token && cached) {
@@ -199,6 +201,7 @@ function hydrateState() {
   S.thread_meta = S.thread_meta || {};
   S.votes = S.votes || {};
   S.voter_votes = S.voter_votes || {};
+  S.persona_echo = S.persona_echo || {};
   applyBranding();
   applyModeChrome();
   maps.poem = new Map(S.poems.map(p => [p.id, p]));
@@ -313,11 +316,12 @@ function stats(poemId) {
   // 作者在设置里选「只看原始均分」时整体退回均分口径（统计页的口径开关独立于此）。
   const useCal = ((S.settings || {}).score_badge || "cal") !== "raw";
   const cal = useCal && c ? (c.display != null ? c.display : c.cal) : null;
-  if (!rs.length) return { n: 0, mean: null, sd: null, cal };
+  const calBase = useCal && c && c.cal != null ? c.cal : null;
+  if (!rs.length) return { n: 0, mean: null, sd: null, cal, calBase };
   const scores = rs.map(r => r.score);
   const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
   const sd = Math.sqrt(scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length);
-  return { n: scores.length, mean, sd, cal };
+  return { n: scores.length, mean, sd, cal, calBase };
 }
 
 function personaName(pid) {
@@ -506,6 +510,32 @@ function voteBadge(vt) {
   return `<span class="chip">${[star, main, pig].filter(Boolean).join(" ")}</span>`;
 }
 
+function isAuthorMarked(readId) {
+  return !!((S.curation[readId] || {}).author_marked);
+}
+
+function authorSeal(readId) {
+  return isAuthorMarked(readId)
+    ? '<span class="author-seal" title="作者藏印：作者亲手标记为值得回看的评语">藏</span>' : "";
+}
+
+async function saveAuthorMark(readId, marked) {
+  await post("/api/curate", { read_id: readId, author_marked: marked });
+  await loadState();
+  if (isAuthorMarked(readId) !== marked) {
+    throw new Error("藏印没有保存：电脑服务仍是旧版。请关闭昼青集窗口后重新打开，再试一次。");
+  }
+}
+
+/* 原始分是读者当场给分；校准分把「这位人设 × 这个模型」平时的松紧映回参考分布。
+   只展示已有的逐条校准结果，不为缺失记录现场猜值。 */
+function scorePair(r, labelled) {
+  const cal = ((S.calibration || {}).reads || {})[r.read_id];
+  const raw = `<span class="score-badge" title="原始评分">${labelled ? "评分 " : ""}${fmt1(r.score)}</span>`;
+  if (cal == null) return raw;
+  return `<span class="score-pair">${raw}<span class="cal-score" title="校准分：按这位人设与扮演模型一贯的松紧换算">${fmt1(cal)}</span></span>`;
+}
+
 function threadChildrenMap() {
   const m = new Map();
   for (const r of S.reads) {
@@ -567,6 +597,22 @@ function threadParticipants(rootId, root, childrenMap) {
   return set.size;
 }
 
+/* 根评与所有子楼里最后一次活动；只用于索引排序，不解释成热度或质量。 */
+function threadLastActivity(rootId, root, childrenMap) {
+  let latest = root.ts || "";
+  const stack = [rootId];
+  while (stack.length) {
+    for (const k of (childrenMap.get(stack.pop()) || [])) {
+      if ((k.ts || "") > latest) latest = k.ts || latest;
+      stack.push(k.read_id);
+    }
+  }
+  return latest;
+}
+
+/* 跟帖详情返回索引时保留本次浏览筛选；只活在当前页面会话，不写作者数据。 */
+const threadIndexState = { query: "", poem: "", replies: "0", depth: "0", sort: "activity" };
+
 function renderThreads() {
   app.className = "";
   const childrenMap = threadChildrenMap();
@@ -585,38 +631,69 @@ function renderThreads() {
       n: countDescendants(r.read_id, childrenMap),
       depth: threadMaxDepth(r.read_id, childrenMap),
       ppl: threadParticipants(r.read_id, r, childrenMap),
+      activity: threadLastActivity(r.read_id, r, childrenMap),
       vc: voteBadge(S.votes[r.read_id]),
       key: (title + " " + master).toLowerCase(),
     };
   });
-  // 回复多的排前——一进来先看见热闹的那几场，找起来省一次滚屏
-  items.sort((a, b) => b.n - a.n);
+  const poems = [...new Map(items.map(it => [it.r.poem_id, it.title])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1], "zh-CN"));
   app.innerHTML = `
     <h1 class="page-title">跟帖</h1>
-    <p class="page-hint">读者围绕一篇长评展开的讨论，和盲读是两种信号，不评分，永不进榜单/校准。</p>
-    <input id="thread-search" class="thread-search" type="search" placeholder="搜诗题或楼主…" autocomplete="off">
+    <p class="page-hint">读者围绕一篇长评展开的讨论，和盲读是两种信号，不评分，永不进榜单/校准。这里按可核对的活动、回复与深度筛选，不虚构“激烈度”。</p>
+    <div class="thread-tools">
+      <input id="thread-search" class="thread-search" type="search" placeholder="搜诗题或楼主…" autocomplete="off">
+      <select id="thread-poem" aria-label="按作品筛选"><option value="">全部作品</option>${poems.map(([id, title]) =>
+        `<option value="${esc(id)}">《${esc(title)}》</option>`).join("")}</select>
+      <select id="thread-replies" aria-label="按回复数筛选">
+        <option value="0">不限回复数</option><option value="1">有回复</option><option value="5">至少 5 层</option><option value="10">至少 10 层</option>
+      </select>
+      <select id="thread-depth" aria-label="按深度筛选">
+        <option value="0">不限深度</option><option value="2">至少 2 级</option><option value="3">至少 3 级</option>
+      </select>
+      <select id="thread-sort" aria-label="跟帖排序">
+        <option value="activity">最近活动</option><option value="replies">回复最多</option><option value="depth">最深讨论</option>
+      </select>
+    </div>
     <p class="page-hint thread-count" id="thread-count">共 ${items.length} 场跟帖</p>
-    <ul class="thread-list">
-      ${items.map(it => `<li data-key="${esc(it.key)}">
-        <a href="#/thread/${it.r.read_id}">《${esc(it.title)}》</a>
-        <span class="chip">楼主 ${esc(it.master)}</span>
-        <span class="chip">${it.n} 层</span>
-        ${it.depth > 1 ? `<span class="chip">最深 ${it.depth} 级</span>` : ""}
-        <span class="chip">${it.ppl} 人</span>${it.vc}</li>`).join("")}
-    </ul>`;
+    <ul class="thread-list" id="thread-list"></ul>`;
   const box = app.querySelector("#thread-search");
+  const poemSel = app.querySelector("#thread-poem");
+  const repliesSel = app.querySelector("#thread-replies");
+  const depthSel = app.querySelector("#thread-depth");
+  const sortSel = app.querySelector("#thread-sort");
   const cnt = app.querySelector("#thread-count");
-  const lis = [...app.querySelectorAll(".thread-list li")];
-  box.oninput = () => {
+  const list = app.querySelector("#thread-list");
+  box.value = threadIndexState.query;
+  poemSel.value = poems.some(([id]) => id === threadIndexState.poem) ? threadIndexState.poem : "";
+  repliesSel.value = threadIndexState.replies;
+  depthSel.value = threadIndexState.depth;
+  sortSel.value = threadIndexState.sort;
+  const refresh = () => {
     const q = box.value.trim().toLowerCase();
-    let shown = 0;
-    for (const li of lis) {
-      const ok = !q || li.dataset.key.includes(q);
-      li.style.display = ok ? "" : "none";
-      if (ok) shown++;
-    }
-    cnt.textContent = q ? `${shown} / ${items.length} 场跟帖` : `共 ${items.length} 场跟帖`;
+    const minReplies = +repliesSel.value, minDepth = +depthSel.value;
+    Object.assign(threadIndexState, { query: box.value, poem: poemSel.value,
+      replies: repliesSel.value, depth: depthSel.value, sort: sortSel.value });
+    const shown = items.filter(it => (!q || it.key.includes(q)) &&
+      (!poemSel.value || it.r.poem_id === poemSel.value) && it.n >= minReplies && it.depth >= minDepth);
+    shown.sort((a, b) => sortSel.value === "activity"
+      ? (b.activity || "").localeCompare(a.activity || "") || b.n - a.n
+      : sortSel.value === "depth" ? b.depth - a.depth || b.n - a.n
+        : b.n - a.n || (b.activity || "").localeCompare(a.activity || ""));
+    list.innerHTML = shown.map(it => `<li>
+      <a href="#/thread/${it.r.read_id}">《${esc(it.title)}》</a>
+      <span class="chip">楼主 ${esc(it.master)}</span>
+      <span class="chip">${it.n} 层</span>
+      ${it.depth > 1 ? `<span class="chip">最深 ${it.depth} 级</span>` : ""}
+      <span class="chip">${it.ppl} 人</span>
+      ${it.activity ? `<span class="thread-activity">最近 ${esc(fmtTs(it.activity))}</span>` : ""}${it.vc}</li>`).join("") ||
+      '<li class="empty">没有符合这些条件的讨论。</li>';
+    const active = q || poemSel.value || minReplies || minDepth;
+    cnt.textContent = active ? `${shown.length} / ${items.length} 场跟帖` : `共 ${items.length} 场跟帖`;
   };
+  box.oninput = refresh;
+  [poemSel, repliesSel, depthSel, sortSel].forEach(el => { el.onchange = refresh; });
+  refresh();
 }
 
 function renderThread(rootId) {
@@ -735,13 +812,17 @@ async function renderWordcloud() {
     <div class="wc-stage">
       <canvas id="wc-canvas"></canvas>
       <div class="wc-card" id="wc-card"></div>
-      <p class="wc-hint">悬停一个词，点亮它常同现的词与一句真实的诗</p>
+      <p class="wc-hint">悬停看共现与例句 · 点击查看它出现过的句子</p>
     </div>
     <section class="wc-bars">
       <p class="wc-eyebrow">诚实读数 · Honest Scale</p>
       <h2>词频榜</h2>
-      <p class="wc-note">字号会骗眼睛——同一个词，这里给它真实的出现次数。下方榜单可一直展开，也可直接寻找低频词。</p>
+      <p class="wc-note" id="wc-metric-note">字号会骗眼睛——这里给词真实的出现次数。也可切到“作品覆盖”，同一首作品重复出现只算一次。</p>
       <div class="wc-list-tools">
+        <div class="wc-metric" aria-label="词频统计口径">
+          <button class="btn on" data-wc-metric="frequency">出现次数</button>
+          <button class="btn" data-wc-metric="coverage">作品覆盖</button>
+        </div>
         <input id="wc-search" type="search" placeholder="在完整词频中找词" autocomplete="off">
         <span id="wc-list-count"></span>
       </div>
@@ -765,6 +846,57 @@ async function renderWordcloud() {
   }
   if (location.hash.replace(/^#/, "").split("/").filter(Boolean)[0] !== "wordcloud") return;
   wcStart(_wcData);
+}
+
+function localWordContext(mode, word) {
+  if (mode !== "poems") return { mode, word, documents: 0, hits: 0, rows: [], offline: true };
+  const rows = [], docs = new Set();
+  for (const poem of S.poems) {
+    if (poem.visibility !== "public") continue;
+    const matched = [...new Set(String(poem.content || "").split(/\r?\n/)
+      .map(line => line.trim()).filter(line => line && line.toLocaleLowerCase().includes(word.toLocaleLowerCase())))];
+    if (matched.length) docs.add(poem.id);
+    for (const line of matched) rows.push({ poem_id: poem.id, title: poem.title, text: line });
+  }
+  return { mode, word, documents: docs.size, hits: rows.length, rows: rows.slice(0, 100),
+    truncated: rows.length > 100, offline: true };
+}
+
+async function openWordContext(mode, word) {
+  const back = document.createElement("div");
+  back.className = "modal-back wc-context-back";
+  back.setAttribute("role", "dialog");
+  back.setAttribute("aria-modal", "true");
+  back.innerHTML = `<div class="modal wc-context-modal">
+    <div class="wc-context-head"><div><p class="wc-eyebrow">词句索引</p><h2>${esc(word)}</h2></div>
+      <button class="btn" data-x>关闭</button></div>
+    <div class="wc-context-body"><p class="loading">正在沿作品边缘寻找……</p></div>
+  </div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", e => { if (e.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  document.body.appendChild(back);
+  try {
+    let data;
+    if (IS_SNAPSHOT) data = localWordContext(mode, word);
+    else {
+      const headers = IS_MOBILE ? { "X-ZQ-Mobile-Token": storageGet(MOBILE_TOKEN_KEY) || "" } : {};
+      const url = `/api/word-context?mode=${encodeURIComponent(mode)}&word=${encodeURIComponent(word)}`;
+      const res = await fetch(url, { headers });
+      data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.status);
+    }
+    const kind = mode === "poems" ? "首作品" : "条投票理由";
+    const rows = data.rows || [];
+    back.querySelector(".wc-context-body").innerHTML = `
+      <p class="wc-context-count">见于 ${data.documents} ${kind} · ${data.hits} 处${data.truncated ? " · 只展示前 100 处" : ""}</p>
+      ${rows.length ? `<div class="wc-context-list">${rows.map(row => `<a href="#/poem/${esc(row.poem_id || "")}" class="wc-context-row">
+        <b>《${esc(row.title || "未题")}》</b><span>${esc(row.text || "")}</span></a>`).join("")}</div>`
+        : `<p class="empty">${data.offline && mode !== "poems" ? "离线留影没有携带投票理由索引；连接电脑后再查看。" : "没有找到可展示的句子。"}</p>`}`;
+    back.querySelectorAll(".wc-context-row").forEach(a => a.onclick = close);
+  } catch (error) {
+    back.querySelector(".wc-context-body").innerHTML = `<p class="empty">词句索引加载失败：${esc(error.message || String(error))}</p>`;
+  }
 }
 
 function wcStart(data) {
@@ -792,6 +924,7 @@ function wcStart(data) {
   let raf = 0;
   let barShown = 40;
   let barQuery = "";
+  let barMetric = "frequency";
 
   function fit() {
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -940,7 +1073,7 @@ function wcStart(data) {
 
   function buildBars() {
     const section = data[mode] || {};
-    const src = section.ranking || section.words || [];
+    const src = (barMetric === "coverage" ? section.coverage : section.ranking) || section.words || [];
     const filtered = barQuery
       ? src.filter(wd => String(wd.w).toLocaleLowerCase().includes(barQuery))
       : src;
@@ -953,7 +1086,7 @@ function wcStart(data) {
     document.getElementById("wc-barlist").innerHTML = rows.map((wd, i) => `
       <li class="wc-barrow">
         <span class="wc-rank">${barQuery ? src.indexOf(wd) + 1 : i + 1}</span>
-        <span class="wc-word">${esc(wd.w)}</span>
+        <button class="wc-word" data-wc-word="${esc(wd.w)}" title="查看这个词出现过的句子">${esc(wd.w)}</button>
         <span class="wc-bartrack"><span class="wc-barfill" style="width:${Math.max(4, wd.c / max * 100)}%"></span></span>
         <span class="wc-cnt">${wd.c}</span>
       </li>`).join("");
@@ -966,6 +1099,9 @@ function wcStart(data) {
     document.getElementById("wc-fold-btn")?.addEventListener("click", () => {
       barShown = 40; buildBars(); document.querySelector(".wc-bars")?.scrollIntoView({ behavior: "smooth" });
     });
+    document.querySelectorAll("[data-wc-word]").forEach(btn => {
+      btn.onclick = () => openWordContext(mode, btn.dataset.wcWord);
+    });
   }
 
   function switchMode(m) {
@@ -974,6 +1110,10 @@ function wcStart(data) {
     barShown = 40; barQuery = "";
     const search = document.getElementById("wc-search");
     if (search) search.value = "";
+    document.getElementById("wc-metric-note").textContent = barMetric === "coverage"
+      ? (mode === "poems" ? "作品覆盖：同一首作品里重复出现只算一次，适合看一个词在语料中的广度。"
+        : "理由覆盖：同一条投票理由里重复出现只算一次，适合看这个词跨多少条判断出现。")
+      : "出现次数：保留词在同一作品或理由中的重复，适合看它真实被写了多少次。";
     hovered = -1; card.classList.remove("show");
     t0 = performance.now();
     layout(); buildBars();
@@ -987,6 +1127,28 @@ function wcStart(data) {
   });
   canvas.addEventListener("mousemove", onMove);
   canvas.addEventListener("mouseleave", () => { hovered = -1; card.classList.remove("show"); });
+  canvas.addEventListener("click", e => {
+    const rect = canvas.getBoundingClientRect();
+    const i = pick(e.clientX - rect.left, e.clientY - rect.top);
+    if (i >= 0) openWordContext(mode, nodes[i].w);
+  });
+  document.getElementById("wc-search")?.addEventListener("input", e => {
+    barQuery = e.currentTarget.value.trim().toLocaleLowerCase();
+    barShown = 40;
+    buildBars();
+  });
+  app.querySelectorAll("[data-wc-metric]").forEach(btn => {
+    btn.onclick = () => {
+      barMetric = btn.dataset.wcMetric;
+      barShown = 40;
+      app.querySelectorAll("[data-wc-metric]").forEach(x => x.classList.toggle("on", x === btn));
+      document.getElementById("wc-metric-note").textContent = barMetric === "coverage"
+        ? (mode === "poems" ? "作品覆盖：同一首作品里重复出现只算一次，适合看一个词在语料中的广度。"
+          : "理由覆盖：同一条投票理由里重复出现只算一次，适合看这个词跨多少条判断出现。")
+        : "出现次数：保留词在同一作品或理由中的重复，适合看它真实被写了多少次。";
+      buildBars();
+    };
+  });
   let rt;
   const onResize = () => { clearTimeout(rt); rt = setTimeout(() => { if (document.body.contains(canvas)) layout(); }, 150); };
   if (_wcResizeHandler) window.removeEventListener("resize", _wcResizeHandler);  // 摘掉上次的，避免累积
@@ -1000,11 +1162,19 @@ function wcStart(data) {
 
 function showRouteError(error) {
   app.className = "";
-  const mobileHint = IS_MOBILE
-    ? "本轮入口可能已经停止或口令已更换。请回电脑重新开启手机访问并扫码；若浏览器留有上次快照，也可稍后重试。"
-    : "请确认本地服务仍在运行，然后刷新页面。";
+  const message = error?.message || String(error || "未知错误");
+  let mobileHint = "请确认本地服务仍在运行，然后刷新页面。";
+  if (IS_MOBILE) {
+    if (/还没有和电脑配对|没有配对口令/.test(message)) {
+      mobileHint = "当前地址里没有连接签。iPhone 或 iPad 若曾从系统扫码器转到 Safari，请重新扫描电脑上的新二维码；旧的主屏幕图标需要删除后重新添加。";
+    } else if (/口令无效|401/.test(message)) {
+      mobileHint = "这张连接签已经撤销、过期或被电脑重新生成。请回电脑保持手机入口开启，再扫描当前二维码。";
+    } else {
+      mobileHint = "地址与连接签已收到，但电脑暂时不可达。请确认两台设备仍在同一 Wi-Fi、电脑入口保持开启，并在 iPad“设置 → 隐私与安全性 → 本地网络”中允许当前浏览器访问。";
+    }
+  }
   app.innerHTML = `<section class="board load-error"><h1 class="page-title">这一页暂时没有展开</h1>
-    <p class="page-hint">${esc(error?.message || String(error || "未知错误"))}</p>
+    <p class="page-hint">${esc(message)}</p>
     <p class="board-note">${mobileHint}</p><button class="btn primary" id="route-retry">重新尝试</button></section>`;
   document.getElementById("route-retry").onclick = () => location.reload();
 }
@@ -1098,8 +1268,10 @@ function boardList(items, metaFn, goReads) {
 
 const poemSize = p => p.content.replace(/\s/g, "").length;
 const fmt2 = x => x.toFixed(2);
-/* 质 = 校准分（跨模型/人设松紧归一后的最终分，排序用它）；均 = 原始均分（参考） */
-const qm = s => s.cal != null ? `质 ${fmt2(s.cal)} · 均 ${fmt1(s.mean)}` : `均 ${fmt1(s.mean)}`;
+/* 质 = 展示质分：逐条校准 → 诗级贝叶斯聚合 → 方差匹配展示；最后一步只拉开刻度，不改名次。 */
+const qm = s => s.cal != null
+  ? `<span title="展示质分 ${fmt2(s.cal)}；拉伸前校准贝叶斯 ${fmt2(s.calBase)}；原始均分 ${fmt2(s.mean)}。方差匹配只改变显示刻度，不改变校准榜名次。">质 ${fmt2(s.cal)} · 均 ${fmt1(s.mean)}</span>`
+  : `均 ${fmt1(s.mean)}`;
 const sMeta = p => { const s = stats(p.id); return `${qm(s)} · ${s.n} 读`; };
 const dMeta = p => { const s = stats(p.id); return `σ ${fmt1(s.sd)} · ${qm(s)} · ${s.n} 读`; };
 const rMeta = p => { const s = stats(p.id); return s.n ? `${qm(s)} · ${s.n} 读` : "未读"; };
@@ -1122,10 +1294,10 @@ function boardDefs() {
   const ciRated = byScore(ciPool);
 
   return {
-    hero: { title: "招牌榜", note: "众读者盲读校准分最高（每首至少 3 次阅读；质 = 按各读者松紧归一后的分，均 = 原始均分）", meta: sMeta,
+    hero: { title: "招牌榜", note: "众读者盲读后的展示质分最高（每首至少 3 次阅读；质经过逐条校准、诗级收缩与显示尺度拉伸，均为原始均分；拉伸不改变名次）", meta: sMeta,
       items: ps.map(p => ({ p, s: stats(p.id) })).filter(x => x.s.n >= 3)
         .sort((a, b) => key(b.s) - key(a.s)).map(x => x.p) },
-    scores: { title: "完整打分榜", note: "所有被读过的作品，按校准分排（含仅 1–2 读的，读数少的被拉向全局均值）", meta: sMeta,
+    scores: { title: "完整打分榜", note: "所有被读过的作品，按校准贝叶斯聚合后的名次排列；页面显示的是方差匹配后的质分，读数少的作品仍会向全局均值收缩", meta: sMeta,
       items: byScore(ps) },
     polar: { title: "最两极榜", note: "把读者劈成两半、方差最大的诗——多义、危险、可能最好（至少 4 次阅读）", meta: dMeta,
       items: ps.map(p => ({ p, s: stats(p.id) })).filter(x => x.s.n >= 4)
@@ -1148,8 +1320,9 @@ function boardDefs() {
    也不进诗的校准）；这里单独按各自文体的原始均分排，给非诗作品一个可发现的入口。
    只收 public、非诗类、非草稿、且至少被读过一次的作品。 */
 function nonPoetryGenreBoards() {
+  const hidden = new Set((S.settings || {}).hidden_genre_boards || []);
   const cand = S.poems.filter(p => p.visibility === "public" &&
-    !POETRY_GENRES.includes(p.genre) && p.genre && p.genre !== "草稿");
+    !POETRY_GENRES.includes(p.genre) && p.genre && p.genre !== "草稿" && !hidden.has(p.genre));
   const genres = [...new Set(cand.map(p => p.genre))];
   const boards = [];
   for (const g of genres) {
@@ -1180,6 +1353,93 @@ function readerRanking() {
   return rows.sort((a, b) => (b.mean ?? -1) - (a.mean ?? -1) || b.n - a.n);
 }
 
+let readerEchoSort = "best";
+
+/* 兼容已经开着的旧服务进程：新版 server 会直接下发 persona_echo；若当前进程
+   尚未重启、没有这个字段，就用同一口径从现有 reads/votes/curation 即时重建。 */
+function derivePersonaEcho() {
+  const echo = {};
+  for (const p of S.personas) if (!p.superseded_by) {
+    echo[p.persona_id] = {
+      comments: 0, voted_comments: 0, up: 0, down: 0, best: 0, author_marks: 0,
+    };
+  }
+  for (const read of S.reads) {
+    if (read.context_mode !== "blind" || isHidden(read.read_id)) continue;
+    const row = echo[(read.reader || {}).persona_id];
+    if (!row) continue;
+    row.comments++;
+    const tally = S.votes[read.read_id] || {};
+    row.up += tally.up || 0;
+    row.down += tally.down || 0;
+    row.best += tally.best || 0;
+    row.author_marks += isAuthorMarked(read.read_id) ? 1 : 0;
+    if (["up", "down", "skip", "best"].some(k => (tally[k] || 0) > 0)) row.voted_comments++;
+  }
+  return echo;
+}
+
+function readerEchoRows() {
+  if (!Object.keys(S.persona_echo).length) S.persona_echo = derivePersonaEcho();
+  return S.personas.filter(p => !p.superseded_by).map(persona => {
+    const row = S.persona_echo[persona.persona_id] || {
+      comments: 0, voted_comments: 0, up: 0, down: 0, best: 0, author_marks: 0,
+    };
+    const directionVotes = row.up + row.down;
+    return { persona, ...row, direction_votes: directionVotes,
+      up_rate: directionVotes ? row.up / directionVotes : null };
+  });
+}
+
+function sortedReaderEchoRows() {
+  let rows = readerEchoRows().filter(r => r.up || r.down || r.best || r.author_marks);
+  if (readerEchoSort === "rate") {
+    rows = rows.filter(r => r.direction_votes >= 20);
+    return rows.sort((a, b) => b.up_rate - a.up_rate || b.direction_votes - a.direction_votes ||
+      b.best - a.best || a.persona.name.localeCompare(b.persona.name, "zh-CN"));
+  }
+  const keys = readerEchoSort === "up" ? ["up", "best", "author_marks"]
+    : readerEchoSort === "down" ? ["down", "up", "best"]
+      : readerEchoSort === "author" ? ["author_marks", "best", "up"]
+        : ["best", "up", "author_marks"];
+  return rows.sort((a, b) => {
+    for (const key of keys) if (b[key] !== a[key]) return b[key] - a[key];
+    return b.voted_comments - a.voted_comments || a.persona.name.localeCompare(b.persona.name, "zh-CN");
+  });
+}
+
+function readerEchoBoard(el) {
+  const rows = sortedReaderEchoRows();
+  const tab = (key, label) => `<button class="btn echo-sort${readerEchoSort === key ? " on" : ""}"
+    data-echo-sort="${key}">${label}</button>`;
+  el.innerHTML = `<div class="echo-tools" aria-label="读者回声排序">
+      ${tab("best", "加精优先")}${tab("up", "获赞优先")}${tab("author", "作者藏印")}${tab("down", "被踩查看")}
+      <details class="echo-more"${readerEchoSort === "rate" ? " open" : ""}><summary>比例口径</summary>
+        <div>${tab("rate", "点赞率")}
+          <small>赞 ÷（赞＋踩），至少 20 张方向票。加精是批内相对选择，缺少统一曝光分母，暂不计算“加精率”。</small></div>
+      </details>
+    </div>${rows.length ? `<div class="echo-ledger" role="table" aria-label="读者回声榜">
+      <div class="echo-row echo-head" role="row">
+        <span>读者</span><span title="主动赞">赞</span><span title="主动踩">踩</span><span title="AI 同批横向加精">精</span><span title="作者亲手落下的藏印">藏</span>
+      </div>${rows.slice(0, 12).map((r, i) => `<a class="echo-row" role="row" href="#/reader/${esc(r.persona.persona_id)}">
+        <span class="echo-name"><i>${i + 1}</i>${esc(r.persona.name)}<small>${readerEchoSort === "rate"
+          ? `点赞率 ${(r.up_rate * 100).toFixed(1)}% · ${r.direction_votes} 张方向票`
+          : `${r.voted_comments}/${r.comments} 条有票`}</small></span>
+        <b class="echo-up">${r.up}</b><b class="echo-down">${r.down}</b><b class="echo-best">${r.best}</b><b class="echo-author">${r.author_marks}</b>
+      </a>`).join("")}</div>` : '<p class="empty">还没有主动赞、踩、加精或作者藏印。</p>'}`;
+  el.querySelectorAll("[data-echo-sort]").forEach(btn => {
+    btn.onclick = () => { readerEchoSort = btn.dataset.echoSort; readerEchoBoard(el); };
+  });
+}
+
+function readerEchoInline(pid) {
+  const r = readerEchoRows().find(x => x.persona.persona_id === pid);
+  if (!r) return "";
+  return `<span class="reader-echo-inline" title="只统计未折叠盲读评语收到的主动票；顺势票不计">
+    回声 · ▲${r.up}　▼${r.down}　⭐${r.best}　<span class="author-seal mini">藏</span>${r.author_marks}
+  </span>`;
+}
+
 function readerBoardHTML(rows, limit) {
   const list = limit ? rows.filter(r => r.n > 0).slice(0, limit) : rows;
   if (!list.length) return `<p class="empty">还没有阅读记录。</p>`;
@@ -1200,6 +1460,7 @@ function boardSection(key, defs, cls) {
 function renderBoards() {
   app.className = "wide";
   const defs = boardDefs();
+  const showPoetryBoards = (S.settings || {}).show_poetry_boards !== false;
   const readers = readerRanking();
   const gbs = nonPoetryGenreBoards();
   const gbsHTML = gbs.length ? `
@@ -1216,9 +1477,9 @@ function renderBoards() {
     <div class="boards">
       ${boardSection("hero", defs, "hero")}
       ${boardSection("polar", defs)}
-      ${boardSection("ci", defs)}
-      ${boardSection("long", defs)}
-      ${boardSection("short", defs)}
+      ${showPoetryBoards ? boardSection("ci", defs) : ""}
+      ${showPoetryBoards ? boardSection("long", defs) : ""}
+      ${showPoetryBoards ? boardSection("short", defs) : ""}
       ${boardSection("favs", defs)}
       <section class="board"><h2>读者的手<a class="full-link" href="#/board/readers">完整 →</a></h2>
         <p class="board-note">每位读者给分的松紧（点名字看其打分偏好与全部评语）</p>
@@ -1386,7 +1647,7 @@ function renderReader(pid) {
         : "随附读者：改动只存进你的侧车，随时可还原。"}</span>
     </p>
     ${row && row.n ? `
-      <p class="page-hint" style="margin-top:1.5rem">读过 ${row.n} 首 · 均给 ${fmt1(row.mean)} · σ ${fmt1(row.sd)} · 最低 ${fmt1(row.min)} / 最高 ${fmt1(row.max)}</p>
+      <p class="page-hint reader-summary" style="margin-top:1.5rem"><span>读过 ${row.n} 首 · 均给 ${fmt1(row.mean)} · σ ${fmt1(row.sd)} · 最低 ${fmt1(row.min)} / 最高 ${fmt1(row.max)}</span>${readerEchoInline(pid)}</p>
       <div class="dist-wrap" id="dist"></div>
       <h2 style="margin:2.2rem 0 .3rem;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)">扮演者</h2>
       <p class="page-hint" style="margin-bottom:.8rem">这双眼睛由哪些模型扮演过、各自操控时的手势（原始分）</p>
@@ -1434,7 +1695,8 @@ function readerReadRow(r) {
       <span class="rname"><a href="#/poem/${r.poem_id}/reads">《${esc(p ? p.title : r.poem_id)}》</a></span>
       <span class="chip">${esc(modelAlias(r.reader.model))}</span>
       ${stale ? '<span class="chip warm">读的是旧版</span>' : ""}
-      <span class="score-badge">${fmt1(r.score)}</span>
+      ${authorSeal(r.read_id)}
+      ${scorePair(r, false)}
     </div>
     <div class="reaction">${esc(r.reaction)}</div>
     ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : ""}
@@ -1605,7 +1867,7 @@ function renderTimeline() {
           <span class="mon">${(p.date_written || p.created).slice(5, 7)}月</span>
           <span class="t"><a href="#/poem/${p.id}">${esc(p.title)}</a>${favMark(p.id)}${authorChip(p)}
             ${p.visibility === "private" ? '<span class="chip warm">私密</span>' : ""}
-            ${s.n ? `<span class="chip" title="${s.n} 次盲读">${s.cal != null ? `质 ${fmt2(s.cal)}` : `均 ${fmt1(s.mean)}`}</span>` : ""}</span>
+            ${s.n ? `<span class="chip" title="${s.n} 次盲读${s.cal != null ? `；展示质分 ${fmt2(s.cal)}；拉伸前校准贝叶斯 ${fmt2(s.calBase)}；原始均分 ${fmt2(s.mean)}` : ""}">${s.cal != null ? `质 ${fmt2(s.cal)}` : `均 ${fmt1(s.mean)}`}</span>` : ""}</span>
           <span class="first-line">${esc(firstLine(p))}</span>
         </div>`; }).join("")}
       </section>`).join("")}`;
@@ -1687,7 +1949,7 @@ function renderPoem(id, goReads) {
           <p id="mobile-note-status">${mobileNote ? `上次保存 ${compactWhen(mobileLocal.notes[id]?.updated_at)}` : "尚未写入"}</p>
         </details>` : ""}
       <section class="reads-zone">
-        <h2 style="font-size:1.2rem">众　目${st.n ? `<span style="color:#a4593d;margin-left:.55em;letter-spacing:.04em" title="${st.cal != null ? "校准分（按各读者松紧归一）" : "原始均分"}">${st.cal != null ? fmt2(st.cal) : fmt1(st.mean)}</span>` : ""}</h2>
+        <h2 style="font-size:1.2rem">众　目${st.n ? `<span style="color:#a4593d;margin-left:.55em;letter-spacing:.04em" title="${st.cal != null ? `展示质分；拉伸前校准贝叶斯 ${fmt2(st.calBase)}，原始均分 ${fmt2(st.mean)}；显示拉伸不改变名次` : "原始均分"}">${st.cal != null ? fmt2(st.cal) : fmt1(st.mean)}</span>` : ""}</h2>
         <div style="position:relative;text-align:center;font-size:.75rem;color:var(--ink-3);letter-spacing:.14em;margin:-.9rem 0 1.8rem">
           ${st.n ? `${st.n} 次观看${st.n > 1 ? ` · σ ${fmt1(st.sd)}` : ""}${st.cal != null ? ` · 原始均 ${fmt1(st.mean)}` : ""}` : "虚位以待"}
           <span style="position:absolute;right:0;top:0">作者 · ${esc(p.author || "未署名")}</span>
@@ -1722,6 +1984,7 @@ function renderPoem(id, goReads) {
 function readCard(r, p) {
   const stale = r.content_hash !== p.content_hash;
   const hid = isHidden(r.read_id);
+  const marked = isAuthorMarked(r.read_id);
   const voteChip = voteBadge(S.votes[r.read_id]);
   const threadKids = threadChildrenMap().get(r.read_id);
   const leftLinks = [
@@ -1736,12 +1999,16 @@ function readCard(r, p) {
       ${r.reader["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
       ${stale ? '<span class="chip warm">读的是旧版</span>' : ""}
       ${voteChip}
-      <span class="score-badge">${fmt1(r.score)}</span>
+      ${authorSeal(r.read_id)}
+      ${scorePair(r, false)}
     </div>
     <div class="reaction">${esc(r.reaction)}</div>
     <div class="rc-foot">
       ${leftLinks || "<span></span>"}
-      ${IS_MOBILE ? "<span></span>" : `<button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>`}
+      ${IS_MOBILE ? "<span></span>" : `<span class="read-actions">
+        <button class="author-mark-btn${marked ? " marked" : ""}" data-rid="${r.read_id}" data-mark="${marked ? 0 : 1}">${marked ? "收回藏印" : "落作者藏印"}</button>
+        <button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>
+      </span>`}
     </div>
   </div>`;
 }
@@ -1754,6 +2021,20 @@ function wireCuration(p) {
       renderPoem(p.id, false);
       toast(b.dataset.hide === "1" ? "已折叠（不再计入分布与榜单，随时可恢复）" : "已恢复");
     } catch (e) { toast("失败：" + e.message); }
+  });
+  app.querySelectorAll(".author-mark-btn").forEach(b => b.onclick = async () => {
+    const marked = b.dataset.mark === "1";
+    b.disabled = true;
+    b.textContent = marked ? "正在落印…" : "正在收回…";
+    try {
+      await saveAuthorMark(b.dataset.rid, marked);
+      renderPoem(p.id, false);
+      toast(marked ? "已落作者藏印" : "已收回作者藏印");
+    } catch (e) {
+      b.disabled = false;
+      b.textContent = marked ? "落作者藏印" : "收回藏印";
+      toast("失败：" + e.message);
+    }
   });
 }
 
@@ -2108,6 +2389,9 @@ function renderStats() {
       <section class="board hero"><h2>读者的松紧</h2>
         <p class="board-note">细线 = 该读者给分的 5–95 百分位，粗段 = 均值 ± σ，实心点 = 均值（数值在行尾）；从松到紧排。始终原始口径——这一页看的就是松紧本身</p>
         <div class="dist-wrap" style="max-width:none" id="st-readers"></div></section>
+      <section class="board hero echo-board"><h2>读者回声簿</h2>
+        <p class="board-note">按人设汇总其未折叠盲读评语收到的主动票。赞、踩、AI 同批加精与作者藏印分列；它反映社区回声，也受出场和被投票次数影响，不是读者能力排名。</p>
+        <div id="st-echo"></div></section>
       <section class="board hero"><h2>评分门槛</h2>
         <p class="board-note">每位读者给出 ≥X 分的比例；X 可调，虚线是不分读者的总体比例，从高到低排</p>
         <div style="display:flex;align-items:center;gap:.8em;margin-bottom:.6em">
@@ -2145,6 +2429,7 @@ function renderStats() {
   genreChart(document.getElementById("st-genre"), sc);
   covChart(document.getElementById("st-cov"));
   readerChart(document.getElementById("st-readers"));
+  readerEchoBoard(document.getElementById("st-echo"));
   const threshSlider = document.getElementById("st-thresh-x");
   const threshLabel = document.getElementById("st-thresh-label");
   const threshEl = document.getElementById("st-thresh");
@@ -2501,26 +2786,35 @@ function renderDeepRead(rid) {
   const r = maps.readById.get(rid);
   if (!r || !r.long_form) { app.innerHTML = `<p class="page-hint">没有这篇深读。</p>`; return; }
   const p = maps.poem.get(r.poem_id);
+  const marked = isAuthorMarked(rid);
   app.innerHTML = `<div class="deep-read">
     <a class="back" href="#/poem/${r.poem_id}">← 回到《${esc(p ? p.title : r.poem_id)}》</a>
     <h1 class="page-title" style="margin-top:1.2rem">深读 · ${esc(personaName(r.reader.persona_id))}</h1>
     <p class="page-hint">
       <span class="chip">${esc(modelAlias(r.reader.model))}</span>
       <span class="chip">${esc(r.transport)}</span>
-      <span class="score-badge">评分 ${fmt1(r.score)}</span>
+      ${authorSeal(rid)}
+      ${scorePair(r, true)}
       ${r.content_hash !== (p && p.content_hash) ? '<span class="chip warm">读的是旧版</span>' : ""}
     </p>
     <div class="long-form">${esc(r.long_form)}</div>
-    <div style="margin-top:2.5rem">
-      <button class="btn" id="promote">升格进《昼青·诠释》</button>
-      <span style="font-size:.78rem;color:var(--ink-3);margin-left:.8em">评论区是流水，诠释册是沉淀；此动作只由作者手动。</span>
-    </div></div>`;
-  const btn = document.getElementById("promote");
-  let armed = false;
-  btn.onclick = async () => {
-    if (!armed) { armed = true; btn.textContent = "确认升格？再点一次"; btn.classList.add("primary"); return; }
-    try { await post("/api/promote", { read_id: rid }); toast("已升格进诠释册"); btn.disabled = true; btn.textContent = "已升格"; }
-    catch (e) { toast("失败：" + e.message); }
+    ${IS_MOBILE ? "" : `<div class="deep-mark-tools">
+      <button class="btn${marked ? " on" : ""}" id="deep-mark">${marked ? "收回作者藏印" : "落作者藏印"}</button>
+      <span>藏印只是一枚可撤回的作者认可，不复制全文、不改变榜单或校准。</span>
+    </div>`}</div>`;
+  const btn = document.getElementById("deep-mark");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = marked ? "正在收回…" : "正在落印…";
+    try {
+      await saveAuthorMark(rid, !marked);
+      renderDeepRead(rid);
+      toast(marked ? "已收回作者藏印" : "已落作者藏印");
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = marked ? "收回作者藏印" : "落作者藏印";
+      toast("失败：" + e.message);
+    }
   };
 }
 
@@ -2557,11 +2851,6 @@ function wireMobilePoem(p) {
       if (saveMobileLocal()) status.textContent = `已留在这台手机 · ${compactWhen(new Date().toISOString())}`;
       else status.textContent = "浏览器禁止本地保存；可复制文字后再离开。";
     }, 450);
-  });
-  document.getElementById("wc-search")?.addEventListener("input", e => {
-    barQuery = e.currentTarget.value.trim().toLocaleLowerCase();
-    barShown = 40;
-    buildBars();
   });
 }
 
@@ -2683,6 +2972,7 @@ function renderSettings() {
   const views = [["boards", "榜单"], ["readers", "读者"], ["timeline", "时间轴"], ["stats", "统计"], ["all", "全部作品"]];
   const rg = st.read_genres || [];
   const gn = st.genre_notes || {};
+  const hiddenGenreBoards = new Set(st.hidden_genre_boards || []);
   // 候选文体 = 常见建议 + corpus 里实际出现的 + 已勾选的，去掉诗类与草稿（草稿永远不读）
   const genreCands = [...new Set(["散文", "小说", "杂文",
     ...S.poems.map(p => p.genre), ...rg, ...Object.keys(gn)])]
@@ -2696,6 +2986,10 @@ function renderSettings() {
         placeholder="（可选）给读者的补充评判要求，一两句即可"
         value="${esc(gn[g] || "")}">
     </div>`).join("");
+  const genreBoardRows = genreCands.length ? genreCands.map(g => `
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.88rem;cursor:pointer;margin:.45rem 0">
+        <input type="checkbox" class="set-genre-board" data-g="${esc(g)}"${hiddenGenreBoards.has(g) ? "" : " checked"}> ${esc(g)}榜
+      </label>`).join("") : '<span style="font-size:.75rem;color:var(--ink-3)">当前还没有非诗文体。</span>';
   app.innerHTML = `
     <h1 class="page-title">设置</h1>
     <p class="page-hint">偏好存在 corpus/settings.json（作者资产层侧车，不碰任何冻结 schema）；清空某项即恢复默认。派发 agent 读的也是这一份。</p>
@@ -2708,9 +3002,19 @@ function renderSettings() {
         `<option value="${v}"${(st.default_view || "boards") === v ? " selected" : ""}>${n}</option>`).join("")}</select>`,
         "首页（点集名）落地到哪一页；顶栏各入口不受影响。")}
       ${row("评分口径", `<select id="set-score" style="${ic}">
-          <option value="cal"${(st.score_badge || "cal") !== "raw" ? " selected" : ""}>质分优先（按各读者松紧校准归一）</option>
+          <option value="cal"${(st.score_badge || "cal") !== "raw" ? " selected" : ""}>质分优先（校准聚合后的展示尺度）</option>
           <option value="raw"${(st.score_badge || "cal") === "raw" ? " selected" : ""}>只看原始均分</option></select>`,
         "影响榜单排序与各处分数徽章；统计页另有自己的口径开关。")}
+      <h2 style="font-size:1rem;margin-top:1.8rem">榜单显示</h2>
+      <div style="font-size:.75rem;color:var(--ink-3);line-height:1.7;margin-bottom:.7rem">
+        这里只控制榜单首页是否出现，不删除作品、分数或直达页面。诗类专榜默认开启；没有诗词，或想让首页更安静时可以关闭。</div>
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.9rem;cursor:pointer;margin-bottom:.75rem">
+        <input type="checkbox" id="set-poetry-boards"${st.show_poetry_boards !== false ? " checked" : ""}> 显示诗词榜、长诗榜与短诗榜
+      </label>
+      <details${(st.hidden_genre_boards || []).length ? " open" : ""}>
+        <summary style="font-size:.85rem;color:var(--ink-2);cursor:pointer">对应文体榜</summary>
+        <div style="padding:.45rem 0 .5rem 1rem">${genreBoardRows}</div>
+      </details>
       ${row("端口", `<input id="set-port" style="${ic}" type="number" min="1024" max="65535" value="${st.port || 8737}">`, "重启服务器后生效。")}
       ${row("手机临时访问端口", `<input id="set-mobile-port" style="${ic}" type="number" min="1024" max="65535" value="${st.mobile_port || 8738}">`,
         "只读入口使用；开始访问时生效，通常不需要修改。")}
@@ -2720,11 +3024,17 @@ function renderSettings() {
         读者的 prompt 会自动声明「这不是诗」并换用该文体的判据；每个文体下可以写一两句你自己的评判要求（留空只用通用转换）。</div>
       ${genreRows}
       ${row("添加文体", `<input id="set-newgenre" style="${ic}" placeholder="如：剧本（保存后出现在上方，已勾选，可再补要求）">`)}
-      <h2 style="font-size:1rem;margin-top:1.8rem">派发（agent 读这里）</h2>
-      ${row("默认盲读模型", `<input id="set-model" style="${ic}" value="${esc(d.default_model || "")}">`, "填真实模型 ID，不是工具/平台名。")}
-      ${row("默认通道", `<input id="set-transport" style="${ic}" value="${esc(d.default_transport || "")}">`)}
-      ${row("目标覆盖层数", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth || 4}">`,
-        "每首诗希望被盲读到的层数——agent 算缺口时的默认目标。")}
+      <details class="mobile-tradeoff" style="margin-top:1.8rem">
+        <summary>高级派发偏好（通常不用设置）</summary>
+        <div style="padding-top:1rem">
+          ${row("固定盲读模型（可选）", `<input id="set-model" style="${ic}" value="${esc(d.default_model || "")}" placeholder="留空：每次派发时确认">`,
+            "模型更新很快，通常留空更可靠。只有你明确长期固定某个真实模型 ID 时才填写。")}
+          ${row("固定执行通道（可选）", `<input id="set-transport" style="${ic}" value="${esc(d.default_transport === "auto" ? "" : (d.default_transport || ""))}" placeholder="留空：按当前工具自动选择">`,
+            "Codex、Claude Code、AGY、CodeBuddy 的可用通道会变化；留空时由当次执行环境选择。")}
+          ${row("固定覆盖目标（可选）", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth ?? ""}" placeholder="留空：按当前最薄覆盖继续一层">`,
+            "留空时，agent 先计算当前覆盖账，再报告建议层数与任务量；固定数字不会随着数据增长自动变化。")}
+        </div>
+      </details>
       <div style="margin-top:1.4rem"><button class="btn primary" id="set-save">保存</button></div>
     </section>
     <section class="board mobile-access-board" style="text-align:left;margin-top:1.6rem">
@@ -2782,12 +3092,15 @@ function renderSettings() {
     document.querySelectorAll(".set-gnote").forEach(x => {
       if (x.value.trim()) genre_notes[x.dataset.g] = x.value.trim();
     });
+    const hidden_genre_boards = [...document.querySelectorAll(".set-genre-board")]
+      .filter(x => !x.checked).map(x => x.dataset.g);
     try {
       await post("/api/settings", {
         site_title: gv("set-title"), site_subtitle: gv("set-sub"), footer_text: gv("set-foot"),
         default_view: gv("set-view"), score_badge: gv("set-score"), port: num("set-port"),
         mobile_port: num("set-mobile-port"),
-        read_genres, genre_notes,
+        show_poetry_boards: document.getElementById("set-poetry-boards").checked,
+        hidden_genre_boards, read_genres, genre_notes,
         dispatch: { default_model: gv("set-model"), default_transport: gv("set-transport"),
           target_depth: num("set-depth") } });
       await loadState();

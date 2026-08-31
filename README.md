@@ -57,8 +57,12 @@
 - `.agents/skills/` / `.codex/agents/` 是 Codex 原生适配；`.claude/` 是 Claude Code 原生适配。
 - Antigravity 与 CodeBuddy 都能读取根目录 `AGENTS.md`，可担任主代理；也可作为外部执行通道，按一 task 一独立上下文运行。并发数由当前运行时和额度决定，项目不写死。
 
-版本与更新页同时支持 Git clone 和 ZIP 安装。Git 只做 `pull --ff-only`；ZIP 只从固定公开仓库更新发行允许清单，覆盖前备份，永不触碰 corpus、results、个人设置与批次回执。v1.7.1 起可选 30 天可信手机连接签，掌中页会显示更新差异，并把手机记录备份下载到手机本地。
+版本与更新页同时支持 Git clone 和 ZIP 安装。Git 只做 `pull --ff-only`；ZIP 只从固定公开仓库更新发行允许清单，覆盖前备份，永不触碰 corpus、results、个人设置与批次回执。v1.7.1 起可选 30 天可信手机连接签，掌中页会显示更新差异，并把手机记录备份下载到手机本地。v1.7.2 起统计页有读者回声簿，逐条评论可并列看原始分与校准分，作者可落可撤回藏印。
 
 ## 文档
 
-`00_START_HERE.md`–`05_run_modes.md` 是架构规格书，写给负责搭建/维护它的 AI agent；`MOBILE_ACCESS.md` 是普通用户教程。FROZEN 的部分（两张 schema、读者底线、榜单不得由 LLM 排名、content_hash 契约）不要改。
+- **普通使用只需看**：本页；要在手机阅读时再看 `MOBILE_ACCESS.md`。
+- **交给 AI 搭建/维护**：`AGENTS.md`、`CLAUDE.md` 与 `00_START_HERE.md`–`05_run_modes.md`，它们是运行这个“AI 帮用户使用项目”模式所需的规格，不是中间产物。
+- **维护者记录**：`PROGRESS.md`、`theater/NOTES.md` 与 `theater/release/`。普通用户不必阅读；它们用于多工具接手、解释设计理由和防止发行漏项。
+
+FROZEN 的部分（两张 schema、读者底线、榜单不得由 LLM 排名、content_hash 契约）不要改。
