@@ -1,0 +1,6012 @@
+/* 昼青集 · 读诗剧场 —— 前端（无依赖）。
+ * 数据从 /api/state 一次拉全；作者动作经 /api/action（服务端写前自动备份）。
+ * 所有榜单在此处从盲读记录事后派生，绝无 LLM 排名。
+ */
+"use strict";
+
+const app = document.getElementById("app");
+const APP_MODE = document.querySelector('meta[name="zq-mode"]')?.content || "author";
+const IS_MOBILE = APP_MODE === "mobile" || APP_MODE === "snapshot";
+const IS_SNAPSHOT = APP_MODE === "snapshot";
+const IS_PORTABLE_MOBILE = APP_MODE === "mobile" &&
+  document.querySelector('meta[name="zq-shell"]')?.content === "portable";
+const MOBILE_TOKEN_KEY = "zhouqingji.mobile.token.v1";
+const MOBILE_LOCAL_KEY = "zhouqingji.mobile.local.v1";
+const MOBILE_REMOTE_KEY = "zhouqingji.mobile.remote.v1";
+let S = null; // {poems, reads, personas}
+let maps = {};
+let mobileConnection = { source: APP_MODE, online: false, savedAt: null, error: "", delta: null };
+let installPrompt = null;
+let mobileSyncPromise = null;
+let mobileLastSyncAttempt = 0;
+
+function storageGet(key) {
+  try { return localStorage.getItem(key); } catch (_) { return null; }
+}
+function storageSet(key, value) {
+  try { localStorage.setItem(key, value); return true; } catch (_) { return false; }
+}
+
+function normalizeMobileEndpoint(raw) {
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== "http:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash)
+      return "";
+    const pieces = url.hostname.split(".").map(Number);
+    if (pieces.length !== 4 || pieces.some((n, i) => !Number.isInteger(n) || n < 0 || n > 255 || String(n) !== url.hostname.split(".")[i]))
+      return "";
+    const privateIp = pieces[0] === 10 || (pieces[0] === 172 && pieces[1] >= 16 && pieces[1] <= 31) ||
+      (pieces[0] === 192 && pieces[1] === 168);
+    return privateIp ? url.origin : "";
+  } catch (_) { return ""; }
+}
+
+function portableMobilePairing() {
+  if (!IS_PORTABLE_MOBILE) return null;
+  const fragment = location.hash.startsWith("#pair=") ? new URLSearchParams(location.hash.slice(1)) : null;
+  if (fragment) {
+    const token = fragment.get("pair") || "";
+    const endpoint = normalizeMobileEndpoint(fragment.get("endpoint") || "");
+    if (token.length >= 24 && endpoint) {
+      const config = { endpoint, pairedAt: new Date().toISOString(), version: 1 };
+      storageSet(MOBILE_TOKEN_KEY, token);
+      storageSet(MOBILE_REMOTE_KEY, JSON.stringify(config));
+      history.replaceState(null, "", location.pathname + location.search + "#/settings");
+      return { ...config, token };
+    }
+  }
+  try {
+    const config = JSON.parse(storageGet(MOBILE_REMOTE_KEY) || "null");
+    const endpoint = normalizeMobileEndpoint(config?.endpoint || "");
+    const token = storageGet(MOBILE_TOKEN_KEY) || "";
+    return endpoint && token ? { ...config, endpoint, token } : null;
+  } catch (_) { return null; }
+}
+
+async function mobileApiFetch(path, options = {}) {
+  if (!IS_PORTABLE_MOBILE) return fetch(path, options);
+  const pairing = portableMobilePairing();
+  if (!pairing) throw new Error("还没有和电脑配对，请从电脑的“带到安卓”二维码开始。");
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeout || 6000);
+  try {
+    return await fetch(pairing.endpoint + path, {
+      ...options,
+      mode: "cors",
+      credentials: "omit",
+      referrerPolicy: "no-referrer",
+      targetAddressSpace: "local",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("没有在局域网中找到电脑");
+    throw error;
+  } finally { clearTimeout(timeout); }
+}
+
+function loadMobileLocal() {
+  try {
+    const parsed = JSON.parse(storageGet(MOBILE_LOCAL_KEY) || "{}");
+    return {
+      favorites: parsed.favorites || {},
+      notes: parsed.notes || {},
+      viewed: parsed.viewed || {},
+      last_exported_at: parsed.last_exported_at || null,
+      version: 1,
+    };
+  } catch (_) {
+    return { favorites: {}, notes: {}, viewed: {}, last_exported_at: null, version: 1 };
+  }
+}
+let mobileLocal = loadMobileLocal();
+function saveMobileLocal() { return storageSet(MOBILE_LOCAL_KEY, JSON.stringify(mobileLocal)); }
+
+function snapshotDb() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) return reject(new Error("浏览器不支持离线快照"));
+    const req = indexedDB.open("zhouqingji-mobile", 1);
+    req.onupgradeneeded = () => req.result.createObjectStore("snapshots");
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error("离线快照库无法打开"));
+  });
+}
+
+async function snapshotRead() {
+  const db = await snapshotDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("snapshots", "readonly");
+    const req = tx.objectStore("snapshots").get("latest");
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+    tx.oncomplete = () => db.close();
+  });
+}
+
+async function snapshotWrite(state, etag) {
+  const db = await snapshotDb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction("snapshots", "readwrite");
+    tx.objectStore("snapshots").put({ state, etag, savedAt: new Date().toISOString() }, "latest");
+    tx.oncomplete = () => { db.close(); resolve(); };
+    tx.onerror = () => { db.close(); reject(tx.error); };
+  });
+}
+
+function summarizeMobileDelta(before, after) {
+  if (!before || !after) return null;
+  const oldPoems = new Map((before.poems || []).map(p => [p.id, p]));
+  const oldReads = new Set((before.reads || []).map(r => r.read_id).filter(Boolean));
+  let poems = 0, changed = 0, reads = 0;
+  for (const p of (after.poems || [])) {
+    if (!oldPoems.has(p.id)) poems++;
+    else if ((oldPoems.get(p.id).content_hash || "") !== (p.content_hash || "")) changed++;
+  }
+  for (const r of (after.reads || [])) if (r.read_id && !oldReads.has(r.read_id)) reads++;
+  return { poems, changed, reads, fromVersion: before.version || "", toVersion: after.version || "" };
+}
+
+function mobileDeltaText(delta) {
+  if (!delta) return "";
+  const bits = [];
+  if (delta.poems) bits.push(`新增 ${delta.poems} 首作品`);
+  if (delta.reads) bits.push(`新增 ${delta.reads} 条评论或跟帖`);
+  if (delta.changed) bits.push(`修改 ${delta.changed} 首作品`);
+  if (!bits.length && delta.fromVersion !== delta.toVersion)
+    bits.push(`程序 ${delta.fromVersion || "旧版"} → ${delta.toVersion || "新版"}`);
+  return bits.join(" · ");
+}
+
+/* ---------- 工具 ---------- */
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+const fmt1 = x => (Math.round(x * 10) / 10).toFixed(1);
+
+/* 多段文本：空行分段成 <p>，段内单换行成 <br>——长评/跟帖不再被 esc 拍平成一堵墙 */
+const paras = s => {
+  const t = String(s ?? "").trim();
+  if (!t) return "";
+  return t.split(/\n{2,}/).map(p => `<p>${esc(p).replace(/\n/g, "<br>")}</p>`).join("");
+};
+
+function toast(msg) {
+  let t = document.querySelector(".toast");
+  if (!t) { t = document.createElement("div"); t.className = "toast"; document.body.appendChild(t); }
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h); t._h = setTimeout(() => t.classList.remove("show"), 2400);
+}
+
+/* 页内确认框（不用原生 confirm——那会阻塞、也丑）。titleHtml/bodyHtml 已是可信 HTML。 */
+function confirmPopup({ title, bodyHtml, okLabel = "确定", cancelLabel = "取消", onOk }) {
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">${esc(title)}</h3>
+    <div class="modal-body">${bodyHtml}</div>
+    <div class="modal-actions">
+      <button class="btn" data-x>${esc(cancelLabel)}</button>
+      <button class="btn primary" data-ok>${esc(okLabel)}</button>
+    </div></div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", e => { if (e.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-ok]").onclick = async () => { close(); await onOk(); };
+  document.body.appendChild(back);
+}
+
+function bookPdfEnvironmentSummary(status) {
+  if (!status) return { ready: false, text: "没有读到本机环境；普通保存仍可使用。" };
+  if (status.ready) return { ready: true, text: "本机已具备专业排版与 PDF 核验环境。" };
+  const missing = [];
+  if (!status.node?.ready) missing.push(status.node?.installed ? `Node.js 需升级至 ${status.node.minimum}+` : "Node.js");
+  if (!status.vivliostyle?.ready) missing.push("Vivliostyle 排版器");
+  if (!status.pypdf?.ready || !status.fonttools?.ready) missing.push("PDF 核验组件");
+  return { ready: false, text: `专业路径尚缺：${missing.join("、") || "可选组件"}。不影响普通“保存 PDF”，想启用时按下方的步骤安装即可。` };
+}
+
+async function openBookPdfGuide(draft, preview) {
+  try { bookRequireCompleteLayout(preview); } catch (exc) { toast(exc.message); return; }
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal book-output-modal" role="dialog" aria-modal="true" aria-labelledby="book-output-title">
+    <div class="book-output-heading"><div><span>出卷</span><h3 id="book-output-title">选择 PDF 输出方式</h3></div><button class="btn" data-close>关闭</button></div>
+    <div class="book-output-routes">
+      <section class="book-output-route is-default">
+        <div class="book-output-mark">日常</div>
+        <div><h4>马上保存</h4><p>零安装。调用浏览器打印，选择“另存为 PDF”，适合阅读、校稿和普通打印。</p><small>保持 100% 缩放，并关闭浏览器自带页眉页脚。</small></div>
+        <button class="btn primary" data-browser>保存 PDF</button>
+      </section>
+      <section class="book-output-route">
+        <div class="book-output-mark">严校</div>
+        <div><h4>专业校验</h4><p>先导出同版离线 HTML，再由可选工具核验页数、开本、嵌字与正文完整性。</p><small data-status>正在检查这台电脑……</small></div>
+        <button class="btn" data-html>导出增强用 HTML</button>
+        <details class="book-output-setup" data-setup><summary>怎样启用专业校验</summary><ol>
+          <li>安装 Node.js 22.12 或更高版本。</li>
+          <li>安装排版器：<code>npm install -g @vivliostyle/cli</code></li>
+          <li>安装核验组件：<code>python -m pip install pypdf fonttools</code></li>
+        </ol><p>安装是一次性的；昼青集不会代为下载，也不会把这些组件塞进更新包。</p></details>
+      </section>
+    </div>
+    <p class="book-output-footnote">专业组件不会自动下载，也不会影响平时使用；离线 HTML 含所选诗文，请只保存在可信位置。</p>
+  </div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", event => { if (event.target === back) close(); });
+  back.querySelector("[data-close]").onclick = close;
+  back.querySelector("[data-browser]").onclick = () => { close(); window.print(); };
+  const exportHtml = async event => {
+    const button = event.currentTarget, label = button.textContent;
+    button.disabled = true; button.textContent = "正在收拢……";
+    try { await downloadBookHtml(draft, preview); toast("增强用离线 HTML 已导出"); }
+    catch (error) { toast("导出失败：" + error.message); }
+    finally { button.disabled = false; button.textContent = label; }
+  };
+  back.querySelector("[data-html]").onclick = exportHtml;
+  document.body.appendChild(back);
+  back.querySelector("[data-browser]").focus();
+  try {
+    const response = await fetch("/api/book-pdf/status", { cache: "no-store" });
+    const status = await response.json();
+    if (!response.ok) throw new Error(status.error || response.status);
+    const summary = bookPdfEnvironmentSummary(status);
+    const el = back.querySelector("[data-status]");
+    if (el) {
+      el.textContent = summary.text;
+      el.classList.toggle("is-ready", summary.ready);
+    }
+    if (summary.ready) {
+      const button = back.querySelector("[data-html]");
+      button.textContent = "生成并校验 PDF";
+      button.classList.add("primary");
+      button.onclick = event => buildBookPdf(draft, preview, event.currentTarget);
+      back.querySelector("[data-setup]").hidden = true;
+    }
+  } catch (_) {
+    const el = back.querySelector("[data-status]");
+    if (el) el.textContent = "环境体检暂不可用；普通保存不受影响。";
+  }
+}
+
+async function post(path, body) {
+  const res = await fetch(path, { method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body) });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || res.status);
+  return data;
+}
+
+async function loadMobileState({ preferCache = false } = {}) {
+  const params = new URLSearchParams(location.search);
+  const paired = params.get("pair");
+  if (paired) {
+    storageSet(MOBILE_TOKEN_KEY, paired);
+  }
+  const portable = portableMobilePairing();
+  /* 保留地址里的连接签，并把它直接作为本次请求凭据。
+     iPad 的系统扫码器预览、Safari、Edge 与“添加到主屏幕”可能是彼此隔离的浏览环境：
+     若预览页先用 replaceState 抹掉 ?pair=，转去 Safari 时会只剩无签地址；若 Safari
+     禁止本地存储，先写 localStorage 再读也会把一张有效签误判为缺失。连接签本来就
+     在二维码里，服务端另有 no-referrer，保留它才能让跨浏览器打开与主屏幕入口可靠。 */
+  const token = paired || portable?.token || storageGet(MOBILE_TOKEN_KEY) || "";
+  let cached = null;
+  try { cached = await snapshotRead(); } catch (_) { /* 首次使用或浏览器禁用存储 */ }
+  if (preferCache && cached) {
+    mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+      error: "已从这台手机打开，正在检查电脑中的更新。", delta: null };
+    return cached.state;
+  }
+  if (!token && cached) {
+    mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+      error: "没有配对口令，正在阅读上次留影。" };
+    return cached.state;
+  }
+  if (!token) throw new Error("还没有和电脑配对，请从电脑的“手机访问”页面重新扫码。");
+  try {
+    const headers = { "X-ZQ-Mobile-Token": token };
+    if (cached?.etag) headers["If-None-Match"] = cached.etag;
+    const res = await mobileApiFetch("/api/mobile-state", { headers, cache: "no-store" });
+    if (res.status === 304 && cached) {
+      mobileConnection = { source: "computer", online: true, savedAt: cached.savedAt,
+        error: "", delta: { poems: 0, changed: 0, reads: 0,
+          fromVersion: cached.state?.version || "", toVersion: cached.state?.version || "" } };
+      return cached.state;
+    }
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || res.status);
+    const etag = res.headers.get("ETag") || "";
+    const savedAt = new Date().toISOString();
+    const delta = summarizeMobileDelta(cached?.state, data);
+    try { await snapshotWrite(data, etag); } catch (e) {
+      mobileConnection.error = "已取到最新内容，但浏览器没有保存离线留影。";
+    }
+    mobileConnection = { source: "computer", online: true, savedAt,
+      error: mobileConnection.error || "", delta };
+    return data;
+  } catch (error) {
+    if (!cached) throw error;
+    mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+      error: `电脑暂时不可达，正在阅读上次留影。${error.message ? `（${error.message}）` : ""}` };
+    return cached.state;
+  }
+}
+
+function hydrateState() {
+  S.curation = S.curation || {};
+  S.favs = S.favs || {};
+  S.stanzas = S.stanzas || {};
+  S.book_projects = S.book_projects || { schema: 1, books: [] };
+  S.calibration = S.calibration || {};
+  S.settings = S.settings || {};
+  S.thread_meta = S.thread_meta || {};
+  S.votes = S.votes || {};
+  S.voter_votes = S.voter_votes || {};
+  S.persona_echo = S.persona_echo || {};
+  applyBranding();
+  applyModeChrome();
+  maps.poem = new Map(S.poems.map(p => [p.id, p]));
+  maps._primary = null;
+  maps.persona = new Map(S.personas.map(p => [p.persona_id, p]));
+  maps.readsByPoem = new Map();
+  maps.readById = new Map();
+  for (const r of S.reads) {
+    maps.readById.set(r.read_id, r);
+    if (!maps.readsByPoem.has(r.poem_id)) maps.readsByPoem.set(r.poem_id, []);
+    maps.readsByPoem.get(r.poem_id).push(r);
+  }
+}
+
+async function loadState({ forceMobileRefresh = false } = {}) {
+  if (window.__ZQ_SNAPSHOT__) {
+    S = window.__ZQ_SNAPSHOT__;
+    mobileConnection = { source: "snapshot", online: false,
+      savedAt: S.mobile?.generated_at || null, error: "这是导出时的离线留影。" };
+  } else if (IS_MOBILE) {
+    S = await loadMobileState({ preferCache: IS_PORTABLE_MOBILE && !forceMobileRefresh });
+  } else {
+    const res = await fetch("/api/state");
+    S = await res.json();
+  }
+  hydrateState();
+  if (IS_PORTABLE_MOBILE && !forceMobileRefresh) setTimeout(() => syncPortableMobile(), 0);
+}
+
+async function syncPortableMobile({ force = false } = {}) {
+  if (!IS_PORTABLE_MOBILE || IS_SNAPSHOT || mobileSyncPromise) return mobileSyncPromise;
+  const now = Date.now();
+  if (!force && now - mobileLastSyncAttempt < 30000) return null;
+  mobileLastSyncAttempt = now;
+  mobileSyncPromise = (async () => {
+    try {
+      const next = await loadMobileState({ preferCache: false });
+      S = next;
+      hydrateState();
+      await route();
+      return true;
+    } catch (error) {
+      const cached = await snapshotRead().catch(() => null);
+      if (cached) {
+        mobileConnection = { source: "cache", online: false, savedAt: cached.savedAt,
+          error: `电脑暂时不可达，正在阅读上次留影。${error.message ? `（${error.message}）` : ""}` };
+        S = cached.state;
+        hydrateState();
+        await route();
+        return false;
+      }
+      throw error;
+    } finally { mobileSyncPromise = null; }
+  })();
+  return mobileSyncPromise;
+}
+
+function blindReads(poemId) {
+  return (maps.readsByPoem.get(poemId) || []).filter(r => r.context_mode === "blind");
+}
+
+/* 模型名显示层归并：reads.jsonl 永不改（铁律），只在展示与统计时合并同门异名。
+ * 规则：去掉日期后缀、统一小写、点号写法归一。 */
+// 厂商名的正确大小写没法靠正则猜（DeepSeek/MiniMax 内部大写），只能查表；
+// 查完表之后剩下的字段（版本号、pro/flash 这类词）用通用规则首字母大写。
+const VENDOR_NAMES = {
+  claude: "Claude", gemini: "Gemini", deepseek: "DeepSeek", minimax: "MiniMax", hy3: "HY3",
+  glm: "GLM", gpt: "GPT", grok: "Grok", kimi: "Kimi", moonshot: "Moonshot",
+  qwen: "Qwen", doubao: "Doubao", ernie: "Ernie", llama: "Llama", mistral: "Mistral",
+};
+
+function modelAlias(m) {
+  if (!m) return "未知";
+  let x = String(m).toLowerCase().replace(/-\d{8}$/, "").replace(/-(?:thinking|high|medium|low|minimal|extended)$/, "");
+  // 规范归并表由校准结果下发；公开发行版不内置精确模型 ID。
+  const canon = (S && S.calibration && S.calibration.meta && S.calibration.meta.aliases) || {};
+  x = canon[x] || x;
+  x = x.replace(/-(?:thinking|high|medium|low|minimal|extended)$/, "");
+  x = canon[x] || x;
+  // 某些模型家族用连字符拆分版本号，显示时拼回点号。
+  const cm = x.match(/^claude-(sonnet|opus|haiku|fable)-(\d+)(?:-(\d+))?$/);
+  if (cm) return "Claude " + cm[1][0].toUpperCase() + cm[1].slice(1) + " " + cm[2] + (cm[3] ? "." + cm[3] : "");
+  // 其余厂商按连字符分段，查厂商名并逐段格式化。
+  const parts = x.split("-");
+  const vendor = VENDOR_NAMES[parts[0]];
+  if (!vendor) return x; // 没见过的家族，原样显示，不瞎猜大小写
+  const rest = parts.slice(1).map(tok =>
+    /^\d+(\.\d+)?$/.test(tok) ? tok : tok.charAt(0).toUpperCase() + tok.slice(1)
+  );
+  return rest.length ? vendor + " " + rest.join(" ") : vendor;
+}
+
+function annotatedReads(poemId) {
+  return (maps.readsByPoem.get(poemId) || []).filter(r => r.context_mode === "annotated");
+}
+
+function isHidden(readId) {
+  return !!(S.curation[readId] && S.curation[readId].hidden);
+}
+
+function isFav(poemId) {
+  if (IS_MOBILE && Object.prototype.hasOwnProperty.call(mobileLocal.favorites, poemId))
+    return !!mobileLocal.favorites[poemId];
+  return !!S.favs[poemId];
+}
+const favMark = id => isFav(id) ? '<span class="fav-mark" title="作者偏爱">♥</span>' : "";
+
+function setMobileFavorite(poemId, value) {
+  mobileLocal.favorites[poemId] = !!value;
+  saveMobileLocal();
+}
+
+function markMobileViewed(poemId) {
+  if (!IS_MOBILE) return;
+  mobileLocal.viewed[poemId] = new Date().toISOString();
+  const ordered = Object.entries(mobileLocal.viewed).sort((a, b) => b[1].localeCompare(a[1]));
+  mobileLocal.viewed = Object.fromEntries(ordered.slice(0, 60));
+  saveMobileLocal();
+}
+
+/* 多作者：主作者（占多数者）在列表里不标注，只有他人作品才挂作者章，避免满屏重复 */
+function primaryAuthor() {
+  if (maps._primary != null) return maps._primary;
+  const c = new Map();
+  for (const p of S.poems) c.set(p.author, (c.get(p.author) || 0) + 1);
+  maps._primary = [...c.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+  return maps._primary;
+}
+const authorChip = p => (p.author && p.author !== primaryAuthor())
+  ? `<span class="chip" title="作者">${esc(p.author)}</span>` : "";
+
+/* 统计与分布只用未被作者折叠的记录；折叠的仍保留在历史里 */
+function statReads(poemId) {
+  return blindReads(poemId).filter(r => !isHidden(r.read_id));
+}
+
+function stats(poemId) {
+  const rs = statReads(poemId);
+  const c = (S.calibration.poems || {})[poemId];
+  // 质分优先取 display（方差匹配拉伸后的展示分），旧文件只有 cal 时回退；都没有回退均分。
+  // 作者在设置里选「只看原始均分」时整体退回均分口径（统计页的口径开关独立于此）。
+  const useCal = ((S.settings || {}).score_badge || "cal") !== "raw";
+  const cal = useCal && c ? (c.display != null ? c.display : c.cal) : null;
+  const calBase = useCal && c && c.cal != null ? c.cal : null;
+  if (!rs.length) return { n: 0, mean: null, sd: null, cal, calBase };
+  const scores = rs.map(r => r.score);
+  const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+  const sd = Math.sqrt(scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length);
+  return { n: scores.length, mean, sd, cal, calBase };
+}
+
+function personaName(pid) {
+  const p = maps.persona.get(pid);
+  return p ? p.name : pid;
+}
+
+function whenOf(p) { return p.date_written || (p.created || "").slice(0, 7); }
+function yearOf(p) { return (p.date_written || p.created || "").slice(0, 4); }
+function firstLine(p) {
+  return (p.content.split("\n").find(l => l.trim()) || "").trim();
+}
+function pool() {
+  return S.poems.filter(p => p.visibility === "public" && p.ai_read);
+}
+
+/* 最近评论：默认只展开一小页，可一直往下翻（批量跑完后作者要在这里扫一遍） */
+const RECENT_MAX = 1000, RECENT_FIRST = 10, RECENT_STEP = 30;
+let recentShown = RECENT_FIRST;
+let recentFilter = { model: "", persona: "", band: "", sort: "newest" };
+
+function recentReads() {
+  const blind = S.reads.filter(r => r.context_mode === "blind");
+  blind.sort((a, b) => (b.ts || "").localeCompare(a.ts || ""));
+  return blind.slice(0, RECENT_MAX);
+}
+
+/* 分数段：低 <5、中 5–7.9、高 ≥8——扫批时按段快速筛 */
+function scoreBand(s) {
+  if (s == null) return "";
+  return s < 5 ? "low" : s < 8 ? "mid" : "high";
+}
+
+/* 当前筛选（模型 / 读者 / 分数段）下的最近盲读子集 */
+function recentFiltered() {
+  const f = recentFilter;
+  const rows = recentReads().filter(r =>
+    (!f.model || modelAlias(r.reader.model) === f.model) &&
+    (!f.persona || r.reader.persona_id === f.persona) &&
+    (!f.band || scoreBand(r.score) === f.band));
+  if (f.sort === "score-desc") rows.sort((a, b) => (b.score ?? -Infinity) - (a.score ?? -Infinity) || (b.ts || "").localeCompare(a.ts || ""));
+  if (f.sort === "score-asc") rows.sort((a, b) => (a.score ?? Infinity) - (b.score ?? Infinity) || (b.ts || "").localeCompare(a.ts || ""));
+  return rows;
+}
+
+/* 缓存池里各模型的条数与均分——放进下拉，一眼看出哪个模型整批偏高/偏低 */
+function recentModelStats() {
+  const m = new Map();
+  for (const r of recentReads()) {
+    const k = modelAlias(r.reader.model);
+    if (!m.has(k)) m.set(k, { n: 0, sum: 0 });
+    const o = m.get(k); o.n++; if (r.score != null) o.sum += r.score;
+  }
+  return [...m.entries()].map(([model, o]) => ({ model, n: o.n, avg: o.n ? o.sum / o.n : null }))
+    .sort((a, b) => b.n - a.n);
+}
+
+function recentPersonaStats() {
+  const m = new Map();
+  for (const r of recentReads()) m.set(r.reader.persona_id, (m.get(r.reader.persona_id) || 0) + 1);
+  return [...m.entries()].map(([pid, n]) => ({ pid, name: personaName(pid), n }))
+    .sort((a, b) => b.n - a.n);
+}
+
+function recentFilterBarHtml() {
+  const opt = (v, label, sel) => `<option value="${esc(v)}"${sel ? " selected" : ""}>${esc(label)}</option>`;
+  const modelOpts = opt("", `全部模型（${recentReads().length}）`, !recentFilter.model) +
+    recentModelStats().map(x => opt(x.model,
+      `${x.model} · ${x.n}条 · 均${x.avg != null ? x.avg.toFixed(1) : "—"}`,
+      recentFilter.model === x.model)).join("");
+  const personaOpts = opt("", "全部读者", !recentFilter.persona) +
+    recentPersonaStats().map(x => opt(x.pid, `${x.name} · ${x.n}`, recentFilter.persona === x.pid)).join("");
+  const sortOpts = [
+    ["newest", "最新在前"], ["score-desc", "分数从高到低"], ["score-asc", "分数从低到高"],
+  ].map(([v, label]) => opt(v, label, recentFilter.sort === v)).join("");
+  const band = (v, label) => `<button class="btn band-btn${recentFilter.band === v ? " on" : ""}" data-band="${esc(v)}">${label}</button>`;
+  return `<div class="recent-filter">
+    <select id="rf-model" class="rf-sel">${modelOpts}</select>
+    <select id="rf-persona" class="rf-sel">${personaOpts}</select>
+    <select id="rf-sort" class="rf-sel" aria-label="评论排序">${sortOpts}</select>
+    <span class="band-group">${band("", "全部")}${band("high", "高 ≥8")}${band("mid", "中 5–7")}${band("low", "低 <5")}</span>
+  </div>`;
+}
+
+function wireRecentFilter() {
+  const ms = document.getElementById("rf-model");
+  const ps = document.getElementById("rf-persona");
+  const ss = document.getElementById("rf-sort");
+  const reset = () => { recentShown = RECENT_FIRST; renderRecentInto(); };
+  if (ms) ms.onchange = () => { recentFilter.model = ms.value; reset(); };
+  if (ps) ps.onchange = () => { recentFilter.persona = ps.value; reset(); };
+  if (ss) ss.onchange = () => { recentFilter.sort = ss.value; reset(); };
+  document.querySelectorAll(".band-btn").forEach(b => {
+    b.onclick = () => {
+      recentFilter.band = b.dataset.band;
+      document.querySelectorAll(".band-btn").forEach(x => x.classList.toggle("on", x === b));
+      reset();
+    };
+  });
+}
+
+function fmtTs(ts) {
+  if (!ts) return "";
+  const d = ts.slice(0, 10); // YYYY-MM-DD
+  const t = ts.slice(11, 16); // HH:MM
+  const today = new Date().toISOString().slice(0, 10);
+  if (d === today) return t;
+  return d.slice(5) + " " + t; // MM-DD HH:MM
+}
+
+function recentRow(r) {
+  const p = maps.poem.get(r.poem_id);
+  const title = p ? p.title : r.poem_id;
+  const persona = maps.persona.get(r.reader.persona_id);
+  const pname = persona ? persona.name : r.reader.persona_id;
+  const model = modelAlias(r.reader.model);
+  // 偏离共识标记：这条分数比同诗其它盲读的均分高/低 ≥2.5 分，扫批时一眼揪出跑偏的一条
+  let devCls = "", devTitle = "";
+  const st = stats(r.poem_id);
+  if (st.n >= 3 && st.mean != null && r.score != null) {
+    const dev = r.score - st.mean;
+    if (dev >= 2.5) { devCls = " rscore-hi"; devTitle = ` title="比这首诗共识高 ${dev.toFixed(1)} 分"`; }
+    else if (dev <= -2.5) { devCls = " rscore-lo"; devTitle = ` title="比这首诗共识低 ${(-dev).toFixed(1)} 分"`; }
+  }
+  return `<div class="recent-row">
+    <div class="rmeta">
+      <span class="rtime">${fmtTs(r.ts)}</span>
+      <span class="rpoem"><a href="#/poem/${r.poem_id}/reads">《${esc(title)}》</a></span>
+      <span class="rname"><a href="#/reader/${esc(r.reader.persona_id)}">${esc(pname)}</a></span>
+      <span class="chip">${esc(model)}</span>
+      ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读 →</a>` : ""}
+    </div>
+    <div class="rbody">
+      <span class="rscore${devCls}"${devTitle}>${fmt1(r.score)}</span>
+      <div class="rtext">${esc(r.reaction || "")}</div>
+    </div>
+  </div>`;
+}
+
+function renderRecentInto() {
+  const listEl = document.getElementById("recent-list");
+  const moreEl = document.getElementById("recent-more");
+  if (!listEl) return;
+  const items = recentFiltered();
+  const cntEl = document.getElementById("recent-count");
+  const filtered = !!(recentFilter.model || recentFilter.persona || recentFilter.band);
+  if (cntEl) cntEl.textContent = filtered ? `筛出 ${items.length} 条` : "";
+  if (!items.length) {
+    listEl.innerHTML = `<div class="empty">${filtered ? "没有符合筛选的盲读" : "暂无盲读记录"}</div>`;
+    moreEl.innerHTML = "";
+    return;
+  }
+  listEl.innerHTML = items.slice(0, recentShown).map(recentRow).join("\n");
+  const left = items.length - Math.min(recentShown, items.length);
+  moreEl.innerHTML = left > 0
+    ? `<button class="btn" id="recent-more-btn">再展开 ${Math.min(RECENT_STEP, left)} 条（还有 ${left} 条）</button>`
+    : (items.length > RECENT_FIRST ? '<button class="btn" id="recent-fold-btn">收起</button>' : "");
+  const mb = document.getElementById("recent-more-btn");
+  if (mb) mb.onclick = () => { recentShown += RECENT_STEP; renderRecentInto(); };
+  const fb = document.getElementById("recent-fold-btn");
+  if (fb) fb.onclick = () => {
+    recentShown = RECENT_FIRST;
+    renderRecentInto();
+    const sec = document.getElementById("recent-reads");
+    if (sec) sec.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+}
+
+/* ---------- 跟帖（thread）：与盲读是两种信号，只读展示，不进榜单/校准 ---------- */
+
+/* 赞/踩统一视觉：▲青绿=赞、▼赭红=踩（方向+颜色+字三重区分，emoji 太难分辨）。
+   主动票（点赞模式）显著；顺势票（跟帖带来，几乎恒为 up 的弱信号）灰显、加「顺势」前缀分开。
+   ⭐加精：批量投票时"这一批里最扛得住的一条"的相对判断——▲ 普遍偏高（实测八成 up），
+   ⭐ 才是有区分度的正向信号，放在最前面。 */
+function voteBadge(vt) {
+  if (!vt) return "";
+  const up = vt.up || 0, dn = vt.down || 0, bs = vt.best || 0,
+        pu = vt.pg_up || 0, pd = vt.pg_down || 0;
+  if (!up && !dn && !bs && !pu && !pd) return "";
+  const star = bs
+    ? `<span class="vbest" title="加精 ×${bs}：同批横向比较里被评为最扛得住的一条——比普遍偏高的 ▲ 更有区分度">⭐${bs}</span>` : "";
+  const main = (up || dn)
+    ? `<span class="vup">▲${up}</span> <span class="vdown">▼${dn}</span>` : "";
+  const pig = (pu || pd)
+    ? `<span class="vpig" title="跟帖顺势票——回复者几乎总认同自己选来回复的楼层，弱信号，不计入撤评判断">顺势 ▲${pu}${pd ? " ▼" + pd : ""}</span>` : "";
+  return `<span class="chip">${[star, main, pig].filter(Boolean).join(" ")}</span>`;
+}
+
+function isAuthorMarked(readId) {
+  return !!((S.curation[readId] || {}).author_marked);
+}
+
+function authorSeal(readId) {
+  return isAuthorMarked(readId)
+    ? '<span class="author-seal" title="作者藏印：作者亲手标记为值得回看的评语">藏</span>' : "";
+}
+
+async function saveAuthorMark(readId, marked) {
+  await post("/api/curate", { read_id: readId, author_marked: marked });
+  await loadState();
+  if (isAuthorMarked(readId) !== marked) {
+    throw new Error("藏印没有保存：电脑服务仍是旧版。请关闭昼青集窗口后重新打开，再试一次。");
+  }
+}
+
+/* 原始分是读者当场给分；校准分把「这位人设 × 这个模型」平时的松紧映回参考分布。
+   只展示已有的逐条校准结果，不为缺失记录现场猜值。 */
+function scorePair(r, labelled) {
+  const cal = ((S.calibration || {}).reads || {})[r.read_id];
+  const raw = `<span class="score-badge" title="原始评分">${labelled ? "评分 " : ""}${fmt1(r.score)}</span>`;
+  if (cal == null) return raw;
+  return `<span class="score-pair">${raw}<span class="cal-score" title="校准分：按这位人设与扮演模型一贯的松紧换算">${fmt1(cal)}</span></span>`;
+}
+
+function threadChildrenMap() {
+  const m = new Map();
+  for (const r of S.reads) {
+    if (r.context_mode === "thread" && r.thread_ref) {
+      if (!m.has(r.thread_ref)) m.set(r.thread_ref, []);
+      m.get(r.thread_ref).push(r);
+    }
+  }
+  return m;
+}
+
+function threadRoots() {
+  const seen = new Set(), roots = new Map();
+  for (const r of S.reads) {
+    if (r.context_mode !== "thread") continue;
+    let rid = r.thread_ref, guard = new Set();
+    while (rid) {
+      const cur = maps.readById.get(rid);
+      if (!cur) break;
+      if (cur.context_mode !== "thread" || !cur.thread_ref) { roots.set(cur.read_id, cur); break; }
+      if (guard.has(rid)) break;
+      guard.add(rid); rid = cur.thread_ref;
+    }
+  }
+  return [...roots.values()];
+}
+
+function countDescendants(rootId, childrenMap) {
+  let count = 0, stack = [rootId];
+  while (stack.length) {
+    const kids = childrenMap.get(stack.pop()) || [];
+    count += kids.length;
+    for (const k of kids) stack.push(k.read_id);
+  }
+  return count;
+}
+
+/* 最深回复级数（楼主=0，直接回复=1……）；无回复返回 0 */
+function threadMaxDepth(rootId, childrenMap) {
+  let max = 0;
+  (function walk(id, d) {
+    for (const k of (childrenMap.get(id) || [])) {
+      if (d > max) max = d;
+      walk(k.read_id, d + 1);
+    }
+  })(rootId, 1);
+  return max;
+}
+
+/* 参与人数：楼主 + 所有回复者的不同 persona 数 */
+function threadParticipants(rootId, root, childrenMap) {
+  const set = new Set([root.reader.persona_id]);
+  const stack = [rootId];
+  while (stack.length) {
+    for (const k of (childrenMap.get(stack.pop()) || [])) {
+      set.add(k.reader.persona_id); stack.push(k.read_id);
+    }
+  }
+  return set.size;
+}
+
+/* 根评与所有子楼里最后一次活动；只用于索引排序，不解释成热度或质量。 */
+function threadLastActivity(rootId, root, childrenMap) {
+  let latest = root.ts || "";
+  const stack = [rootId];
+  while (stack.length) {
+    for (const k of (childrenMap.get(stack.pop()) || [])) {
+      if ((k.ts || "") > latest) latest = k.ts || latest;
+      stack.push(k.read_id);
+    }
+  }
+  return latest;
+}
+
+/* 跟帖详情返回索引时保留本次浏览筛选；只活在当前页面会话，不写作者数据。 */
+const threadIndexState = { query: "", poem: "", replies: "0", depth: "0", sort: "activity" };
+
+function renderThreads() {
+  app.className = "";
+  const childrenMap = threadChildrenMap();
+  const roots = threadRoots();
+  if (!roots.length) {
+    app.innerHTML = `<h1 class="page-title">跟帖</h1>
+      <p class="page-hint">还没有开始任何跟帖讨论——这是「偶尔办的沙龙」，不是日常，只对少数已有长评的诗定点开。</p>`;
+    return;
+  }
+  const items = roots.map(r => {
+    const poem = maps.poem.get(r.poem_id);
+    const title = poem ? poem.title : r.poem_id;
+    const master = personaName(r.reader.persona_id);
+    return {
+      r, title, master,
+      n: countDescendants(r.read_id, childrenMap),
+      depth: threadMaxDepth(r.read_id, childrenMap),
+      ppl: threadParticipants(r.read_id, r, childrenMap),
+      activity: threadLastActivity(r.read_id, r, childrenMap),
+      vc: voteBadge(S.votes[r.read_id]),
+      key: (title + " " + master).toLowerCase(),
+    };
+  });
+  const poems = [...new Map(items.map(it => [it.r.poem_id, it.title])).entries()]
+    .sort((a, b) => a[1].localeCompare(b[1], "zh-CN"));
+  app.innerHTML = `
+    <h1 class="page-title">跟帖</h1>
+    <p class="page-hint">读者围绕一篇长评展开的讨论，和盲读是两种信号，不评分，永不进榜单/校准。这里按可核对的活动、回复与深度筛选，不虚构“激烈度”。</p>
+    <div class="thread-tools">
+      <input id="thread-search" class="thread-search" type="search" placeholder="搜诗题或楼主…" autocomplete="off">
+      <select id="thread-poem" aria-label="按作品筛选"><option value="">全部作品</option>${poems.map(([id, title]) =>
+        `<option value="${esc(id)}">《${esc(title)}》</option>`).join("")}</select>
+      <select id="thread-replies" aria-label="按回复数筛选">
+        <option value="0">不限回复数</option><option value="1">有回复</option><option value="5">至少 5 层</option><option value="10">至少 10 层</option>
+      </select>
+      <select id="thread-depth" aria-label="按深度筛选">
+        <option value="0">不限深度</option><option value="2">至少 2 级</option><option value="3">至少 3 级</option>
+      </select>
+      <select id="thread-sort" aria-label="跟帖排序">
+        <option value="activity">最近活动</option><option value="replies">回复最多</option><option value="depth">最深讨论</option>
+      </select>
+    </div>
+    <p class="page-hint thread-count" id="thread-count">共 ${items.length} 场跟帖</p>
+    <ul class="thread-list" id="thread-list"></ul>`;
+  const box = app.querySelector("#thread-search");
+  const poemSel = app.querySelector("#thread-poem");
+  const repliesSel = app.querySelector("#thread-replies");
+  const depthSel = app.querySelector("#thread-depth");
+  const sortSel = app.querySelector("#thread-sort");
+  const cnt = app.querySelector("#thread-count");
+  const list = app.querySelector("#thread-list");
+  box.value = threadIndexState.query;
+  poemSel.value = poems.some(([id]) => id === threadIndexState.poem) ? threadIndexState.poem : "";
+  repliesSel.value = threadIndexState.replies;
+  depthSel.value = threadIndexState.depth;
+  sortSel.value = threadIndexState.sort;
+  const refresh = () => {
+    const q = box.value.trim().toLowerCase();
+    const minReplies = +repliesSel.value, minDepth = +depthSel.value;
+    Object.assign(threadIndexState, { query: box.value, poem: poemSel.value,
+      replies: repliesSel.value, depth: depthSel.value, sort: sortSel.value });
+    const shown = items.filter(it => (!q || it.key.includes(q)) &&
+      (!poemSel.value || it.r.poem_id === poemSel.value) && it.n >= minReplies && it.depth >= minDepth);
+    shown.sort((a, b) => sortSel.value === "activity"
+      ? (b.activity || "").localeCompare(a.activity || "") || b.n - a.n
+      : sortSel.value === "depth" ? b.depth - a.depth || b.n - a.n
+        : b.n - a.n || (b.activity || "").localeCompare(a.activity || ""));
+    list.innerHTML = shown.map(it => `<li>
+      <a href="#/thread/${it.r.read_id}">《${esc(it.title)}》</a>
+      <span class="chip">楼主 ${esc(it.master)}</span>
+      <span class="chip">${it.n} 层</span>
+      ${it.depth > 1 ? `<span class="chip">最深 ${it.depth} 级</span>` : ""}
+      <span class="chip">${it.ppl} 人</span>
+      ${it.activity ? `<span class="thread-activity">最近 ${esc(fmtTs(it.activity))}</span>` : ""}${it.vc}</li>`).join("") ||
+      '<li class="empty">没有符合这些条件的讨论。</li>';
+    const active = q || poemSel.value || minReplies || minDepth;
+    cnt.textContent = active ? `${shown.length} / ${items.length} 场跟帖` : `共 ${items.length} 场跟帖`;
+  };
+  box.oninput = refresh;
+  [poemSel, repliesSel, depthSel, sortSel].forEach(el => { el.onchange = refresh; });
+  refresh();
+}
+
+function renderThread(rootId) {
+  app.className = "";
+  const root = maps.readById.get(rootId);
+  if (!root) { app.innerHTML = `<p class="page-hint">找不到这条跟帖。</p>`; return; }
+  const poem = maps.poem.get(root.poem_id);
+  const childrenMap = threadChildrenMap();
+  const meta = S.thread_meta || {};
+
+  function floorVoteChip(readId) {
+    return voteBadge(S.votes[readId]);
+  }
+
+  let nShift = 0; // 整场里读者「改变了判断」的次数，供顶部计数
+
+  function floorHtml(r, depth) {
+    const m = meta[r.read_id] || {};
+    if (m.void) return ""; // void：隐藏不删除，参考 curation.json 先例
+    const kids = (childrenMap.get(r.read_id) || []).slice()
+      .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+    const pv = (S.voter_votes[r.thread_ref] || {})[r.reader.persona_id];
+    const lean = pv === "up" ? ' <span class="vup">▲赞</span>'
+      : pv === "down" ? ' <span class="vdown">▼踩</span>' : "";
+    const shifted = m.stance_changed === true;
+    if (shifted) nShift++;
+    const stanceTag = shifted
+      ? `<span class="chip warm">改变了判断${lean}</span>`
+      : m.stance_changed === false ? `<span class="chip">立场未变${lean}</span>` : "";
+    // 缩进封顶：深楼不再复利式推出屏；逐层描边配色 + 级数标记接手表达嵌套
+    const indent = Math.min(depth, 6) * 1.5;
+    const dcls = `fl-d${Math.min(depth, 6)}`;
+    // 有子楼就给一个折叠钮：折叠时藏起整支子树，露出「▸ N层」提示深楼有多大
+    const nDesc = kids.length ? countDescendants(r.read_id, childrenMap) : 0;
+    const toggle = kids.length
+      ? `<button class="floor-toggle" title="折叠/展开这一支"><span class="caret"></span><span class="fold-n">${nDesc} 层</span></button>`
+      : "";
+    // 每层包一个 .floor-branch 容器（floor 本体 + .floor-kids 子树），折叠只切子树 display，
+    // margin-left 仍按绝对深度算、不复利，视觉与之前一致
+    return `
+      <div class="floor-branch${shifted ? " stance-shift" : ""}">
+        <div class="thread-floor ${dcls}" style="margin-left:${indent}em">
+          <p class="floor-meta">${toggle}<span class="floor-depth">${depth}级</span>
+            <b><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></b>
+            <span class="chip">${esc(modelAlias(r.reader.model || ""))}</span>
+            ${stanceTag} ${floorVoteChip(r.read_id)}</p>
+          <div class="floor-text">${paras(r.reaction || r.long_form || "")}</div>
+        </div>
+        ${kids.length ? `<div class="floor-kids">${kids.map(k => floorHtml(k, depth + 1)).join("")}</div>` : ""}
+      </div>`;
+  }
+
+  const topKids = (childrenMap.get(rootId) || []).slice()
+    .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+  const floorsHtml = topKids.map(k => floorHtml(k, 1)).join(""); // 先渲染（会累加 nShift）
+  const nFloors = countDescendants(rootId, childrenMap);
+  const maxDepth = threadMaxDepth(rootId, childrenMap);
+  const ppl = threadParticipants(rootId, root, childrenMap);
+  const foldCtrl = maxDepth > 1
+    ? `<button class="btn thread-foldall" id="thread-foldall">全部折叠</button>` : "";
+
+  app.innerHTML = `
+    <p>
+      <a class="back" href="#/threads">← 跟帖</a>
+      ${poem ? `<a class="back" style="margin-left:1em" href="#/poem/${esc(root.poem_id)}">→ 原诗评论区</a>` : ""}
+    </p>
+    <h1 class="page-title">《${esc(poem ? poem.title : root.poem_id)}》跟帖</h1>
+    <p class="page-hint thread-summary">${nFloors} 层回复${maxDepth > 1 ? ` · 最深 ${maxDepth} 级` : ""} · ${ppl} 人参与${nShift ? ` · <span class="shift-count">${nShift} 次立场变化</span>` : ""} ${foldCtrl}</p>
+    <div class="thread-floor thread-root">
+      <p class="floor-meta"><b>楼主 · <a href="#/reader/${esc(root.reader.persona_id)}">${esc(personaName(root.reader.persona_id))}</a></b>
+        ${floorVoteChip(rootId)}</p>
+      <div class="floor-text">${paras(root.long_form || root.reaction || "")}</div>
+    </div>
+    ${floorsHtml}`;
+
+  // 折叠：点某层的钮切它自己那支；「全部折叠/展开」一键切所有带子树的层
+  app.querySelectorAll(".floor-toggle").forEach(btn => {
+    btn.onclick = () => btn.closest(".floor-branch").classList.toggle("collapsed");
+  });
+  const foldAll = app.querySelector("#thread-foldall");
+  if (foldAll) {
+    let folded = false;
+    foldAll.onclick = () => {
+      folded = !folded;
+      app.querySelectorAll(".floor-branch").forEach(b => {
+        if (b.querySelector(":scope > .floor-kids")) b.classList.toggle("collapsed", folded);
+      });
+      foldAll.textContent = folded ? "全部展开" : "全部折叠";
+    };
+  }
+}
+
+/* ---------- 路由 ---------- */
+
+/* ---------- 词云 ---------- */
+/* 数据实时来自 /api/wordcloud（服务端 jieba 按当前语料/票据算、mtime 缓存）。
+ * 布局：√(词频秩) 均匀面密度螺旋——秩∝r² ⇒ 全盘密度一致，中心不堆、边缘不空。
+ * 暖纸底、墨字，颜色沿「冷 ink-3 → 热 accent(诗)/warm(评)」按频次插值。
+ * 悬停点亮共现伙伴与一句真实诗/评。离开页面自动停 rAF。 */
+let _wcData = null;
+let _wcResizeHandler = null;   // 只保留一个 resize 监听，切页重进时先摘旧的（防累积泄漏）
+
+async function renderWordcloud() {
+  app.innerHTML = `<div class="wc">
+    <div class="wc-head">
+      <div>
+        <p class="wc-eyebrow">词云 · Word Field</p>
+        <h1 class="wc-title" id="wc-title">诗 的 星 图</h1>
+        <p class="wc-sub" id="wc-sub">正在数点每个词……</p>
+      </div>
+      <div class="wc-switch" role="tablist">
+        <button data-mode="poems" class="on">诗正文</button>
+        <button data-mode="reasons">读者反应</button>
+      </div>
+    </div>
+    <div class="wc-stage">
+      <canvas id="wc-canvas"></canvas>
+      <div class="wc-card" id="wc-card"></div>
+      <p class="wc-hint">悬停看共现与例句 · 点击查看它出现过的句子</p>
+    </div>
+    <section class="wc-bars">
+      <p class="wc-eyebrow">诚实读数 · Honest Scale</p>
+      <h2>词频榜</h2>
+      <p class="wc-note" id="wc-metric-note">字号会骗眼睛——这里给词真实的出现次数。也可切到“作品覆盖”，同一首作品重复出现只算一次。</p>
+      <div class="wc-list-tools">
+        <div class="wc-metric" aria-label="词频统计口径">
+          <button class="btn on" data-wc-metric="frequency">出现次数</button>
+          <button class="btn" data-wc-metric="coverage">作品覆盖</button>
+        </div>
+        <input id="wc-search" type="search" placeholder="在完整词频中找词" autocomplete="off">
+        <span id="wc-list-count"></span>
+      </div>
+      <ol class="wc-barlist" id="wc-barlist"></ol>
+      <div class="wc-list-more" id="wc-list-more"></div>
+    </section>
+  </div>`;
+
+  if (!_wcData) {
+    try {
+      if (IS_MOBILE && S.wordcloud) _wcData = S.wordcloud;
+      else {
+        const headers = IS_MOBILE ? { "X-ZQ-Mobile-Token": storageGet(MOBILE_TOKEN_KEY) || "" } : {};
+        const res = IS_MOBILE
+          ? await mobileApiFetch("/api/wordcloud", { headers })
+          : await fetch("/api/wordcloud", { headers });
+        _wcData = await res.json();
+      }
+    } catch (e) {
+      document.getElementById("wc-sub").textContent = "词云数据加载失败：" + e;
+      return;
+    }
+  }
+  if (location.hash.replace(/^#/, "").split("/").filter(Boolean)[0] !== "wordcloud") return;
+  wcStart(_wcData);
+}
+
+function localWordContext(mode, word) {
+  if (mode !== "poems") return { mode, word, documents: 0, hits: 0, rows: [], offline: true };
+  const rows = [], docs = new Set();
+  for (const poem of S.poems) {
+    if (poem.visibility !== "public") continue;
+    const matched = [...new Set(String(poem.content || "").split(/\r?\n/)
+      .map(line => line.trim()).filter(line => line && line.toLocaleLowerCase().includes(word.toLocaleLowerCase())))];
+    if (matched.length) docs.add(poem.id);
+    for (const line of matched) rows.push({ poem_id: poem.id, title: poem.title, text: line });
+  }
+  return { mode, word, documents: docs.size, hits: rows.length, rows: rows.slice(0, 100),
+    truncated: rows.length > 100, offline: true };
+}
+
+async function openWordContext(mode, word) {
+  const back = document.createElement("div");
+  back.className = "modal-back wc-context-back";
+  back.setAttribute("role", "dialog");
+  back.setAttribute("aria-modal", "true");
+  back.innerHTML = `<div class="modal wc-context-modal">
+    <div class="wc-context-head"><div><p class="wc-eyebrow">词句索引</p><h2>${esc(word)}</h2></div>
+      <button class="btn" data-x>关闭</button></div>
+    <div class="wc-context-body"><p class="loading">正在沿作品边缘寻找……</p></div>
+  </div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", e => { if (e.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  document.body.appendChild(back);
+  try {
+    let data;
+    if (IS_SNAPSHOT) data = localWordContext(mode, word);
+    else {
+      const headers = IS_MOBILE ? { "X-ZQ-Mobile-Token": storageGet(MOBILE_TOKEN_KEY) || "" } : {};
+      const url = `/api/word-context?mode=${encodeURIComponent(mode)}&word=${encodeURIComponent(word)}`;
+      const res = IS_MOBILE
+        ? await mobileApiFetch(url, { headers })
+        : await fetch(url, { headers });
+      data = await res.json();
+      if (!res.ok) throw new Error(data.error || res.status);
+    }
+    const kind = mode === "poems" ? "首作品" : "条投票理由";
+    const rows = data.rows || [];
+    back.querySelector(".wc-context-body").innerHTML = `
+      <p class="wc-context-count">见于 ${data.documents} ${kind} · ${data.hits} 处${data.truncated ? " · 只展示前 100 处" : ""}</p>
+      ${rows.length ? `<div class="wc-context-list">${rows.map(row => `<a href="#/poem/${esc(row.poem_id || "")}" class="wc-context-row">
+        <b>《${esc(row.title || "未题")}》</b><span>${esc(row.text || "")}</span></a>`).join("")}</div>`
+        : `<p class="empty">${data.offline && mode !== "poems" ? "离线留影没有携带投票理由索引；连接电脑后再查看。" : "没有找到可展示的句子。"}</p>`}`;
+    back.querySelectorAll(".wc-context-row").forEach(a => a.onclick = close);
+  } catch (error) {
+    back.querySelector(".wc-context-body").innerHTML = `<p class="empty">词句索引加载失败：${esc(error.message || String(error))}</p>`;
+  }
+}
+
+function wcStart(data) {
+  const canvas = document.getElementById("wc-canvas");
+  const card = document.getElementById("wc-card");
+  const stage = canvas.parentElement;
+  const ctx = canvas.getContext("2d");
+  const serif = getComputedStyle(document.body).fontFamily;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  // 色：冷 → 热。ink-3 = #a29786；热色随模式取青瓷或赭。
+  const COLD = [162, 151, 134];
+  const HOT = { poems: [47, 109, 98], reasons: [164, 89, 61] };
+  const mix = (a, b, t) => `rgb(${a.map((v, i) => Math.round(v + (b[i] - v) * t)).join(",")})`;
+
+  const MODES = {
+    poems: { title: "诗 的 星 图", sub: n => `${n} 首诗 · 词的大小＝它在诗里出现的<b>次数</b>` },
+    reasons: { title: "评 的 星 图", sub: n => `${n} 条读者投票理由 · 词的大小＝它在理由里出现的<b>次数</b>` },
+  };
+
+  let mode = "poems";
+  let nodes = [];        // 当前布局的词节点
+  let hovered = -1;
+  let t0 = performance.now();
+  let raf = 0;
+  let barShown = 40;
+  let barQuery = "";
+  let barMetric = "frequency";
+
+  function fit() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = stage.clientWidth, h = stage.clientHeight;
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { w, h };
+  }
+
+  function layout() {
+    const { w, h } = fit();
+    const src = (data[mode] && data[mode].words) || [];
+    const words = src.slice(0, 100);
+    const N = words.length;
+    document.getElementById("wc-title").textContent = MODES[mode].title;
+    document.getElementById("wc-sub").innerHTML =
+      MODES[mode].sub(((data[mode] || {}).meta || {})[mode] || N);
+
+    nodes = [];
+    if (!N) return;
+    const cmax = words[0].c, cmin = words[N - 1].c;
+    const cx = w / 2, cy = h * 0.48;
+    const maxR = Math.min(w, h) * 0.5;
+    const coreR = maxR * 0.05, spanR = maxR * 0.92;
+    const vsq = Math.min(1, h / w * 1.35);   // 纵向压扁，让词云铺满偏宽的舞台
+    const minPx = Math.max(11, Math.min(w, h) * 0.02);
+    const maxPx = Math.min(w, h) * 0.11;
+
+    for (let i = 0; i < N; i++) {
+      const wd = words[i];
+      const t = cmax === cmin ? 1 : (wd.c - cmin) / (cmax - cmin);
+      const size = minPx + Math.pow(t, 0.7) * (maxPx - minPx);
+      ctx.font = `600 ${size}px ${serif}`;
+      const tw = ctx.measureText(wd.w).width;
+      const bw = tw + size * 0.42, bh = size * 1.16;
+      const rankFrac = N > 1 ? i / (N - 1) : 0;
+      const floorR = coreR + Math.sqrt(rankFrac) * spanR;
+
+      let theta = Math.random() * Math.PI * 2, x = cx, y = cy, ok = false;
+      for (let s = 0; s < 1400; s++) {
+        const rad = floorR + 2.3 * theta;   // 阿基米德螺旋：从 floorR 起缓缓外扩找空位
+        x = cx + Math.cos(theta) * rad;
+        y = cy + Math.sin(theta) * rad * vsq;
+        theta += 0.32;
+        if (x - bw / 2 < 6 || x + bw / 2 > w - 6 || y - bh / 2 < 6 || y + bh / 2 > h - 6) continue;
+        ok = true;
+        for (const p of nodes) {
+          if (Math.abs(p.x - x) * 2 < p.bw + bw && Math.abs(p.y - y) * 2 < p.bh + bh) { ok = false; break; }
+        }
+        if (ok) break;
+      }
+      if (!ok) continue;
+      nodes.push({
+        w: wd.w, c: wd.c, ex: wd.ex || "",
+        partners: (wd.p || []).map(pp => pp[0]),
+        x, y, bw, bh, size, tint: t,
+        appear: i * 9,   // 入场按秩错开（ms）
+        // 呼吸相位
+        ph: Math.random() * Math.PI * 2,
+      });
+    }
+    // 伙伴解析成节点索引（只连也被放下的词）
+    const byName = new Map(nodes.map((n, i) => [n.w, i]));
+    for (const n of nodes) n.pIdx = n.partners.map(nm => byName.get(nm)).filter(v => v != null);
+  }
+
+  function frame(now) {
+    if (!document.body.contains(canvas)) { cancelAnimationFrame(raf); return; }
+    const { w, h } = { w: stage.clientWidth, h: stage.clientHeight };
+    ctx.clearRect(0, 0, w, h);
+    const hot = HOT[mode];
+
+    // 悬停时先画共现连线（在词底下）
+    if (hovered >= 0 && nodes[hovered]) {
+      const n = nodes[hovered];
+      ctx.lineWidth = 1;
+      for (const j of n.pIdx) {
+        const m = nodes[j];
+        ctx.strokeStyle = "rgba(47,109,98,.28)";
+        ctx.beginPath(); ctx.moveTo(n.x, n.y); ctx.lineTo(m.x, m.y); ctx.stroke();
+      }
+    }
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    for (let i = 0; i < nodes.length; i++) {
+      const n = nodes[i];
+      // 减动效偏好：跳过升起+淡入的入场，直接呈现（呼吸下方也已按 reduce 关掉）
+      const life = reduce ? 1 : Math.min(1, Math.max(0, (now - t0 - n.appear) / 520));
+      if (life <= 0) continue;
+      const ease = 1 - Math.pow(1 - life, 3);
+      const rise = (1 - ease) * 16;
+      const br = reduce ? 0 : Math.sin(now / 1600 + n.ph) * n.size * 0.02;
+      const isHot = hovered < 0 || i === hovered || (nodes[hovered] && nodes[hovered].pIdx.includes(i));
+      let col = mix(COLD, hot, n.tint);
+      let alpha = ease * (isHot ? 1 : 0.28);
+      if (i === hovered) col = mix(COLD, hot, Math.min(1, n.tint + 0.4));
+      ctx.font = `600 ${n.size}px ${serif}`;
+      ctx.fillStyle = col;
+      ctx.globalAlpha = alpha;
+      ctx.fillText(n.w, n.x + br, n.y - rise);
+    }
+    ctx.globalAlpha = 1;
+    raf = requestAnimationFrame(frame);
+  }
+
+  function pick(px, py) {
+    for (let i = nodes.length - 1; i >= 0; i--) {
+      const n = nodes[i];
+      if (Math.abs(px - n.x) <= n.bw / 2 && Math.abs(py - n.y) <= n.bh / 2) return i;
+    }
+    return -1;
+  }
+
+  function onMove(e) {
+    const rect = canvas.getBoundingClientRect();
+    const px = e.clientX - rect.left, py = e.clientY - rect.top;
+    const i = pick(px, py);
+    if (i !== hovered) {
+      hovered = i;
+      canvas.style.cursor = i >= 0 ? "pointer" : "default";
+      if (i >= 0) showCard(nodes[i], px, py); else card.classList.remove("show");
+    } else if (i >= 0) {
+      placeCard(px, py);
+    }
+  }
+
+  function showCard(n, px, py) {
+    card.innerHTML = `<div><span class="wc-card-w">${esc(n.w)}</span>
+      <span class="wc-card-c">出现 ${n.c} 次</span></div>
+      <div class="wc-card-ex${n.ex ? "" : " empty"}">${n.ex ? "「" + esc(n.ex) + "」" : "（无合适例句）"}</div>`;
+    card.classList.add("show");
+    placeCard(px, py);
+  }
+
+  function placeCard(px, py) {
+    const sw = stage.clientWidth, sh = stage.clientHeight;
+    const cw = card.offsetWidth, ch = card.offsetHeight;
+    let x = px + 16, y = py + 16;
+    if (x + cw > sw - 8) x = px - cw - 16;
+    if (y + ch > sh - 8) y = py - ch - 16;
+    card.style.left = Math.max(8, x) + "px";
+    card.style.top = Math.max(8, y) + "px";
+  }
+
+  function buildBars() {
+    const section = data[mode] || {};
+    const src = (barMetric === "coverage" ? section.coverage : section.ranking) || section.words || [];
+    const filtered = barQuery
+      ? src.filter(wd => String(wd.w).toLocaleLowerCase().includes(barQuery))
+      : src;
+    const rows = filtered.slice(0, barShown);
+    const max = src.length ? src[0].c : 1;
+    const count = document.getElementById("wc-list-count");
+    if (count) count.textContent = barQuery
+      ? `找到 ${filtered.length} 个 · 全榜 ${src.length} 个`
+      : `已显示 ${rows.length} / ${src.length}`;
+    document.getElementById("wc-barlist").innerHTML = rows.map((wd, i) => `
+      <li class="wc-barrow">
+        <span class="wc-rank">${barQuery ? src.indexOf(wd) + 1 : i + 1}</span>
+        <button class="wc-word" data-wc-word="${esc(wd.w)}" title="查看这个词出现过的句子">${esc(wd.w)}</button>
+        <span class="wc-bartrack"><span class="wc-barfill" style="width:${Math.max(4, wd.c / max * 100)}%"></span></span>
+        <span class="wc-cnt">${wd.c}</span>
+      </li>`).join("");
+    const more = document.getElementById("wc-list-more");
+    const left = filtered.length - rows.length;
+    more.innerHTML = left > 0
+      ? `<button class="btn" id="wc-more-btn">再展开 ${Math.min(100, left)} 个（还有 ${left} 个）</button>`
+      : (rows.length > 40 ? '<button class="btn" id="wc-fold-btn">收起词频榜</button>' : "");
+    document.getElementById("wc-more-btn")?.addEventListener("click", () => { barShown += 100; buildBars(); });
+    document.getElementById("wc-fold-btn")?.addEventListener("click", () => {
+      barShown = 40; buildBars(); document.querySelector(".wc-bars")?.scrollIntoView({ behavior: "smooth" });
+    });
+    document.querySelectorAll("[data-wc-word]").forEach(btn => {
+      btn.onclick = () => openWordContext(mode, btn.dataset.wcWord);
+    });
+  }
+
+  function switchMode(m) {
+    if (m === mode) return;
+    mode = m;
+    barShown = 40; barQuery = "";
+    const search = document.getElementById("wc-search");
+    if (search) search.value = "";
+    document.getElementById("wc-metric-note").textContent = barMetric === "coverage"
+      ? (mode === "poems" ? "作品覆盖：同一首作品里重复出现只算一次，适合看一个词在语料中的广度。"
+        : "理由覆盖：同一条投票理由里重复出现只算一次，适合看这个词跨多少条判断出现。")
+      : "出现次数：保留词在同一作品或理由中的重复，适合看它真实被写了多少次。";
+    hovered = -1; card.classList.remove("show");
+    t0 = performance.now();
+    layout(); buildBars();
+  }
+
+  app.querySelectorAll(".wc-switch button").forEach(b => {
+    b.onclick = () => {
+      app.querySelectorAll(".wc-switch button").forEach(x => x.classList.toggle("on", x === b));
+      switchMode(b.dataset.mode);
+    };
+  });
+  canvas.addEventListener("mousemove", onMove);
+  canvas.addEventListener("mouseleave", () => { hovered = -1; card.classList.remove("show"); });
+  canvas.addEventListener("click", e => {
+    const rect = canvas.getBoundingClientRect();
+    const i = pick(e.clientX - rect.left, e.clientY - rect.top);
+    if (i >= 0) openWordContext(mode, nodes[i].w);
+  });
+  document.getElementById("wc-search")?.addEventListener("input", e => {
+    barQuery = e.currentTarget.value.trim().toLocaleLowerCase();
+    barShown = 40;
+    buildBars();
+  });
+  app.querySelectorAll("[data-wc-metric]").forEach(btn => {
+    btn.onclick = () => {
+      barMetric = btn.dataset.wcMetric;
+      barShown = 40;
+      app.querySelectorAll("[data-wc-metric]").forEach(x => x.classList.toggle("on", x === btn));
+      document.getElementById("wc-metric-note").textContent = barMetric === "coverage"
+        ? (mode === "poems" ? "作品覆盖：同一首作品里重复出现只算一次，适合看一个词在语料中的广度。"
+          : "理由覆盖：同一条投票理由里重复出现只算一次，适合看这个词跨多少条判断出现。")
+        : "出现次数：保留词在同一作品或理由中的重复，适合看它真实被写了多少次。";
+      buildBars();
+    };
+  });
+  let rt;
+  const onResize = () => { clearTimeout(rt); rt = setTimeout(() => { if (document.body.contains(canvas)) layout(); }, 150); };
+  if (_wcResizeHandler) window.removeEventListener("resize", _wcResizeHandler);  // 摘掉上次的，避免累积
+  _wcResizeHandler = onResize;
+  window.addEventListener("resize", onResize);
+
+  layout();
+  buildBars();
+  raf = requestAnimationFrame(frame);
+}
+
+function showRouteError(error) {
+  app.className = "";
+  const message = error?.message || String(error || "未知错误");
+  let mobileHint = "请确认本地服务仍在运行，然后刷新页面。";
+  if (IS_MOBILE) {
+    if (/还没有和电脑配对|没有配对口令/.test(message)) {
+      mobileHint = IS_PORTABLE_MOBILE
+        ? "这台设备还没有保存连接签。请在电脑设置里开启手机访问，再扫描“带到安卓”二维码。"
+        : "当前地址里没有连接签，请重新扫描电脑上的二维码。";
+    } else if (/口令无效|401/.test(message)) {
+      mobileHint = "这张连接签已经撤销、过期或被电脑重新生成。请回电脑保持手机入口开启，再扫描当前二维码。";
+    } else {
+      mobileHint = IS_PORTABLE_MOBILE
+        ? "地址与连接签已收到，但还没有成功保存第一份内容。请让手机和电脑连接同一 Wi‑Fi，保持电脑入口开启，并允许浏览器访问本地网络。"
+        : "地址与连接签已收到，但电脑暂时不可达。请确认两台设备仍在同一 Wi‑Fi、电脑入口保持开启，并允许当前浏览器访问本地网络。";
+    }
+  }
+  app.innerHTML = `<section class="board load-error"><h1 class="page-title">这一页暂时没有展开</h1>
+    <p class="page-hint">${esc(message)}</p>
+    <p class="board-note">${mobileHint}</p><button class="btn primary" id="route-retry">重新尝试</button></section>`;
+  document.getElementById("route-retry").onclick = () => location.reload();
+}
+
+window.addEventListener("hashchange", () => route().catch(showRouteError));
+
+async function route() {
+  if (!S) await loadState();
+  const h = location.hash.replace(/^#/, "") || "/";
+  const seg = h.split("/").filter(Boolean);
+  document.getElementById("book-print-page-style")?.remove();
+  window.scrollTo(0, 0);
+  if (seg.length === 0) return renderHome();
+  if (seg[0] === "boards") return renderBoards();
+  if (seg[0] === "settings") return renderSettings();
+  if (seg[0] === "all") return renderAll();
+  if (seg[0] === "timeline") return renderTimeline();
+  if (seg[0] === "stats") return renderStats();
+  if (seg[0] === "wordcloud") return renderWordcloud();
+  if (seg[0] === "readers") return renderReaders();
+  if (seg[0] === "poem" && seg[1]) return renderPoem(seg[1], seg[2] === "reads");
+  if (seg[0] === "read" && seg[1]) return renderDeepRead(seg[1]);
+  if (seg[0] === "board" && seg[1]) return renderBoardFull(seg[1]);
+  if (IS_MOBILE && (seg[0] === "reader-new" || seg[0] === "reader-edit")) return renderMobileDesk();
+  if (seg[0] === "reader-new") return renderPersonaEdit(null);
+  if (seg[0] === "reader-edit" && seg[1]) return renderPersonaEdit(seg[1]);
+  if (seg[0] === "reader" && seg[1]) return renderReader(seg[1]);
+  if (seg[0] === "threads") return renderThreads();
+  if (seg[0] === "thread" && seg[1]) return renderThread(seg[1]);
+  if (seg[0] === "books") {
+    if (IS_MOBILE) return renderMobileDesk();
+    if (seg[1] === "preview") return renderBookPreview();
+    if (seg[1] === "print") return renderBookPrint();
+    return renderBooks();
+  }
+  renderBoards();
+}
+
+/* 首页（#/）落地到作者偏好的那一页；顶栏「榜单」固定走 #/boards */
+function renderHome() {
+  const map = { boards: renderBoards, readers: renderReaders,
+    timeline: renderTimeline, stats: renderStats, all: renderAll };
+  return (map[(S.settings || {}).default_view] || renderBoards)();
+}
+
+/* 站点身份（集名/副题/页脚句）从设置应用到静态骨架；默认值由服务端合并下发 */
+function applyBranding() {
+  const st = S.settings || {};
+  const t = st.site_title || "昼青集", sub = st.site_subtitle || "";
+  document.title = sub ? `${t} · ${sub}` : t;
+  const brand = document.querySelector(".brand");
+  if (brand) brand.innerHTML = `${esc(t)}${sub ? `<span class="brand-sub">${esc(sub)}</span>` : ""}`;
+  const foot = document.querySelector(".site-foot");
+  if (foot) {
+    const v = S.version ? `v${esc(S.version)}` : "";
+    foot.innerHTML = `${esc(st.footer_text || "")}${v ? ` <span class="foot-ver">${v}</span>` : ""}`;
+  }
+}
+
+function compactWhen(value) {
+  if (!value) return "未知时间";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value).replace("T", " ").slice(0, 16);
+  return d.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+function applyModeChrome() {
+  document.body.classList.toggle("mobile-mode", IS_MOBILE);
+  document.body.classList.toggle("snapshot-mode", IS_SNAPSHOT);
+  const ribbon = document.getElementById("mobile-ribbon");
+  if (!IS_MOBILE || !ribbon) return;
+  ribbon.hidden = false;
+  const label = mobileConnection.online ? "已连到电脑" : "离线留影";
+  const detail = mobileConnection.online
+    ? `内容已更新 · ${compactWhen(mobileConnection.savedAt)}`
+    : `留影时间 · ${compactWhen(mobileConnection.savedAt)}`;
+  ribbon.innerHTML = `<span class="mobile-ribbon-mark">掌中册</span><b>${label}</b><span>${detail}</span>`;
+  const settingsLink = document.querySelector('.site-head nav a[href="#/settings"]');
+  if (settingsLink) settingsLink.textContent = "掌中";
+  document.querySelectorAll("[data-author-only]").forEach(el => { el.hidden = true; });
+  const nav = document.querySelector(".site-head nav");
+  if (nav && !nav.dataset.mobileOrder) {
+    const links = new Map([...nav.querySelectorAll("a")].map(a => [a.getAttribute("href"), a]));
+    ["#/boards", "#/all", "#/wordcloud", "#/threads", "#/settings", "#/readers", "#/timeline", "#/stats"]
+      .forEach(href => { if (links.has(href)) nav.appendChild(links.get(href)); });
+    nav.dataset.mobileOrder = "primary-first";
+  }
+}
+
+/* ---------- 榜单页 ---------- */
+
+function boardList(items, metaFn, goReads) {
+  if (!items.length) return `<p class="empty">还没有足够的阅读记录。跟 agent 说一声「跑一轮」。</p>`;
+  const suffix = goReads ? "/reads" : "";
+  return "<ol>" + items.map(p => `<li>
+      <span class="t"><a href="#/poem/${p.id}${suffix}">${esc(p.title)}</a>${authorChip(p)}</span>
+      <span class="m">${metaFn(p)}</span></li>`).join("") + "</ol>";
+}
+
+const poemSize = p => p.content.replace(/\s/g, "").length;
+const fmt2 = x => x.toFixed(2);
+/* 质 = 展示质分：逐条校准 → 诗级贝叶斯聚合 → 方差匹配展示；最后一步只拉开刻度，不改名次。 */
+const qm = s => s.cal != null
+  ? `<span title="展示质分 ${fmt2(s.cal)}；拉伸前校准贝叶斯 ${fmt2(s.calBase)}；原始均分 ${fmt2(s.mean)}。方差匹配只改变显示刻度，不改变校准榜名次。">质 ${fmt2(s.cal)} · 均 ${fmt1(s.mean)}</span>`
+  : `均 ${fmt1(s.mean)}`;
+const sMeta = p => { const s = stats(p.id); return `${qm(s)} · ${s.n} 读`; };
+const dMeta = p => { const s = stats(p.id); return `σ ${fmt1(s.sd)} · ${qm(s)} · ${s.n} 读`; };
+const rMeta = p => { const s = stats(p.id); return s.n ? `${qm(s)} · ${s.n} 读` : "未读"; };
+const zMeta = p => `${poemSize(p)} 字`;
+const gMeta = p => { const s = stats(p.id); return s.n ? `均 ${fmt1(s.mean)} · ${s.n} 读` : "未读"; };
+
+/* 榜单的唯一定义处：预览（前 10）与完整榜共用，保证两边永远一致 */
+function boardDefs() {
+  const ps = pool();
+  const key = s => s.cal != null ? s.cal : s.mean;   // 有校准分按校准分排，没有回退均分
+  const byScore = arr => arr
+    .map(p => ({ p, s: stats(p.id) }))
+    .filter(x => x.s.n >= 1)
+    .sort((a, b) => key(b.s) - key(a.s) || b.s.n - a.s.n)
+    .map(x => x.p);
+
+  const sorted = [...ps].sort((a, b) => poemSize(b) - poemSize(a));
+  const third = Math.max(1, Math.floor(sorted.length / 3));
+  const ciPool = ps.filter(p => p.genre === "词");
+  const ciRated = byScore(ciPool);
+
+  return {
+    hero: { title: "招牌榜", note: "众读者盲读后的展示质分最高（每首至少 3 次阅读；质经过逐条校准、诗级收缩与显示尺度拉伸，均为原始均分；拉伸不改变名次）", meta: sMeta,
+      items: ps.map(p => ({ p, s: stats(p.id) })).filter(x => x.s.n >= 3)
+        .sort((a, b) => key(b.s) - key(a.s)).map(x => x.p) },
+    scores: { title: "完整打分榜", note: "所有被读过的作品，按校准贝叶斯聚合后的名次排列；页面显示的是方差匹配后的质分，读数少的作品仍会向全局均值收缩", meta: sMeta,
+      items: byScore(ps) },
+    polar: { title: "最两极榜", note: "把读者劈成两半、方差最大的诗——多义、危险、可能最好（至少 4 次阅读）", meta: dMeta,
+      items: ps.map(p => ({ p, s: stats(p.id) })).filter(x => x.s.n >= 4)
+        .sort((a, b) => b.s.sd - a.s.sd).map(x => x.p) },
+    ci: { title: "诗词榜", note: "词作按盲读均分排（未读的排后）", meta: rMeta,
+      items: ciRated.concat(ciPool.filter(p => !ciRated.includes(p))) },
+    long: { title: "长诗榜", note: "篇幅前 1/3 里按盲读均分排", meta: sMeta,
+      items: byScore(sorted.slice(0, third)) },
+    short: { title: "短诗榜", note: "篇幅后 1/3 里按盲读均分排", meta: sMeta,
+      items: byScore(sorted.slice(-third)) },
+    favs: { title: "作者偏爱", note: "作者亲手标记「我觉得好」的诗（按标记时间）", meta: rMeta,
+      items: ps.filter(p => isFav(p.id))
+        .sort((a, b) => (S.favs[b.id].ts || "").localeCompare(S.favs[a.id].ts || "")) },
+    longest: { title: "最长", note: "按字数", meta: zMeta, items: sorted },
+    shortest: { title: "最短", note: "按字数", meta: zMeta, items: [...sorted].reverse() },
+  };
+}
+
+/* 非诗文体榜：散文/杂文/小说等判据不同，不与诗同榜（它们 ai_read=false、不进 pool()，
+   也不进诗的校准）；这里单独按各自文体的原始均分排，给非诗作品一个可发现的入口。
+   只收 public、非诗类、非草稿、且至少被读过一次的作品。 */
+function nonPoetryGenreBoards() {
+  const hidden = new Set((S.settings || {}).hidden_genre_boards || []);
+  const cand = S.poems.filter(p => p.visibility === "public" &&
+    !POETRY_GENRES.includes(p.genre) && p.genre && p.genre !== "草稿" && !hidden.has(p.genre));
+  const genres = [...new Set(cand.map(p => p.genre))];
+  const boards = [];
+  for (const g of genres) {
+    const items = cand.filter(p => p.genre === g)
+      .map(p => ({ p, s: stats(p.id) }))
+      .filter(x => x.s.n >= 1)
+      .sort((a, b) => b.s.mean - a.s.mean || b.s.n - a.s.n)
+      .map(x => x.p);
+    if (items.length) boards.push({ genre: g, items });
+  }
+  return boards;
+}
+
+/* 读者的手：每个人设给分的偏好统计 */
+function readerRanking() {
+  const rows = [];
+  for (const persona of S.personas) {
+    if (persona.superseded_by) continue;
+    const rs = S.reads.filter(r => r.context_mode === "blind" &&
+      r.reader.persona_id === persona.persona_id && !isHidden(r.read_id));
+    if (!rs.length) { rows.push({ persona, n: 0 }); continue; }
+    const scores = rs.map(r => r.score);
+    const mean = scores.reduce((a, b) => a + b, 0) / scores.length;
+    const sd = Math.sqrt(scores.reduce((a, b) => a + (b - mean) ** 2, 0) / scores.length);
+    rows.push({ persona, n: scores.length, mean, sd,
+      min: Math.min(...scores), max: Math.max(...scores), reads: rs });
+  }
+  return rows.sort((a, b) => (b.mean ?? -1) - (a.mean ?? -1) || b.n - a.n);
+}
+
+let readerEchoSort = "best";
+
+/* 兼容已经开着的旧服务进程：新版 server 会直接下发 persona_echo；若当前进程
+   尚未重启、没有这个字段，就用同一口径从现有 reads/votes/curation 即时重建。 */
+function derivePersonaEcho() {
+  const echo = {};
+  for (const p of S.personas) if (!p.superseded_by) {
+    echo[p.persona_id] = {
+      comments: 0, voted_comments: 0, up: 0, down: 0, best: 0, author_marks: 0,
+    };
+  }
+  for (const read of S.reads) {
+    if (read.context_mode !== "blind" || isHidden(read.read_id)) continue;
+    const row = echo[(read.reader || {}).persona_id];
+    if (!row) continue;
+    row.comments++;
+    const tally = S.votes[read.read_id] || {};
+    row.up += tally.up || 0;
+    row.down += tally.down || 0;
+    row.best += tally.best || 0;
+    row.author_marks += isAuthorMarked(read.read_id) ? 1 : 0;
+    if (["up", "down", "skip", "best"].some(k => (tally[k] || 0) > 0)) row.voted_comments++;
+  }
+  return echo;
+}
+
+function readerEchoRows() {
+  if (!Object.keys(S.persona_echo).length) S.persona_echo = derivePersonaEcho();
+  return S.personas.filter(p => !p.superseded_by).map(persona => {
+    const row = S.persona_echo[persona.persona_id] || {
+      comments: 0, voted_comments: 0, up: 0, down: 0, best: 0, author_marks: 0,
+    };
+    const directionVotes = row.up + row.down;
+    return { persona, ...row, direction_votes: directionVotes,
+      up_rate: directionVotes ? row.up / directionVotes : null };
+  });
+}
+
+function sortedReaderEchoRows() {
+  let rows = readerEchoRows().filter(r => r.up || r.down || r.best || r.author_marks);
+  if (readerEchoSort === "rate") {
+    rows = rows.filter(r => r.direction_votes >= 20);
+    return rows.sort((a, b) => b.up_rate - a.up_rate || b.direction_votes - a.direction_votes ||
+      b.best - a.best || a.persona.name.localeCompare(b.persona.name, "zh-CN"));
+  }
+  const keys = readerEchoSort === "up" ? ["up", "best", "author_marks"]
+    : readerEchoSort === "down" ? ["down", "up", "best"]
+      : readerEchoSort === "author" ? ["author_marks", "best", "up"]
+        : ["best", "up", "author_marks"];
+  return rows.sort((a, b) => {
+    for (const key of keys) if (b[key] !== a[key]) return b[key] - a[key];
+    return b.voted_comments - a.voted_comments || a.persona.name.localeCompare(b.persona.name, "zh-CN");
+  });
+}
+
+function readerEchoBoard(el) {
+  const rows = sortedReaderEchoRows();
+  const tab = (key, label) => `<button class="btn echo-sort${readerEchoSort === key ? " on" : ""}"
+    data-echo-sort="${key}">${label}</button>`;
+  el.innerHTML = `<div class="echo-tools" aria-label="读者回声排序">
+      ${tab("best", "加精优先")}${tab("up", "获赞优先")}${tab("author", "作者藏印")}${tab("down", "被踩查看")}
+      <details class="echo-more"${readerEchoSort === "rate" ? " open" : ""}><summary>比例口径</summary>
+        <div>${tab("rate", "点赞率")}
+          <small>赞 ÷（赞＋踩），至少 20 张方向票。加精是批内相对选择，缺少统一曝光分母，暂不计算“加精率”。</small></div>
+      </details>
+    </div>${rows.length ? `<div class="echo-ledger" role="table" aria-label="读者回声榜">
+      <div class="echo-row echo-head" role="row">
+        <span>读者</span><span title="主动赞">赞</span><span title="主动踩">踩</span><span title="AI 同批横向加精">精</span><span title="作者亲手落下的藏印">藏</span>
+      </div>${rows.slice(0, 12).map((r, i) => `<a class="echo-row" role="row" href="#/reader/${esc(r.persona.persona_id)}">
+        <span class="echo-name"><i>${i + 1}</i>${esc(r.persona.name)}<small>${readerEchoSort === "rate"
+          ? `点赞率 ${(r.up_rate * 100).toFixed(1)}% · ${r.direction_votes} 张方向票`
+          : `${r.voted_comments}/${r.comments} 条有票`}</small></span>
+        <b class="echo-up">${r.up}</b><b class="echo-down">${r.down}</b><b class="echo-best">${r.best}</b><b class="echo-author">${r.author_marks}</b>
+      </a>`).join("")}</div>` : '<p class="empty">还没有主动赞、踩、加精或作者藏印。</p>'}`;
+  el.querySelectorAll("[data-echo-sort]").forEach(btn => {
+    btn.onclick = () => { readerEchoSort = btn.dataset.echoSort; readerEchoBoard(el); };
+  });
+}
+
+function readerEchoInline(pid) {
+  const r = readerEchoRows().find(x => x.persona.persona_id === pid);
+  if (!r) return "";
+  return `<span class="reader-echo-inline" title="只统计未折叠盲读评语收到的主动票；顺势票不计">
+    回声 · ▲${r.up}　▼${r.down}　⭐${r.best}　<span class="author-seal mini">藏</span>${r.author_marks}
+  </span>`;
+}
+
+function readerBoardHTML(rows, limit) {
+  const list = limit ? rows.filter(r => r.n > 0).slice(0, limit) : rows;
+  if (!list.length) return `<p class="empty">还没有阅读记录。</p>`;
+  return "<ol>" + list.map(r => `<li>
+      <span class="t"><a href="#/reader/${r.persona.persona_id}">${esc(r.persona.name)}</a></span>
+      <span class="m">${r.n ? `均给 ${fmt1(r.mean)} · ${r.n} 读` : "未上场"}</span></li>`).join("") + "</ol>";
+}
+
+function boardSection(key, defs, cls) {
+  const d = defs[key];
+  if (!d.items.length) return "";
+  return `<section class="board ${cls || ""}">
+    <h2>${d.title}<a class="full-link" href="#/board/${key}">完整 →</a></h2>
+    <p class="board-note">${d.note}</p>
+    ${boardList(d.items.slice(0, 10), d.meta, true)}</section>`;
+}
+
+function renderBoards() {
+  app.className = "wide";
+  const defs = boardDefs();
+  const showPoetryBoards = (S.settings || {}).show_poetry_boards !== false;
+  const readers = readerRanking();
+  const gbs = nonPoetryGenreBoards();
+  const gbsHTML = gbs.length ? `
+      <details class="board more-boards"><summary>更多榜单 · 非诗文体</summary>
+        <p class="board-note" style="margin-top:.8rem">散文 / 杂文 / 小说这类非诗文体判据不同，不与诗同榜；下面按各自文体的原始均分排（诗的校准量表不适用于它们）。</p>
+        <div class="boards" style="margin-top:1rem">
+          ${gbs.map(b => `<section><h2>${esc(b.genre)}榜</h2>${boardList(b.items.slice(0, 10), gMeta, true)}</section>`).join("")}
+        </div>
+      </details>` : "";
+  app.innerHTML = `
+    <h1 class="page-title">榜单</h1>
+    <p class="page-hint">全部从诚实的单篇盲读里事后派生；从不让模型排名。评分只是浅层信号，形状在每首诗自己的页面里。
+      · <a href="#/board/scores">完整打分榜 →</a></p>
+    <div class="boards">
+      ${boardSection("hero", defs, "hero")}
+      ${boardSection("polar", defs)}
+      ${showPoetryBoards ? boardSection("ci", defs) : ""}
+      ${showPoetryBoards ? boardSection("long", defs) : ""}
+      ${showPoetryBoards ? boardSection("short", defs) : ""}
+      ${boardSection("favs", defs)}
+      <section class="board"><h2>读者的手<a class="full-link" href="#/board/readers">完整 →</a></h2>
+        <p class="board-note">每位读者给分的松紧（点名字看其打分偏好与全部评语）</p>
+        ${readerBoardHTML(readers, 10)}</section>
+      <details class="board more-boards"><summary>更多榜单 · 字数</summary>
+        <div class="boards" style="margin-top:1.2rem">
+          <section><h2>最长<a class="full-link" href="#/board/longest">完整 →</a></h2>${boardList(defs.longest.items.slice(0, 10), zMeta, true)}</section>
+          <section><h2>最短<a class="full-link" href="#/board/shortest">完整 →</a></h2>${boardList(defs.shortest.items.slice(0, 10), zMeta, true)}</section>
+        </div>
+      </details>
+      ${gbsHTML}
+    </div>
+    <section class="board hero" id="recent-reads" style="margin-top:2.5rem">
+      <h2>最近的评论 <span style="font-weight:400;font-size:.75rem;color:var(--ink-3);letter-spacing:.08em">${recentReads().length ? '可筛最近 ' + recentReads().length + ' 条' : ''}</span>
+        <span class="recent-count" id="recent-count"></span></h2>
+      <p class="board-note">先从最近一千条盲读中筛选，再按时间或分数排序。点诗名到评论区，点读者名看这双眼睛。分数带 ▲/▼ 的是偏离这首诗共识 ≥2.5 分的评分——可能是跑偏的一条。</p>
+      ${recentFilterBarHtml()}
+      <div class="recent-list" id="recent-list"></div>
+      <div class="recent-more" id="recent-more"></div>
+    </section>`;
+  renderRecentInto();
+  wireRecentFilter();
+}
+
+function renderBoardFull(key) {
+  app.className = "wide";
+  if (key === "readers") {
+    const rows = readerRanking();
+    app.innerHTML = `
+      <p><a class="back" href="#/boards">← 榜单</a></p>
+      <h1 class="page-title">读者的手</h1>
+      <p class="page-hint">每位读者给分的均值与松紧；点名字进读者页看其偏好与全部评语。</p>
+      <div class="board">${readerBoardHTML(rows)}</div>`;
+    return;
+  }
+  const d = boardDefs()[key];
+  if (!d) { renderBoards(); return; }
+  app.innerHTML = `
+    <p><a class="back" href="#/boards">← 榜单</a></p>
+    <h1 class="page-title">${d.title} · 完整</h1>
+    <p class="page-hint">${d.note} · 共 ${d.items.length} 首</p>
+    <div class="board">${boardList(d.items, d.meta, true)}</div>`;
+}
+
+/* ---------- 读者索引：人设卡片墙 ---------- */
+
+function renderReaders() {
+  app.className = "wide";
+  const rows = readerRanking();
+  const custom = rows.filter(r => personaKind(r.persona.persona_id) === "custom")
+    .sort((a, b) => b.n - a.n);
+  const stock = rows.filter(r => personaKind(r.persona.persona_id) !== "custom");
+  const active = stock.filter(r => r.n > 0).sort((a, b) => b.n - a.n);
+  const idle = stock.filter(r => !r.n);
+  const card = r => {
+    const ps = r.persona;
+    return `<a class="reader-card${r.n ? "" : " idle"}" href="#/reader/${esc(ps.persona_id)}">
+      <div class="rc-name">${esc(ps.name)}</div>
+      <div class="rc-chips">
+        <span class="chip">${esc(ps.generation || "")}</span>
+        <span class="chip">${esc(ps.orientation || "")}</span>
+        ${ps["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
+        ${ps["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
+        ${personaBadge(ps.persona_id)}
+      </div>
+      <div class="rc-desc">${esc(ps.persona)}</div>
+      <div class="rc-stats">${r.n
+        ? `读过 ${r.n} 首 · 均给 ${fmt1(r.mean)} · σ ${fmt1(r.sd)} · ${fmt1(r.min)}–${fmt1(r.max)}`
+        : "还没有上场"}</div>
+    </a>`;
+  };
+  const h2s = "margin:2.4rem 0 1.1rem;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)";
+  // 被撤下的随附读者（侧车 hidden:true）：不在合并结果里，这里给条还原的路
+  const hiddenRows = (S.personas_sidecar || []).filter(e => e.hidden).map(e => ({
+    id: e.persona_id,
+    name: e.name || ((S.personas_defaults || []).find(p => p.persona_id === e.persona_id) || {}).name || e.persona_id,
+  }));
+  app.innerHTML = `
+    <h1 class="page-title">读者</h1>
+    <p class="page-hint">读诗剧场的全部眼睛，共 ${rows.length} 位。点进任何一位，看这双眼睛的松紧、分布与全部评语。</p>
+    <div class="reader-cards">${active.map(card).join("")}</div>
+    ${idle.length ? `<h2 style="${h2s}">候场</h2>
+      <div class="reader-cards">${idle.map(card).join("")}</div>` : ""}
+    <h2 style="${h2s}">你的读者</h2>
+    <p class="page-hint">自建与改写都只存进 corpus/personas.json（你的侧车）——更新、git pull 永不覆盖。
+      <button class="btn" id="rd-new" style="margin-left:.6em">＋ 新建读者</button></p>
+    ${custom.length ? `<div class="reader-cards">${custom.map(card).join("")}</div>`
+      : `<p class="page-hint" style="color:var(--ink-3)">还没有自建读者。新建一位，或点进任何随附读者进行改写。</p>`}
+    ${hiddenRows.length ? `<p class="page-hint" style="margin-top:1.4rem">已撤下：${hiddenRows.map(x =>
+      `${esc(x.name)} <button class="btn" data-restore="${esc(x.id)}">还原</button>`).join(" · ")}</p>` : ""}`;
+  document.getElementById("rd-new").onclick = () => { location.hash = "#/reader-new"; };
+  document.querySelectorAll("[data-restore]").forEach(btn => {
+    btn.onclick = async () => {
+      try { await personaUnhide(btn.dataset.restore); toast("已还原"); route(); }
+      catch (e) { toast("失败：" + e.message); }
+    };
+  });
+}
+
+/* 幕后演员：按模型（显示层归并）统计给分手势，图式同读者松紧。
+ * reads 由调用方给：统计页传全体盲读（minN=30），读者页传该人设的读数
+ * （minN=1，看每个扮演者的手势）。始终原始分——看的就是行为本身。 */
+function modelChart(el, reads, minN, compact) {
+  const byM = new Map();
+  for (const r of reads) {
+    const m = modelAlias(r.reader.model);
+    if (!byM.has(m)) byM.set(m, []);
+    byM.get(m).push(r.score);
+  }
+  const rows = [...byM.entries()].filter(([, ss]) => ss.length >= minN).map(([m, ss]) => {
+    const mean = ss.reduce((a, b) => a + b, 0) / ss.length;
+    const sd = Math.sqrt(ss.reduce((a, b) => a + (b - mean) ** 2, 0) / ss.length);
+    return { m, n: ss.length, mean, sd, lo: quant(ss, .05), hi: quant(ss, .95),
+      p8: ss.filter(s => s >= 8).length / ss.length };
+  }).sort((a, b) => b.mean - a.mean);
+  if (!rows.length) { el.innerHTML = `<p class="empty">还没有 ≥${minN} 读的模型。</p>`; return; }
+  // compact：窄页（读者页 .dist-wrap 上限 36em）用更小的 viewBox，等比放大后字才够看
+  const W = compact ? 450 : 680, rowH = 26, padL = compact ? 135 : 178,
+    padR = compact ? 100 : 128, axisH = 26, padT = 8;
+  const H = padT + rows.length * rowH + axisH;
+  const x = s => padL + (s / 10) * (W - padL - padR);
+  const baseY = padT + rows.length * rowH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="模型手势">`;
+  for (let t = 0; t <= 10; t += 2)
+    svg += `<line x1="${x(t)}" y1="${padT}" x2="${x(t)}" y2="${baseY}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${x(t)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">${t}</text>`;
+  rows.forEach((r, i) => {
+    const cy = padT + i * rowH + rowH / 2;
+    svg += `<text x="${padL - 10}" y="${cy + 4}" text-anchor="end" font-size="11" fill="#6b6154">${esc(r.m)}<tspan fill="#a29786">（${r.n}）</tspan></text>` +
+      `<line x1="${x(r.lo)}" y1="${cy}" x2="${x(r.hi)}" y2="${cy}" stroke="#2f6d62" stroke-width="1.2" opacity=".5"/>` +
+      `<line x1="${x(Math.max(0, r.mean - r.sd))}" y1="${cy}" x2="${x(Math.min(10, r.mean + r.sd))}" y2="${cy}" stroke="#2f6d62" stroke-width="4" opacity=".35"/>` +
+      `<circle cx="${x(r.mean)}" cy="${cy}" r="4" fill="#2f6d62"><title>${esc(r.m)} · 均 ${fmt1(r.mean)} · σ ${fmt1(r.sd)} · ${r.n} 读</title></circle>` +
+      `<text x="${W - 6}" y="${cy + 4}" text-anchor="end" font-size="10.5" fill="#6b6154"><tspan font-weight="600">${fmt1(r.mean)}</tspan><tspan fill="#a29786"> ±${fmt1(r.sd)} · ≥8: ${Math.round(r.p8 * 100)}%</tspan></text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* ---------- 读者页：一个人设的打分偏好与全部评语 ---------- */
+
+function renderReader(pid) {
+  app.className = "";
+  const persona = maps.persona.get(pid);
+  if (!persona) { app.innerHTML = `<p class="page-hint">没有这位读者。</p>`; return; }
+  const row = readerRanking().find(r => r.persona.persona_id === pid);
+  const rs = (row && row.reads || []).slice().sort((a, b) => b.score - a.score);
+
+  app.innerHTML = `
+    <p><a class="back" href="#/board/readers">← 读者的手</a></p>
+    <h1 class="page-title">${esc(persona.name)}</h1>
+    <p class="page-hint">
+      <span class="chip">${esc(persona.generation || "")}</span>
+      <span class="chip">${esc(persona.orientation || "")}</span>
+      ${persona["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
+      ${persona["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
+      ${personaBadge(pid)}
+    </p>
+    <blockquote class="persona-desc">${esc(persona.persona)}</blockquote>
+    <p class="page-hint" style="display:flex;gap:.6em;flex-wrap:wrap;align-items:center">
+      <button class="btn" id="pa-edit">编辑</button>
+      ${personaKind(pid) === "custom" ? '<button class="btn" id="pa-del">删除</button>' : ""}
+      ${personaKind(pid) === "overridden" ? '<button class="btn" id="pa-revert">还原随附版</button>' : ""}
+      ${personaKind(pid) === "default" ? '<button class="btn" id="pa-hide">撤下</button>' : ""}
+      <span style="font-size:.72rem;color:var(--ink-3)">${personaKind(pid) === "custom"
+        ? "你的读者——存在侧车里，更新不覆盖。"
+        : "随附读者：改动只存进你的侧车，随时可还原。"}</span>
+    </p>
+    ${row && row.n ? `
+      <p class="page-hint reader-summary" style="margin-top:1.5rem"><span>读过 ${row.n} 首 · 均给 ${fmt1(row.mean)} · σ ${fmt1(row.sd)} · 最低 ${fmt1(row.min)} / 最高 ${fmt1(row.max)}</span>${readerEchoInline(pid)}</p>
+      <div class="dist-wrap" id="dist"></div>
+      <h2 style="margin:2.2rem 0 .3rem;font-size:1.05rem;letter-spacing:.1em;color:var(--ink-2)">扮演者</h2>
+      <p class="page-hint" style="margin-bottom:.8rem">这双眼睛由哪些模型扮演过、各自操控时的手势（原始分）</p>
+      <div class="dist-wrap" id="actor-chart"></div>
+      <div id="cards">${rs.map(r => readerReadRow(r)).join("")}</div>`
+      : `<p class="page-hint" style="margin-top:1.5rem">这位读者还没有上场。</p>`}`;
+
+  if (row && row.n) {
+    renderDist(document.getElementById("dist"), rs, null);
+    modelChart(document.getElementById("actor-chart"), rs, 1, true);
+  }
+
+  document.getElementById("pa-edit").onclick = () => { location.hash = "#/reader-edit/" + pid; };
+  // 两击确认（同升格按钮的手势）；删除/撤下完成后回读者墙，还原留在本页
+  const arm = (id, label, fn) => {
+    const btn = document.getElementById(id);
+    if (!btn) return;
+    let armed = false;
+    btn.onclick = async () => {
+      if (!armed) { armed = true; btn.textContent = label; btn.classList.add("primary"); return; }
+      try { await fn(); } catch (e) { toast("失败：" + e.message); }
+    };
+  };
+  arm("pa-del", "确认删除？再点一次", async () => {
+    await savePersonaSidecar((S.personas_sidecar || []).filter(x => x.persona_id !== pid));
+    toast("已删除（旧读数仍在，挂原 persona_id）"); location.hash = "#/readers";
+  });
+  arm("pa-revert", "确认还原？再点一次", async () => {
+    await savePersonaSidecar((S.personas_sidecar || []).filter(x => x.persona_id !== pid));
+    toast("已还原为随附版"); renderReader(pid);
+  });
+  arm("pa-hide", "确认撤下？再点一次", async () => {
+    const side = (S.personas_sidecar || []).filter(x => x.persona_id !== pid);
+    side.push({ persona_id: pid, hidden: true });
+    await savePersonaSidecar(side);
+    toast("已撤下（读者墙底部可还原）"); location.hash = "#/readers";
+  });
+}
+
+function readerReadRow(r) {
+  const p = maps.poem.get(r.poem_id);
+  const stale = p && r.content_hash !== p.content_hash;
+  return `<div class="read-card" id="card-${r.read_id}">
+    <div class="rc-head">
+      <span class="rname"><a href="#/poem/${r.poem_id}/reads">《${esc(p ? p.title : r.poem_id)}》</a></span>
+      <span class="chip">${esc(modelAlias(r.reader.model))}</span>
+      ${stale ? '<span class="chip warm">读的是旧版</span>' : ""}
+      ${authorSeal(r.read_id)}
+      ${scorePair(r, false)}
+    </div>
+    <div class="reaction">${esc(r.reaction)}</div>
+    ${r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : ""}
+  </div>`;
+}
+
+/* ---------- persona 外挂：自建/改写读者（侧车 corpus/personas.json） ----------
+ * 服务端下发三份：personas（合并结果，全站展示用）、personas_defaults（随附原文）、
+ * personas_sidecar（侧车原文）。/api/personas 是整份替换侧车，所以每次改动都在
+ * 侧车全份上增删改后整体提交；保存成功后 loadState 重拉，三份始终同步。 */
+
+function personaKind(pid) {
+  const isDefault = (S.personas_defaults || []).some(p => p.persona_id === pid);
+  if (!isDefault) return "custom";                                   // 自建（含示例侧车带来的）
+  return (S.personas_sidecar || []).some(e => e.persona_id === pid)
+    ? "overridden" : "default";                                      // 改写过的随附 / 纯随附
+}
+
+function personaBadge(pid) {
+  const k = personaKind(pid);
+  if (k === "custom") return '<span class="chip accent" title="存在 corpus/personas.json——更新、git pull 不覆盖">你的</span>';
+  if (k === "overridden") return '<span class="chip warm" title="随附读者，被你的侧车改写过；可在读者页还原">已改写</span>';
+  return "";
+}
+
+async function savePersonaSidecar(next) {
+  await post("/api/personas", { personas: next });
+  await loadState();
+}
+
+async function personaUnhide(pid) {
+  const next = [];
+  for (const e of (S.personas_sidecar || [])) {
+    if (e.persona_id !== pid) { next.push(e); continue; }
+    const rest = { ...e };
+    delete rest.hidden;
+    // 只剩 persona_id 的空壳不留：随附读者回纯随附；自建的空壳本就非法
+    if (Object.keys(rest).length > 1) next.push(rest);
+  }
+  await savePersonaSidecar(next);
+}
+
+const PERSONA_EDIT_STR = ["name", "generation", "native_lang", "orientation", "persona"];
+const PERSONA_EDIT_BOOL = ["knows_诠释", "knows_date", "reads_background"];
+
+function renderPersonaEdit(pid) {
+  app.className = "";
+  const isNew = !pid;
+  const cur = isNew ? {} : maps.persona.get(pid);
+  if (!isNew && !cur) { app.innerHTML = `<p class="page-hint">没有这位读者。</p>`; return; }
+  const kind = isNew ? "custom" : personaKind(pid);
+  const ic = "font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel);width:100%;box-sizing:border-box";
+  const row = (label, inner, hint) => `<div style="margin-bottom:1.15rem">
+    <div style="font-size:.85rem;color:var(--ink-2);margin-bottom:.35rem">${label}</div>${inner}
+    ${hint ? `<div style="font-size:.72rem;color:var(--ink-3);margin-top:.3rem;line-height:1.6">${hint}</div>` : ""}</div>`;
+  const chk = (id, label, on) => `<label style="display:flex;align-items:center;gap:.5em;cursor:pointer">
+    <input type="checkbox" id="${id}"${on ? " checked" : ""}> ${label}</label>`;
+  const c = cur || {};
+  app.innerHTML = `
+    <p><a class="back" href="${isNew ? "#/readers" : `#/reader/${esc(pid)}`}">← 返回</a></p>
+    <h1 class="page-title">${isNew ? "新建读者" : `编辑 · ${esc(c.name || pid)}`}</h1>
+    <p class="page-hint">${isNew
+      ? "自建读者只存进 corpus/personas.json（你的侧车）——更新、git pull 永不覆盖。"
+      : kind === "custom"
+        ? "这是你的读者，存在侧车里，更新不覆盖。"
+        : "随附读者：改动只存进你的侧车（部分覆盖——没改的字段继续跟随更新），随时可还原。<br>" +
+          "注意：这位读者已有的读数挂的仍是改写前的人设，改得越多语义漂移越大。"}</p>
+    <section class="board" style="text-align:left">
+      ${isNew ? row("persona_id（唯一标识）", `<input id="pe-id" style="${ic}" placeholder="如 my-first-reader">`,
+        "建议英文小写加短横线；这个 id 会写进阅读记录与网址，建了就别改。") : ""}
+      ${row("名字", `<input id="pe-name" style="${ic}" value="${esc(c.name || "")}">`)}
+      ${row("世代", `<input id="pe-gen" style="${ic}" value="${esc(c.generation || "")}" placeholder="如 90后">`)}
+      ${row("母语", `<input id="pe-lang" style="${ic}" value="${esc(c.native_lang || "")}" placeholder="留空即中文">`)}
+      ${row("感受取向", `<input id="pe-orient" style="${ic}" value="${esc(c.orientation || "")}" placeholder="如 意象 / 节奏 / 结构……">`)}
+      ${row("人设（这位读者是谁、怎么读诗）", `<textarea id="pe-persona" rows="8" style="${ic};resize:vertical">${esc(c.persona || "")}</textarea>`,
+        "派发时会原样放进读者的 system prompt；写成第三人称小传即可。")}
+      <div style="display:flex;gap:1.6em;flex-wrap:wrap;margin-bottom:1.3rem;font-size:.88rem">
+        ${chk("pe-k1", "知情（读过作者诠释）", c["knows_诠释"])}
+        ${chk("pe-k2", "知时（知道写作时间）", c["knows_date"])}
+        ${chk("pe-k3", "读背景小注", c["reads_background"])}
+      </div>
+      <button class="btn primary" id="pe-save">保存</button>
+    </section>`;
+
+  document.getElementById("pe-save").onclick = async () => {
+    const gv = id => document.getElementById(id).value.trim();
+    const id = isNew ? gv("pe-id") : pid;
+    if (!id) return toast("persona_id 不能为空");
+    if (isNew && maps.persona.get(id)) return toast("这个 persona_id 已存在——去那位读者的页面里编辑");
+    const vals = { name: gv("pe-name"), generation: gv("pe-gen"), native_lang: gv("pe-lang"),
+      orientation: gv("pe-orient"), persona: gv("pe-persona") };
+    const bools = { "knows_诠释": document.getElementById("pe-k1").checked,
+      "knows_date": document.getElementById("pe-k2").checked,
+      "reads_background": document.getElementById("pe-k3").checked };
+    const def = (S.personas_defaults || []).find(p => p.persona_id === id);
+    const e = { persona_id: id };
+    if (def) {
+      // 随附读者：只存与随附值不同的字段（合并时部分覆盖，其余跟随更新）。
+      // 清空随附已有的字段不会生效（服务端丢弃空串）——想彻底自定义请新建读者。
+      for (const k of PERSONA_EDIT_STR) if (vals[k] && vals[k] !== (def[k] || "")) e[k] = vals[k];
+      for (const k of PERSONA_EDIT_BOOL) if (bools[k] !== !!def[k]) e[k] = bools[k];
+    } else {
+      if (!vals.name || !vals.persona) return toast("名字与人设是必填的");
+      for (const k of PERSONA_EDIT_STR) if (vals[k]) e[k] = vals[k];
+      for (const k of PERSONA_EDIT_BOOL) e[k] = bools[k];
+    }
+    const side = (S.personas_sidecar || []).filter(x => x.persona_id !== id);
+    if (!def || Object.keys(e).length > 1) side.push(e);   // 与随附零差异 → 不留空壳条目
+    try {
+      await savePersonaSidecar(side);
+      toast(def && Object.keys(e).length === 1 ? "与随附版无差异，未改动" : "已存进你的侧车");
+      location.hash = "#/reader/" + id;
+    } catch (err) { toast("失败：" + err.message); }
+  };
+}
+
+/* ---------- 全部作品 ---------- */
+
+const POETRY_GENRES = ["现代诗", "词", "歌词"];   // 永远在读者池的文体（与 server/runner 同一份口径）
+
+let allFilter = { genre: "全部", showPrivate: false };
+
+function renderAll() {
+  app.className = "wide";
+  const genres = ["全部", ...new Set(S.poems.map(p => p.genre))];
+  let list = S.poems.filter(p => allFilter.genre === "全部" || p.genre === allFilter.genre);
+  if (!allFilter.showPrivate) list = list.filter(p => p.visibility === "public");
+
+  app.innerHTML = `
+    <h1 class="page-title">全部作品</h1>
+    <p class="page-hint">共 ${S.poems.length} 部；当前显示 ${list.length} 部。</p>
+    <div class="filter-row">
+      ${genres.map(g => `<button class="btn g ${g === allFilter.genre ? "on" : ""}" data-g="${esc(g)}">${esc(g)}</button>`).join("")}
+      <button class="btn pv ${allFilter.showPrivate ? "on" : ""}">含私密</button>
+    </div>
+    <div>${list.map(p => {
+      const s = stats(p.id);
+      return `<div class="poem-row">
+        <span class="id">${p.id}</span>
+        <span class="t"><a href="#/poem/${p.id}">${esc(p.title)}</a>${favMark(p.id)}${authorChip(p)}
+          ${p.visibility === "private" ? '<span class="chip warm">私密</span>' : ""}
+          ${!p.ai_read ? '<span class="chip">存档</span>' : ""}</span>
+        <span class="meta">${esc(p.genre)} · ${yearOf(p)}${s.n ? ` · ${s.n} 读 · 均 ${fmt1(s.mean)}` : ""}</span>
+      </div>`; }).join("")}</div>`;
+
+  app.querySelectorAll(".btn.g").forEach(b => b.onclick = () => { allFilter.genre = b.dataset.g; renderAll(); });
+  app.querySelector(".btn.pv").onclick = () => { allFilter.showPrivate = !allFilter.showPrivate; renderAll(); };
+}
+
+/* ---------- 诗集工作台：只编排 ID 清单，不复制/改写诗稿 ---------- */
+
+const BOOK_NEW = "__new__";
+const bookWorkspace = {
+  activeId: null,
+  drafts: new Map(),
+  dirty: new Set(),
+  query: "",
+  genre: "全部",
+  favoriteOnly: false,
+  visibility: "all",
+  showArchived: false,
+  previewIndex: 0,
+  printView: "spreads",
+  printFullscreen: false,
+  printFullscreenRestore: false,
+  printFullscreenSheet: 0,
+  blockShiftPx: new Map(),
+  poolScroll: 0,
+  signatureScroll: 0,
+};
+let bookSearchTimer = null;
+let bookPoemProof = null;
+
+function bookPreviewText(poem) {
+  const content = String((poem || {}).content || "").trim();
+  if (!content) return "（这首作品暂无正文）";
+  const stanzas = content.split(/\n\s*\n/).map(block => block.trim()).filter(Boolean);
+  let preview = stanzas.length > 1
+    ? stanzas.slice(0, 3).join("\n\n")
+    : content.split("\n").map(line => line.trim()).filter(Boolean).slice(0, 8).join("\n");
+  if (preview.length > 420) preview = preview.slice(0, 420).replace(/\s+\S*$/, "") + "…";
+  return preview;
+}
+
+const BOOK_BUNDLED_FONT = {
+  family: "ZQ Source Han Serif CN",
+  url: "fonts/SourceHanSerifCN-Regular.otf",
+  mime: "font/otf",
+  format: "opentype",
+  version: "2.003R",
+  sha256: "3754ea669c530e2473354f8f6d9f79680a44d7e26ec7d00eeabee4a7e0753c5d",
+};
+
+// 版式 profile：唯一数据源。物理尺寸/边距/字号/行距与分页估算值（首页行数、
+// 续页行数、每行宽度、目录每页条数）都定义在这里；预览、完整排版页、排印清单
+// 共用同一份。行数按版心高度 ÷ 行盒实际高（line-height 与 min-height 取大者）
+// 推导并留安全行；charsPerLine 的单位是“全角字宽”（半角字母数字按 0.5 计），
+// 由版心宽 ÷ 字号推导。profile ID 稳定，方案只保存 ID 与明确允许覆盖的参数。
+const BOOK_TYPOGRAPHY_PROFILES = {
+  "qinglang-song-105-18": {
+    id: "qinglang-song-105-18",
+    name: "清朗宋体",
+    body: "五号（10.5 pt）",
+    leading: "18 pt",
+    body_pt: 10.5,
+    leading_pt: 18,
+    font_stack: [BOOK_BUNDLED_FONT.family, "STSong", "Source Han Serif SC", "思源宋体", "SimSun", "Noto Serif SC", "serif"],
+    sizes: {
+      A5: { widthMm: 148, heightMm: 210, topMm: 18, bottomMm: 20, innerMm: 23, outerMm: 18,
+            firstLines: 21, continuationLines: 22, charsPerLine: 27, tocPerPage: 16 },
+      B5: { widthMm: 176, heightMm: 250, topMm: 20, bottomMm: 22, innerMm: 25, outerMm: 20,
+            firstLines: 27, continuationLines: 28, charsPerLine: 33, tocPerPage: 20 },
+    },
+  },
+  // 疏朗版：字号大半号、行距翻倍（2.0 倍），供作者对照选择；同为随包思源宋体。
+  "shulang-song-11-22": {
+    id: "shulang-song-11-22",
+    name: "疏朗宋体",
+    body: "11 pt",
+    leading: "22 pt",
+    body_pt: 11,
+    leading_pt: 22,
+    font_stack: [BOOK_BUNDLED_FONT.family, "STSong", "Source Han Serif SC", "思源宋体", "SimSun", "Noto Serif SC", "serif"],
+    sizes: {
+      A5: { widthMm: 148, heightMm: 210, topMm: 18, bottomMm: 20, innerMm: 23, outerMm: 18,
+            firstLines: 18, continuationLines: 19, charsPerLine: 26, tocPerPage: 16 },
+      B5: { widthMm: 176, heightMm: 250, topMm: 20, bottomMm: 22, innerMm: 25, outerMm: 20,
+            firstLines: 22, continuationLines: 23, charsPerLine: 32, tocPerPage: 20 },
+    },
+  },
+};
+const BOOK_DEFAULT_PROFILE_ID = "qinglang-song-105-18";
+const BOOK_PUBLICATION_PROFILE = BOOK_TYPOGRAPHY_PROFILES[BOOK_DEFAULT_PROFILE_ID];
+const BOOK_PROFILE_OVERRIDE_KEYS = ["topMm", "bottomMm", "innerMm", "outerMm", "bodyPt", "leadingPt"];
+const BOOK_LAYOUTS = {
+  A5: BOOK_PUBLICATION_PROFILE.sizes.A5,
+  B5: BOOK_PUBLICATION_PROFILE.sizes.B5,
+};
+
+function bookSections(draft) {
+  return Array.isArray((draft || {}).sections) ? draft.sections : [];
+}
+
+function bookSectionMap(draft) {
+  return new Map(bookSections(draft).map(section => [section.before_poem_id, section]));
+}
+
+// 前置页配置归一化：旧方案缺少该键时等价于"无书名页、无出版说明"，默认视觉不漂移。
+// 不自动编造出版社、ISBN、版次等任何出版信息；出版说明只逐字呈现作者填写的内容。
+function bookFrontMatter(draft) {
+  const raw = (draft || {}).front_matter;
+  return {
+    title_page: Boolean(raw && raw.title_page),
+    colophon: String((raw && raw.colophon) || ""),
+    dedication: String((raw && raw.dedication) || ""),
+  };
+}
+
+// 旧方案没有开关时保持现有成书默认：显示页眉与页码。
+function bookPageMarks(draft) {
+  const layout = (draft || {}).layout || {};
+  return { running_head: layout.running_head !== false, folio: layout.folio !== false };
+}
+
+function bookSectionStart(draft) {
+  return ((draft || {}).layout || {}).section_start === "next" ? "next" : "recto";
+}
+
+function bookDatePosition(draft) {
+  const value = ((draft || {}).layout || {}).date_position;
+  return ["under_title", "poem_end"].includes(value) ? value : "none";
+}
+
+function bookPoemDate(poem) {
+  return String((poem || {}).date_written || (poem || {}).created || "").trim();
+}
+
+// 排版只呈现到“日”的颗粒度：系统时间戳的时分秒与时区不出现在书页上；
+// 作者自写的非 ISO 日期（如“1987 年春”）逐字保留。
+function bookPoemDateText(poem) {
+  const raw = bookPoemDate(poem);
+  const match = raw.match(/^(\d{4}(?:-\d{1,2}(?:-\d{1,2})?)?)(?=[T ]|$)/);
+  return match ? match[1] : raw;
+}
+
+function bookInteriorColor(draft) {
+  return ((draft || {}).layout || {}).interior_color === "mono" ? "mono" : "warm";
+}
+
+// 诗节对齐：left 为现行左齐；center 为“居中成块”——整块诗节按该页最长行取中
+// 平移，块内仍保持左齐（参照《海子的诗》人文社版，逐页独立取中）。
+function bookBlockAlign(draft) {
+  return ((draft || {}).layout || {}).block_align === "center" ? "center" : "left";
+}
+
+// 页眉左栏内容：book 为现行“书名/诗题交替”；section 在书名位显示所属辑名；
+// both 叠成“书名 · 辑名”。没有所属辑的页面一律回退书名。
+function bookRunningHeadContent(draft) {
+  const value = ((draft || {}).layout || {}).running_head_content;
+  return value === "section" || value === "both" ? value : "book";
+}
+
+// “原汁原味”模式：关掉“第 N 首”编号（诗页眉与目录序号都隐去），旧方案缺省视为显示。
+function bookShowNumbering(draft) {
+  return ((draft || {}).layout || {}).show_numbering !== false;
+}
+
+// 页底“未完”提示：跨页诗的非末页页脚加小字（诗节撞翻页时的规范标记），
+// 默认关闭，由作者按书勾选。
+function bookContinueHint(draft) {
+  return ((draft || {}).layout || {}).continue_hint === true;
+}
+
+function bookBlockShiftEm(page, widthEm) {
+  if (!page || page.kind !== "poem" || !Array.isArray(page.stanzas)) return 0;
+  let minLeft = Infinity, maxRight = 0;
+  for (const block of page.stanzas) {
+    for (const line of block) {
+      const left = (line.indentEm || 0) + (line.machineContinuation ? 1 : 0);
+      const right = left + bookTextWidthEm(line.text);
+      if (left < minLeft) minLeft = left;
+      if (right > maxRight) maxRight = right;
+    }
+  }
+  if (!Number.isFinite(minLeft) || maxRight <= 0) return 0;
+  const blockWidth = maxRight - minLeft;
+  if (blockWidth >= widthEm) return 0;
+  const shift = (widthEm - blockWidth) / 2 - minLeft;
+  return Math.max(0, Number(shift.toFixed(2)));
+}
+
+// 居中成块的实测校正：估算宽度对西文字形有偏差，渲染后按真实字形盒把诗块
+// 精确对到标题的同一根中轴上。校正按页缓存，导出离线 HTML 时烘焙进去，
+// 因此专业 PDF 与屏幕看到的是同一套居中。
+// 居中成块的实测校正：估算宽度对西文字形有固有偏差，渲染后按真实字形范围
+// （Range 量文字——块级 p 的盒子永远占满整行，量它等于没量）逐页微调，让诗块
+// 与标题共用同一根中轴。校正按页缓存，导出离线 HTML 时烘焙进去，专业 PDF 与
+// 屏幕同一套居中。日期在诗块容器之外，不参与取中。
+function measureBookBlockShiftPx(pageIndexOffset = 0) {
+  const sheets = [...document.querySelectorAll(".book-print-document .book-sheet")];
+  const result = [];
+  if (!sheets.length) return result;
+  const doc0 = sheets[0].closest(".book-print-document");
+  const zoom = Number.isFinite(parseFloat(doc0 && getComputedStyle(doc0).zoom))
+    ? parseFloat(getComputedStyle(doc0).zoom) || 1 : 1;
+  sheets.forEach((sheet, offset) => {
+    const index = pageIndexOffset + offset;
+    const poem = sheet.querySelector(".book-align-center .book-typeset-poem");
+    if (!poem) { result[index] = 0; return; }
+    const box = poem.getBoundingClientRect();
+    let minLeft = Infinity, maxRight = -Infinity;
+    poem.querySelectorAll("p").forEach(p => {
+      const range = document.createRange();
+      range.selectNodeContents(p);
+      const rect = range.getBoundingClientRect();
+      if (!rect.width && !rect.height) return;
+      minLeft = Math.min(minLeft, rect.left);
+      maxRight = Math.max(maxRight, rect.right);
+    });
+    if (!Number.isFinite(minLeft)) { result[index] = 0; return; }
+    const blockWidth = (maxRight - minLeft) / zoom;
+    const minLeftRel = (minLeft - box.left) / zoom;
+    // 校正量换算回未缩放的 CSS 像素（离线 HTML 无缩放，直接可用）。
+    let delta = (box.left + box.width / 2 - (minLeft + maxRight) / 2) / zoom;
+    // 诗块比版心还宽时无法居中，最多贴左，不往页边外推。
+    if (blockWidth > box.width / zoom) delta = Math.max(delta, -minLeftRel);
+    delta = Math.round(delta * 100) / 100;
+    result[index] = Math.abs(delta) < .5 ? 0 : delta;
+  });
+  return result;
+}
+
+function applyBookBlockCorrections(pageIndexOffset = 0) {
+  const sheets = [...document.querySelectorAll(".book-print-document .book-sheet")];
+  if (!sheets.length) return;
+  const run = () => {
+    const shifts = measureBookBlockShiftPx(pageIndexOffset);
+    sheets.forEach((sheet, offset) => {
+      const index = pageIndexOffset + offset;
+      const poem = sheet.querySelector(".book-align-center .book-typeset-poem");
+      if (!poem) { bookWorkspace.blockShiftPx.delete(index); return; }
+      const px = shifts[index] || 0;
+      poem.style.transform = px ? `translateX(${px}px)` : "";
+      bookWorkspace.blockShiftPx.set(index, px);
+    });
+  };
+  if (document.fonts?.ready) document.fonts.ready.then(run);
+  else run();
+}
+
+// 出版版本（改字最小版）：未改动的诗链接真源，改动过的整首另存版本（写时复制，
+// 不做差分）。版本绑定保存时的真源哈希，真源更新后自动停用并提示——与校样分行
+// 同一套护栏。corpus 永不被触碰；页脚注与正文注释语义留给后续版本定义。
+function bookVersionRecord(draft, poem) {
+  const records = (draft || {}).versions;
+  const record = records && typeof records === "object" ? records[poem.id] : null;
+  if (!record || typeof record.content !== "string" || !record.content.trim()) {
+    return { active: false, stale: false, record: null };
+  }
+  const stale = Boolean(record.source_hash && poem.content_hash
+    && record.source_hash !== poem.content_hash);
+  return { active: !stale, stale, record };
+}
+
+// 书页正文的“生效文本”：版本激活用版本，否则真源。校样分行断点同样作用于
+// 生效文本——改字后断点若错位，重新校样一次即可（断点记录不会被清除）。
+function bookPoemBaseText(poem, draft) {
+  const status = bookVersionRecord(draft, poem);
+  return status.active ? status.record.content : bookNormalizeProofText(poem.content);
+}
+
+// 统一编辑的自动归类：作者只面对一个自由文本框，系统按改动性质选最小记录——
+// 只动换行 = 校样分行（位置记录，原诗更新后仍可重做）；动了字 = 出版版本
+// （整首写时复制，版本文本自带换行，旧分行记录被取代）；与真源全同 = 清除。
+function bookClassifyPoemEdit(original, saved) {
+  const clean = bookNormalizeProofText(saved).replace(/\s+$/, "");
+  if (!clean.trim()) return { kind: "invalid" };
+  if (bookProofPlainText(clean) === bookProofPlainText(original)) {
+    const positions = bookProofPositions(clean);
+    const originalPositions = bookProofPositions(original);
+    const changed = !(positions.length === originalPositions.length
+      && positions.every((value, index) => value === originalPositions[index]));
+    return changed ? { kind: "breaks", positions } : { kind: "revert" };
+  }
+  return { kind: "version", content: clean };
+}
+
+function bookProofBreakRecord(draft, poem) {
+  const records = (draft || {}).proof_breaks;
+  const record = records && typeof records === "object" ? records[poem.id] : null;
+  if (!record || !Array.isArray(record.positions)) return { active: false, stale: false, record: null };
+  const stale = record.source_hash !== poem.content_hash
+    || Boolean(record.text_hash && record.text_hash !== bookTextHash(bookProofPlainText(bookPoemBaseText(poem, draft))));
+  return { active: !stale, stale, record };
+}
+
+function bookNormalizeProofText(value) {
+  return String(value || "").replace(/\r\n?/g, "\n");
+}
+
+function bookProofPlainText(value) {
+  return bookNormalizeProofText(value).replace(/\n/g, "");
+}
+
+function bookProofPositions(value) {
+  const positions = [];
+  let offset = 0;
+  for (const char of Array.from(bookNormalizeProofText(value))) {
+    if (char === "\n") positions.push(offset);
+    else offset++;
+  }
+  return positions;
+}
+
+function bookProofText(poem, draft) {
+  const status = bookProofBreakRecord(draft, poem);
+  const base = bookPoemBaseText(poem, draft);
+  if (!status.active) return base;
+  const chars = Array.from(bookProofPlainText(base));
+  const breaks = [...status.record.positions];
+  let output = "", cursor = 0;
+  for (const at of breaks) {
+    output += chars.slice(cursor, at).join("") + "\n";
+    cursor = at;
+  }
+  return output + chars.slice(cursor).join("");
+}
+
+// 出版版本正文指纹（FNV-1a 32）：只用于排印清单里标记“改过字”与版本变化，
+// 非密码学哈希；真源哈希仍以 corpus 的 content_hash 为唯一来源。
+function bookTextHash(text) {
+  const value = String(text || "");
+  let hash = 0x811c9dc5;
+  for (let at = 0; at < value.length; at++) {
+    hash ^= value.charCodeAt(at);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash.toString(16).padStart(8, "0");
+}
+
+// 未知或缺失的 profile ID 一律回退默认 profile，不在渲染层报错；
+// 严格校验在保存接口完成。用 hasOwnProperty 挡住 __proto__/constructor 等
+// 原型链魔法键——直接查表会命中 Object.prototype 并在后续崩溃。
+function bookTypographyProfile(draft) {
+  const id = ((draft || {}).layout || {}).profile_id;
+  if (typeof id === "string" && Object.prototype.hasOwnProperty.call(BOOK_TYPOGRAPHY_PROFILES, id)) {
+    return BOOK_TYPOGRAPHY_PROFILES[id];
+  }
+  return BOOK_TYPOGRAPHY_PROFILES[BOOK_DEFAULT_PROFILE_ID];
+}
+
+// 单一数据源的解析结果：profile + 页面尺寸 + 允许的覆盖参数。
+// 覆盖参数后的行数/行宽按版心比例缩放，是估算而非精确排印；
+// 无覆盖时所有比例恒为 1，与既有默认逐值一致，默认视觉不漂移。
+function bookLayoutConfig(draft, pageSize) {
+  const profile = bookTypographyProfile(draft);
+  const size = profile.sizes[pageSize] || profile.sizes.A5;
+  const raw = ((draft || {}).layout || {}).profile_overrides;
+  const overrides = {};
+  if (raw && typeof raw === "object") {
+    for (const key of BOOK_PROFILE_OVERRIDE_KEYS) {
+      const value = raw[key];
+      if (typeof value === "number" && Number.isFinite(value) && value > 0) overrides[key] = value;
+    }
+  }
+  const topMm = overrides.topMm ?? size.topMm;
+  const bottomMm = overrides.bottomMm ?? size.bottomMm;
+  const innerMm = overrides.innerMm ?? size.innerMm;
+  const outerMm = overrides.outerMm ?? size.outerMm;
+  const bodyPt = overrides.bodyPt ?? profile.body_pt;
+  const leadingPt = overrides.leadingPt ?? profile.leading_pt;
+  const baseWidth = size.widthMm - size.innerMm - size.outerMm;
+  const baseHeight = size.heightMm - size.topMm - size.bottomMm;
+  const charsRatio = ((size.widthMm - innerMm - outerMm) / baseWidth) * (profile.body_pt / bodyPt);
+  const linesRatio = ((size.heightMm - topMm - bottomMm) / baseHeight) * (profile.leading_pt / leadingPt);
+  return {
+    profileId: profile.id,
+    topMm, bottomMm, innerMm, outerMm, bodyPt, leadingPt,
+    overrides,
+    firstLines: Math.max(2, Math.floor(size.firstLines * linesRatio)),
+    continuationLines: Math.max(3, Math.floor(size.continuationLines * linesRatio)),
+    charsPerLine: Math.max(4, Math.round(size.charsPerLine * charsRatio)),
+    tocPerPage: Math.max(4, Math.floor(size.tocPerPage * linesRatio)),
+    widthEm: (size.widthMm - innerMm - outerMm) / (bodyPt * 0.3527777),
+  };
+}
+
+// 把解析后的版式参数注入 CSS 变量，供完整排版页的固定物理单位样式使用。
+function bookTypographyStyle(draft, pageSize) {
+  const config = bookLayoutConfig(draft, pageSize);
+  return `--bm-top:${config.topMm}mm;--bm-bottom:${config.bottomMm}mm;`
+    + `--bm-inner:${config.innerMm}mm;--bm-outer:${config.outerMm}mm;`
+    + `--bm-body-pt:${config.bodyPt}pt;--bm-leading-pt:${config.leadingPt}pt`;
+}
+
+function bookContentLines(poem, draft) {
+  const lines = bookProofText(poem || {}, draft)
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map(line => line.replace(/[ \t\u3000]+$/u, ""));
+  while (lines.length && !lines[0].trim()) lines.shift();
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  return lines;
+}
+
+function bookLineParts(line) {
+  const raw = String(line || "");
+  let offset = 0, indentEm = 0;
+  for (const char of raw) {
+    if (char === "\u3000") indentEm += 1;
+    else if (char === "\t") indentEm += 2;
+    else if (char === " " || char === "\u00a0") indentEm += .5;
+    else break;
+    offset += char.length;
+  }
+  return { text: raw.slice(offset), indentEm };
+}
+
+const BOOK_FORBID_LINE_START = new Set(Array.from("，。、；：！？）》〉】〕〗〙〛’”…—％"));
+const BOOK_FORBID_LINE_END = new Set(Array.from("（《〈【〔〖〘〚‘“"));
+
+// 宽度按“全角字宽”记账：CJK/全角标点记 1，半角字母数字与空格记 0.5。
+// 正文字距 .05em 直接烘进宽度（1.05/0.55），折行估算与真实渲染一致，
+// 不会再出现“估算放得下、浏览器二次折行”的偏差。
+const BOOK_TRACKED = 1.05;
+function bookCharWidthEm(char) {
+  const code = char.codePointAt(0);
+  if ((code >= 0x2e80 && code <= 0x9fff) || (code >= 0xac00 && code <= 0xd7af)
+    || (code >= 0xf900 && code <= 0xfaff) || (code >= 0x3000 && code <= 0x303f)
+    || (code >= 0xff00 && code <= 0xffef) || (code >= 0xfe30 && code <= 0xfe4f)
+    || "‘’“”…—·".includes(char)) return BOOK_TRACKED;
+  return .5 * BOOK_TRACKED;
+}
+
+function bookTextWidthEm(text) {
+  let width = 0;
+  for (const char of String(text || "")) width += bookCharWidthEm(char);
+  return width;
+}
+
+// 折行只能在“词”之间发生：全角字符逐字成词，连续半角串成一个词（行尾空格
+// 随词带走）。行首禁则、行尾禁则沿用既有集合，在词序列上回退。
+function bookWordTokens(text) {
+  const tokens = [];
+  let word = "", wordWidth = 0;
+  const flush = () => {
+    if (word) { tokens.push({ text: word, width: wordWidth }); word = ""; wordWidth = 0; }
+  };
+  for (const char of Array.from(text)) {
+    if (char === " ") { word += char; wordWidth += .5 * BOOK_TRACKED; flush(); continue; }
+    if (bookCharWidthEm(char) >= 1) {
+      flush(); tokens.push({ text: char, width: BOOK_TRACKED }); continue;
+    }
+    word += char; wordWidth += .5 * BOOK_TRACKED;
+  }
+  flush();
+  return tokens;
+}
+
+function bookWrapLine(line, charsPerLine) {
+  const parts = bookLineParts(line);
+  if (!parts.text) return [{ text: "", indentEm: parts.indentEm, machineContinuation: false }];
+  // 只超出行宽不足一个全角字的行整行保留并微缩字距（渲染层加 .tight），
+  // 不为多出的一个字制造孤字续行。
+  const indentCapacityEm = Math.max(1, charsPerLine - Math.ceil(parts.indentEm)) * BOOK_TRACKED;
+  const lineWidth = bookTextWidthEm(parts.text);
+  if (lineWidth > indentCapacityEm + 1e-6 && lineWidth <= indentCapacityEm + BOOK_TRACKED + .01) {
+    return [{ text: parts.text, indentEm: parts.indentEm, machineContinuation: false, tight: true }];
+  }
+  const tokens = bookWordTokens(parts.text);
+  const wrapped = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const machineContinuation = wrapped.length > 0;
+    // 折行续行只缩进一个汉字（参照《海子的诗》人文社版的 1 字回行）。
+    const visualIndent = Math.ceil(parts.indentEm) + (machineContinuation ? 1 : 0);
+    // 容量是“字符数”，宽度是“含字距 em”，两者相乘即本行可用宽度。
+    const capacityEm = Math.max(1, charsPerLine - visualIndent) * BOOK_TRACKED;
+    let width = 0, take = 0;
+    while (index + take < tokens.length) {
+      const tokenWidth = tokens[index + take].width;
+      if (take > 0 && width + tokenWidth > capacityEm + 1e-9) break;
+      width += tokenWidth; take++;
+    }
+    if (index + take < tokens.length) {
+      while (take > 1 && (BOOK_FORBID_LINE_START.has(tokens[index + take].text[0])
+        || BOOK_FORBID_LINE_END.has(tokens[index + take - 1].text.slice(-1))
+        || tokens[index + take].text[0] === " ")) take--;
+    }
+    const chunk = tokens.slice(index, index + take);
+    const chunkWidth = chunk.reduce((sum, token) => sum + token.width, 0);
+    if (take === 1 && chunkWidth > capacityEm + 1e-9) {
+      // 单词独占一行仍放不下（超长西文串）：按宽度硬切，宁切不断行溢出。
+      let run = "", runWidth = 0;
+      for (const char of Array.from(chunk[0].text)) {
+        const charWidth = bookCharWidthEm(char);
+        if (run && runWidth + charWidth > capacityEm + 1e-9) {
+          wrapped.push({ text: run, indentEm: parts.indentEm, machineContinuation: wrapped.length > 0 });
+          run = ""; runWidth = 0;
+        }
+        run += char; runWidth += charWidth;
+      }
+      if (run) wrapped.push({ text: run, indentEm: parts.indentEm, machineContinuation: wrapped.length > 0 });
+      index += take;
+      continue;
+    }
+    wrapped.push({ text: chunk.map(token => token.text).join(""), indentEm: parts.indentEm, machineContinuation });
+    index += take;
+  }
+  // 收尾：末片段只剩不足一个全角字（含逗号句号）时并回上一片段并微缩字距，
+  // 不让孤字挂着两格缩进单独成行。
+  if (wrapped.length >= 2) {
+    const last = wrapped[wrapped.length - 1];
+    const prev = wrapped[wrapped.length - 2];
+    const lastWidth = bookTextWidthEm(last.text);
+    if (lastWidth > 0 && lastWidth <= BOOK_TRACKED + .001) {
+      const prevIndent = Math.ceil(prev.indentEm) + (prev.machineContinuation ? 1 : 0);
+      const prevCapacityEm = Math.max(1, charsPerLine - prevIndent) * BOOK_TRACKED;
+      if (bookTextWidthEm(prev.text) + lastWidth <= prevCapacityEm + BOOK_TRACKED + .01) {
+        prev.text += last.text;
+        prev.tight = true;
+        wrapped.pop();
+      }
+    }
+  }
+  return wrapped;
+}
+
+function bookStanzas(poem, draft) {
+  const contentLines = bookContentLines(poem, draft);
+  if (!contentLines.length) return [[]];
+  const proof = bookProofBreakRecord(draft, poem);
+  const explicitBreaks = !proof.active && S.stanzas && S.stanzas[poem.id];
+  if (Array.isArray(explicitBreaks)) {
+    const lines = contentLines.filter(line => line.trim());
+    const breaks = new Set(explicitBreaks);
+    const stanzas = [];
+    let current = [];
+    lines.forEach((line, index) => {
+      current.push(line);
+      if (breaks.has(index)) { stanzas.push(current); current = []; }
+    });
+    if (current.length) stanzas.push(current);
+    return stanzas.length ? stanzas : [[]];
+  }
+  const stanzas = [];
+  let current = [];
+  contentLines.forEach(line => {
+    if (line.trim()) current.push(line);
+    else if (current.length) { stanzas.push(current); current = []; }
+  });
+  if (current.length) stanzas.push(current);
+  return stanzas.length ? stanzas : [[]];
+}
+
+function bookLineUnits(line, charsPerLine) {
+  return bookWrapLine(line, charsPerLine).length;
+}
+
+function bookLineMarkup(line) {
+  const parts = typeof line === "object" && line !== null
+    ? line : { ...bookLineParts(line), machineContinuation: false };
+  const visualIndent = parts.indentEm + (parts.machineContinuation ? 1 : 0);
+  const indent = Number(visualIndent.toFixed(2));
+  const classes = [parts.machineContinuation ? "machine-continuation" : "",
+    parts.tight ? "tight" : ""].filter(Boolean).join(" ");
+  const cls = classes ? ` class="${classes}"` : "";
+  return `<p${cls} style="--poem-indent:${indent}em">${esc(parts.text) || "&nbsp;"}</p>`;
+}
+
+function bookPaginatePoem(poem, pageSize, config, draft) {
+  const cfg = config || BOOK_LAYOUTS[pageSize] || BOOK_LAYOUTS.A5;
+  const endDateReserve = bookDatePosition(draft) === "poem_end" && bookPoemDate(poem) ? 2 : 0;
+  // 标题下的日期占一行；长标题按实际宽度折算成行数，只预留超出首行的部分。
+  const underTitleReserve = bookDatePosition(draft) === "under_title" && bookPoemDate(poem) ? 1 : 0;
+  const titleLines = Math.max(1, Math.ceil(bookTextWidthEm(poem.title) * 1.48 / Math.max(1, cfg.charsPerLine)));
+  const titleReserve = Math.max(0, titleLines - 1);
+  const pages = [];
+  let blocks = [], used = 0, pageNumber = 0, placedTotal = 0;
+  const baseCapacity = () => Math.max(2, (pageNumber === 0 ? cfg.firstLines : cfg.continuationLines)
+    - titleReserve - underTitleReserve);
+  // 日期只印在本诗最后一页：剩余内容能落进本页时（哪怕挤掉两行）就为本页扣两行；
+  // 放不下就翻页，让末页带上日期。绝不出现日期悬在版心外。
+  const capacity = () => {
+    const base = baseCapacity();
+    const reserve = endDateReserve && (totalUnits - placedTotal) <= base ? endDateReserve : 0;
+    return Math.max(2, base - reserve);
+  };
+  const blockUnits = lines => lines.length;
+  const flush = () => {
+    if (!blocks.length) return;
+    pages.push({
+      kind: "poem", poem, poemId: poem.id, title: poem.title,
+      continuation: pageNumber > 0, stanzas: blocks,
+    });
+    blocks = []; used = 0; pageNumber++;
+  };
+
+  const stanzaFragments = bookStanzas(poem, draft).map(stanza => {
+    const fragments = stanza.flatMap(line => bookWrapLine(line, cfg.charsPerLine));
+    return fragments.length ? fragments : [bookWrapLine("", cfg.charsPerLine)[0]];
+  });
+  const totalUnits = stanzaFragments.reduce((sum, fragments) => sum + fragments.length, 0);
+
+  for (const fragments of stanzaFragments) {
+    let remaining = fragments;
+    while (remaining.length) {
+      // 段间空隙 = 一个空行（一行 leading），与样式表一致。
+      const gap = blocks.length ? 1 : 0;
+      const allUnits = blockUnits(remaining);
+      if (used + gap + allUnits <= capacity()) {
+        blocks.push(remaining); used += gap + allUnits; placedTotal += allUnits; remaining = [];
+        continue;
+      }
+      if (blocks.length) {
+        // 左页走满再走右页：把能放下的行放进来，余下整体走下一页。
+        // 宁可页内拆段，也不留大面积空白或孤零零的尾巴（作者拍板的简单规则）。
+        const space = Math.max(0, capacity() - used - gap);
+        if (space > 0) {
+          blocks.push(remaining.slice(0, space));
+          used += gap + space; placedTotal += space;
+          remaining = remaining.slice(space);
+        }
+        flush();
+        continue;
+      }
+      // 空白页但整段超容量：逐行填满本页（容量可能随日期预留动态变化），
+      // 余下走下一页。
+      let take = 0, units = 0;
+      while (take < remaining.length) {
+        if (take > 0 && units + 1 > capacity()) break;
+        units += 1; take++;
+        if (units >= capacity()) break;
+      }
+      blocks.push(remaining.slice(0, take));
+      used = take; placedTotal += take;
+      remaining = remaining.slice(take);
+      flush();
+    }
+  }
+  flush();
+  return pages.length ? pages : [{ kind: "poem", poem, poemId: poem.id, title: poem.title, continuation: false, stanzas: [[]] }];
+}
+
+// 插入页：作者手排的散文页/诗页/空白页（序、后记、辑间随笔、预留空白）。
+// 旧方案没有 pages 键 = 无插页，行为逐字节不漂移；正文只存方案侧车，
+// 不复制进排印清单正文，与作品正文同一待遇。
+function bookInsertedPages(draft) {
+  const raw = (draft || {}).pages;
+  if (!Array.isArray(raw)) return [];
+  return raw.filter(page => page && typeof page === "object" && page.id).map(page => ({
+    id: String(page.id),
+    kind: page.kind === "poem" || page.kind === "blank" || page.kind === "image" ? page.kind : "prose",
+    title: String(page.title || "").trim(),
+    body: String(page.body || ""),
+    placement: String(page.placement || "front"),
+    toc: page.toc !== false,
+    imageId: page.kind === "image" ? String(page.image_id || page.imageId || "") : "",
+  })).filter(page => page.id);
+}
+
+// 散文折行：与诗集同一宽度模型（词边界 + .05em 字距），但版式惯例不同——
+// 首行缩进两字、续行顶格（中文出版物段式，无悬挂缩进）。
+function bookWrapProseParagraph(text, charsPerLine) {
+  const tokens = bookWordTokens(text);
+  const lines = [];
+  let index = 0, first = true;
+  while (index < tokens.length) {
+    const capacityEm = Math.max(1, charsPerLine - (first ? 2 : 0)) * BOOK_TRACKED;
+    let width = 0, take = 0;
+    while (index + take < tokens.length) {
+      const tokenWidth = tokens[index + take].width;
+      if (take > 0 && width + tokenWidth > capacityEm + 1e-9) break;
+      width += tokenWidth; take++;
+    }
+    if (index + take < tokens.length) {
+      while (take > 1 && (BOOK_FORBID_LINE_START.has(tokens[index + take].text[0])
+        || BOOK_FORBID_LINE_END.has(tokens[index + take - 1].text.slice(-1))
+        || tokens[index + take].text[0] === " ")) take--;
+    }
+    if (take === 1 && tokens[index].width > capacityEm + 1e-9) {
+      // 超长无断点串（网址等）：按宽度硬切，宁切不断行溢出。
+      let run = "", runWidth = 0;
+      for (const char of Array.from(tokens[index].text)) {
+        const charWidth = bookCharWidthEm(char);
+        if (run && runWidth + charWidth > capacityEm + 1e-9) {
+          lines.push({ text: run, first }); run = ""; runWidth = 0; first = false;
+        }
+        run += char; runWidth += charWidth;
+      }
+      if (run) lines.push({ text: run, first });
+      first = false;
+      index += 1;
+      continue;
+    }
+    lines.push({ text: tokens.slice(index, index + take).map(t => t.text).join(""), first });
+    index += take;
+    first = false;
+  }
+  return lines;
+}
+
+// 散文分页：段落按空行分隔、段间不空行（段落靠首行缩进识别）；标题只占首页，
+// 按实际宽度折算行数再让一行间距；段落可在页界拆开，拆出的续段不再缩进。
+// 行盒与诗段同源（print 层 min-height = leading），估算与渲染不各说各话。
+function bookPaginateProse(essay, cfg) {
+  const paragraphs = String(essay.body || "").split(/\n\s*\n/)
+    .map(p => p.split(/\n/).map(s => s.trim()).filter(Boolean).join(" ").trim())
+    .filter(Boolean);
+  const titleLines = essay.title
+    ? Math.max(1, Math.ceil(bookTextWidthEm(essay.title) * 1.48 / Math.max(1, cfg.charsPerLine))) : 0;
+  const titleReserve = essay.title ? titleLines + 1 : 0;
+  const paraLines = paragraphs.map(text => bookWrapProseParagraph(text, cfg.charsPerLine));
+  const pages = [];
+  let chunks = [], used = 0, pageNumber = 0;
+  const capacity = () => Math.max(2, (pageNumber === 0 ? cfg.firstLines : cfg.continuationLines)
+    - (pageNumber === 0 ? titleReserve : 0));
+  const flush = () => {
+    if (!chunks.length) return;
+    pages.push({ kind: "prose", essayId: essay.id, title: essay.title,
+      continuation: pageNumber > 0, chunks });
+    chunks = []; used = 0; pageNumber++;
+  };
+  for (const lines of paraLines) {
+    let remaining = lines;
+    while (remaining.length) {
+      if (used + remaining.length <= capacity()) {
+        chunks.push({ text: remaining.map(l => l.text).join(""), indent: remaining[0].first });
+        used += remaining.length;
+        remaining = [];
+        continue;
+      }
+      const space = Math.max(0, capacity() - used);
+      if (space > 0) {
+        chunks.push({ text: remaining.slice(0, space).map(l => l.text).join(""), indent: remaining[0].first });
+        used += space;
+        remaining = remaining.slice(space);
+      }
+      flush();
+    }
+  }
+  flush();
+  return pages.length ? pages
+    : [{ kind: "prose", essayId: essay.id, title: essay.title, continuation: false, chunks: [{ text: "", indent: true }] }];
+}
+
+function bookPaginateInsertedPage(page, pageSize, config, draft) {
+  if (page.kind === "blank") return [{ kind: "blank", inserted: true }];
+  if (page.kind === "image") {
+    // 图片页整页容纳一幅插图，无分页概念；图注随 essayTitle 渲染。
+    return [{ kind: "image", inserted: true, imageId: page.imageId }];
+  }
+  if (page.kind === "poem") {
+    // 插入诗页走诗歌分页器全套（标题预留、段间空行、居中成块、未完提示）；
+    // 无 created 即无日期，伪 ID 不会撞到分段侧车与校样分行。
+    return bookPaginatePoem({ id: page.id, title: page.title || "无题",
+      content: page.body, created: "", content_hash: `inserted:${page.id}` },
+      pageSize, config, draft).map(item => ({ ...item, inserted: true }));
+  }
+  return bookPaginateProse(page, config);
+}
+
+// schema 1 的只读适配器：flow 是唯一正文组装次序，不是新的持久字段。
+// 编译不改 draft，不产生随机 ID；无法理解的内容保留占位并阻止完整导出。
+function bookCompileDocument(draft) {
+  const flow = [], diagnostics = [], attachments = [];
+  const seen = new Set();
+  const issue = (code, id, message) => diagnostics.push({ code, id, message, blocking: true });
+  const add = node => {
+    if (seen.has(node.id)) {
+      issue("duplicate-block", node.id, "内容标识重复，请检查方案");
+      return;
+    }
+    seen.add(node.id); flow.push(node);
+  };
+  for (const key of ["poem_ids", "sections", "pages"]) {
+    if (draft[key] !== undefined && !Array.isArray(draft[key])) issue("invalid-collection", key, "内容集合格式无法识别");
+  }
+  const poemIds = Array.isArray(draft.poem_ids) ? draft.poem_ids : [];
+  const ids = new Set(poemIds);
+  const sections = bookSections(draft);
+  const sectionMap = new Map();
+  sections.forEach(section => {
+    if (!section || typeof section !== "object" || !section.id) {
+      issue("invalid-section", "section", "分辑格式无法识别"); return;
+    }
+    if (!ids.has(section.before_poem_id) || sectionMap.has(section.before_poem_id)) {
+      issue("section-anchor", section.id, "分辑起点缺失或重复，请重新定位");
+    } else sectionMap.set(section.before_poem_id, section);
+  });
+  const rawPages = Array.isArray(draft.pages) ? draft.pages : [];
+  const normalized = bookInsertedPages(draft);
+  const inserts = rawPages.map((raw, index) => {
+    const id = `insert:${raw?.id || "invalid-" + index}`;
+    const page = normalized.find(item => item.id === String(raw?.id));
+    const placement = String(raw?.placement || "front");
+    const validKind = ["prose", "poem", "blank", "image"].includes(raw?.kind || "prose");
+    const validAnchor = placement === "front" || placement === "back"
+      || (placement.startsWith("before:") && ids.has(placement.slice(7)));
+    if (!page || !validKind || !validAnchor) {
+      issue("unsupported-insert", id, "插入内容类型或位置无法识别，请升级或重新定位");
+      return { id, type: "unsupported", placement: validAnchor ? placement : "back",
+        message: "未能排入的插入内容（原记录保留）", toc: false };
+    }
+    return { id, type: "insert", placement, page, toc: page.toc && page.kind !== "blank" };
+  });
+  const at = placement => inserts.filter(node => node.placement === placement).forEach(add);
+  at("front");
+  let sectionTitle = "";
+  poemIds.forEach((poemId, index) => {
+    const section = sectionMap.get(poemId);
+    if (section) sectionTitle = section.title;
+    at(`before:${poemId}`);
+    if (section) add({ id: `section:${section.id}`, type: "section", section: { ...section }, toc: true });
+    if (!maps.poem.has(poemId)) {
+      issue("missing-poem", `poem:${poemId}`, "引用的作品不存在，请检查方案");
+      add({ id: `poem:${poemId}`, type: "unsupported", message: "未找到引用作品", toc: false });
+    } else add({ id: `poem:${poemId}`, type: "poem", poemId, poemIndex: index, sectionTitle, toc: true });
+  });
+  at("back");
+  Object.entries(draft.tailpieces || {}).forEach(([poemId, imageId]) => {
+    if (!ids.has(poemId)) issue("attachment-anchor", `tailpiece:${poemId}`, "尾花所属作品不在本书中");
+    attachments.push({ id: `tailpiece:${poemId}`, type: "image", role: "tailpiece",
+      resourceId: imageId, anchor: { blockId: `poem:${poemId}`, edge: "end" } });
+  });
+  return { kind: "book-document", adapterVersion: 1, flow, attachments, diagnostics };
+}
+
+// 旧尾花的保守占位预算。图框最高 24mm + 上距 18pt，预算不足时不硬塞。
+// 后续通用图片块复用“先测量/占位，再渲染”的契约，不能回到渲染后追加。
+function bookTailpiecePlacement(page, draft, config) {
+  const resourceId = (draft.tailpieces || {})[page.poemId];
+  if (!page.isLastPoemPage || !resourceId || page.inserted) return null;
+  const titleLines = Math.max(1, Math.ceil(bookTextWidthEm(page.poem.title) * 1.48 / Math.max(1, config.charsPerLine)));
+  const date = bookPoemDate(page.poem);
+  const datePosition = bookDatePosition(draft);
+  const capacity = Math.max(2, (page.continuation ? config.continuationLines : config.firstLines)
+    - Math.max(0, titleLines - 1) - (date && datePosition === "under_title" ? 1 : 0));
+  const used = page.stanzas.reduce((sum, stanza) => sum + stanza.length, 0)
+    + Math.max(0, page.stanzas.length - 1) + (date && datePosition === "poem_end" ? 2 : 0);
+  const requiredPt = 24 * 72 / 25.4 + 18;
+  const availablePt = Math.max(0, capacity - used) * config.leadingPt;
+  return { resourceId, frameHeightMm: 24, gapPt: 18, availablePt,
+    fits: availablePt + 1e-6 >= requiredPt };
+}
+
+function bookRequireCompleteLayout(preview) {
+  const problems = (preview.diagnostics || []).filter(item => item.blocking);
+  if (problems.length) throw new Error(`本书有 ${problems.length} 处未解决内容，不能完整导出：${problems[0].message}`);
+}
+
+function bookBuildPreview(draft) {
+  const pageSize = (draft.layout || {}).page_size || "A5";
+  const config = bookLayoutConfig(draft, pageSize);
+  const document = bookCompileDocument(draft);
+  const frontMatter = bookFrontMatter(draft);
+  const frontPages = [];
+  if (frontMatter.title_page) frontPages.push({ kind: "title", recto: true });
+  const colophonText = frontMatter.colophon.trim();
+  if (colophonText) frontPages.push({ kind: "colophon", text: colophonText });
+  const dedicationText = frontMatter.dedication.trim();
+  if (dedicationText) frontPages.push({ kind: "dedication", text: dedicationText, recto: true });
+  // 封面属于书壳，不拿它冒充书芯的第一页。启用任一前置页时，先放一张
+  // 不印 folio 的封二空白；双页校样仍以 verso/recto 成对展示，因此第一张
+  // 有内容的前置页会稳定落在右页。旧方案没有前置页时不插页，保持既有输出。
+  // 题词页与书名页按出版惯例必须右页起排，若物理位落在 verso 就补一张空白；
+  // 出版说明延续“书名页背面”的传统，紧跟前一页不强制右页。
+  const frontSequence = [];
+  if (frontPages.length) {
+    frontSequence.push({ kind: "blank", zone: "inside-cover" });
+    frontPages.forEach(page => {
+      if (page.recto && (1 + frontSequence.length) % 2 === 1) {
+        frontSequence.push({ kind: "blank", zone: "front" });
+      }
+      frontSequence.push(page);
+    });
+  }
+  const tocItemCount = document.flow.filter(node => node.toc).length;
+  const tocPageCount = tocItemCount ? Math.max(1, Math.ceil(tocItemCount / config.tocPerPage)) : 0;
+  const contentPages = [];
+  const tocItems = [];
+  const entries = [];
+  let folio = 1;
+  for (const node of document.flow) {
+    if (node.type === "unsupported") {
+      contentPages.push({ kind: "unsupported", message: node.message, folio: folio++, blockId: node.id });
+      continue;
+    }
+    if (node.type === "insert") {
+      const page = node.page;
+      const bundle = bookPaginateInsertedPage(page, pageSize, config, draft);
+      bundle.forEach((item, at) => {
+        item.folio = folio++;
+        item.blockId = node.id;
+        item.essayId = page.id;
+        item.essayTitle = page.title;
+        if (item.kind === "poem") item.isLastPoemPage = at === bundle.length - 1;
+        contentPages.push(item);
+      });
+      if (node.toc) tocItems.push({ kind: "essay", title: page.title || "无题", folio: bundle[0].folio });
+      continue;
+    }
+    if (node.type === "section") {
+      const section = node.section;
+      const absoluteNextIndex = 1 + frontSequence.length + tocPageCount + contentPages.length;
+      if (bookSectionStart(draft) === "recto" && absoluteNextIndex % 2 === 1) {
+        contentPages.push({ kind: "blank", folio: folio++ });
+      }
+      const sectionPage = { kind: "section", section, folio: folio++, blockId: node.id };
+      contentPages.push(sectionPage);
+      tocItems.push({ kind: "section", title: section.title, folio: sectionPage.folio, sectionId: section.id });
+      continue;
+    }
+    const poem = maps.poem.get(node.poemId);
+    const bundle = bookPaginatePoem(poem, pageSize, config, draft);
+    const entry = { kind: "poem", ordinal: node.poemIndex + 1, title: poem.title, folio,
+      poemId: poem.id, pageCount: bundle.length };
+    bundle.forEach((page, index) => {
+      page.folio = folio++;
+      page.blockId = node.id;
+      page.poemIndex = node.poemIndex;
+      page.poemPageIndex = index;
+      page.isLastPoemPage = index === bundle.length - 1;
+      page.sectionTitle = node.sectionTitle;
+      page.tailpiecePlacement = bookTailpiecePlacement(page, draft, config);
+      if (page.tailpiecePlacement && !page.tailpiecePlacement.fits) {
+        document.diagnostics.push({ code: "tailpiece-overflow", id: node.id, blocking: true,
+          message: `《${poem.title}》末页余白不足以容纳尾花，请移除尾花或改为独立图片页` });
+      }
+      contentPages.push(page);
+    });
+    entries.push(entry); tocItems.push(entry);
+  }
+  const pages = [{ kind: "cover", title: draft.title }];
+  frontSequence.forEach(page => pages.push(page));
+  for (let index = 0; index < tocPageCount; index++) {
+    pages.push({
+      kind: "toc", tocIndex: index,
+      entries: tocItems.slice(index * config.tocPerPage, (index + 1) * config.tocPerPage),
+    });
+  }
+  contentPages.forEach(page => pages.push(page));
+  const jumps = [{ label: "封面", index: 0 }];
+  for (let index = 1; index < pages.length; index += 2) {
+    const labels = pages.slice(index, index + 2).map(page => {
+      if (page.kind === "dedication") return "题词";
+      if (page.kind === "title") return "书名页";
+      if (page.kind === "colophon") return "出版说明";
+      if (page.kind === "toc") return page.tocIndex ? "目次·续" : "目次";
+      if (page.kind === "section") return page.section.title;
+      if (page.kind === "prose") return `${page.essayTitle || "长文"}${page.continuation ? "·续" : ""}`;
+      if (page.kind === "poem") return `${page.title}${page.continuation ? "·续" : ""}`;
+      return "";
+    }).filter((label, at, all) => label && all.indexOf(label) === at);
+    jumps.push({ label: labels.join(" / "), index });
+  }
+  return { pageSize, pages, entries, tocItems, jumps, diagnostics: document.diagnostics, poemPages: folio - 1,
+    frontMatterPages: frontPages.length,
+    frontBlankPages: frontSequence.length - frontPages.length };
+}
+
+function bookPageMarkup(page, draft, pageIndex, pageSize, blockCorrectionPx = 0) {
+  const side = pageIndex === 0 ? "cover" : (pageIndex % 2 ? "verso" : "recto");
+  const shell = (className, inner, extra = "") => `<section class="book-sheet size-${pageSize.toLowerCase()} ${side} ${className}" data-page-kind="${page.kind}"${extra}>${inner}</section>`;
+  const marks = bookPageMarks(draft);
+  const bookTitle = draft.title || "未名诗集";
+  // 页眉左栏：书名位可换成所属辑名（section/both 模式）；没有所属辑的页回退书名。
+  const headLeft = sectionTitle => {
+    const mode = bookRunningHeadContent(draft);
+    if (mode === "book" || !sectionTitle) return bookTitle;
+    return mode === "section" ? sectionTitle : `${bookTitle} · ${sectionTitle}`;
+  };
+  const running = (left, right) => marks.running_head
+    ? `<div class="book-page-running"><span>${esc(left)}</span><span>${esc(right)}</span></div>` : "";
+  const pageNumber = value => marks.folio ? `<span class="book-page-folio">${value}</span>` : "";
+  if (page.kind === "cover") return shell("book-cover-sheet", `
+    <span class="book-cover-proof">试排</span>
+    <div class="book-cover-title"><h2>${esc(draft.title || "未名诗集")}</h2>${draft.subtitle ? `<p>${esc(draft.subtitle)}</p>` : ""}</div>
+    <div class="book-cover-rule"></div>
+    ${draft.author ? `<p class="book-cover-author">${esc(draft.author)}</p>` : ""}`);
+  if (page.kind === "blank") return shell("book-blank-sheet", "");
+  if (page.kind === "unsupported") return shell("book-prose-sheet", `<article class="book-prose-body"><h2>内容待处理</h2><p>${esc(page.message)}</p></article>`);
+  if (page.kind === "dedication") return shell("book-dedication-sheet", `
+    <article class="book-dedication-page"><div>${esc(page.text)}</div></article>`);
+  if (page.kind === "title") return shell("book-title-sheet", `
+    <article class="book-title-page">
+      <h2>${esc(draft.title || "未名诗集")}</h2>
+      ${draft.subtitle ? `<p>${esc(draft.subtitle)}</p>` : ""}
+      ${draft.author ? `<span>${esc(draft.author)}</span>` : ""}
+    </article>`);
+  if (page.kind === "colophon") return shell("book-colophon-sheet", `
+    <article class="book-colophon-page">
+      <p>COLOPHON</p><h2>出版说明</h2>
+      <div>${esc(page.text)}</div>
+    </article>`);
+  if (page.kind === "toc") return shell("book-toc-sheet", `
+    ${running(bookTitle, "目次")}
+    <div class="book-toc-body"><p class="book-toc-kicker">CONTENTS</p><h2>目次</h2>
+      <ol>${page.entries.map(entry => `<li data-folio="${entry.folio}" class="${entry.kind === "section" ? "section-entry" : (entry.kind === "essay" ? "essay-entry" : "")}"><span>${entry.kind === "section" ? "辑" : (entry.kind === "essay" || !bookShowNumbering(draft) ? "" : String(entry.ordinal).padStart(2, "0"))}</span><b>${esc(entry.title)}</b><i></i><em>${entry.folio}</em></li>`).join("")}</ol>
+    </div>`);
+  if (page.kind === "section") return shell("book-section-sheet", `
+    ${running(headLeft(page.section.title), page.folio)}
+    <article class="book-section-page">
+      <p>SECTION</p><h2>${esc(page.section.title)}</h2>
+      ${page.section.subtitle ? `<div>${esc(page.section.subtitle)}</div>` : ""}
+    </article>
+    ${pageNumber(page.folio)}`);
+  if (page.kind === "image") return shell("book-image-sheet", `
+    ${running(headLeft(""), page.folio)}
+    <figure class="book-image-page">
+      <img src="/api/books/image/${esc(page.imageId)}" alt="">
+      ${page.essayTitle ? `<figcaption>${esc(page.essayTitle)}</figcaption>` : ""}
+    </figure>
+    ${pageNumber(page.folio)}`, ` data-essay-id="${esc(page.essayId)}"`);
+  if (page.kind === "prose") return shell("book-prose-sheet", `
+    ${running(pageIndex % 2 ? headLeft("") : (page.essayTitle || bookTitle), page.folio)}
+    <article class="book-prose-body">
+      ${!page.continuation && page.essayTitle ? `<header><h2>${esc(page.essayTitle)}</h2></header>` : ""}
+      ${page.chunks.map(chunk => `<p${chunk.indent ? "" : ' class="no-indent"'}>${esc(chunk.text) || "&nbsp;"}</p>`).join("")}
+    </article>
+    ${pageNumber(page.folio)}`, ` data-essay-id="${esc(page.essayId)}"`);
+  const poem = page.poem;
+  const date = bookPoemDateText(poem);
+  const datePosition = bookDatePosition(draft);
+  const centerMode = bookBlockAlign(draft) === "center";
+  const blockShift = centerMode
+    ? bookBlockShiftEm(page, bookLayoutConfig(draft, pageSize).widthEm) : 0;
+  const blockCorrection = Number(blockCorrectionPx) || 0;
+  const tailpieceId = (draft.tailpieces || {})[page.poemId];
+  const showTailpiece = Boolean(page.isLastPoemPage && tailpieceId && page.tailpiecePlacement?.fits);
+  return shell("book-poem-sheet", `
+    ${running(pageIndex % 2 ? headLeft(page.sectionTitle) : poem.title, page.folio)}
+    <article class="book-typeset-body ${page.continuation ? "continued" : ""} ${centerMode ? "book-align-center" : ""}" style="--poem-block-shift:${blockShift}em">
+      ${page.continuation ? `<p class="book-continuation">${esc(poem.title)} · 续</p>` : `<header>${bookShowNumbering(draft) && !page.inserted ? `<p>第 ${String(page.poemIndex + 1).padStart(2, "0")} 首</p>` : ""}<h2>${esc(poem.title)}</h2>${date && datePosition === "under_title" ? `<time class="book-poem-date under-title">${esc(date)}</time>` : ""}</header>`}
+      <div class="book-typeset-poem"${blockCorrection ? ` style="transform:translateX(${blockCorrection}px)"` : ""}>${page.stanzas.map(stanza => `<div>${stanza.map(bookLineMarkup).join("")}</div>`).join("")}</div>
+      ${date && datePosition === "poem_end" && page.isLastPoemPage ? `<time class="book-poem-date poem-end">${esc(date)}</time>` : ""}
+      ${showTailpiece ? `<figure class="book-poem-tailpiece"><img src="/api/books/image/${esc(tailpieceId)}" alt="尾花"></figure>` : ""}
+    </article>
+    ${pageNumber(page.folio)}${!page.isLastPoemPage && bookContinueHint(draft) ? `<span class="book-page-continue">（未完）</span>` : ""}`,
+    ` data-poem-id="${esc(page.poemId)}"${page.inserted ? ` data-essay-id="${esc(page.essayId)}"` : ""}${page.isLastPoemPage ? ' data-is-last-page="true"' : ""}`);
+}
+
+function bookPrintManifest(draft, preview) {
+  bookRequireCompleteLayout(preview);
+  const size = bookTypographyProfile(draft).sizes[preview.pageSize]
+    || BOOK_PUBLICATION_PROFILE.sizes.A5;
+  const config = bookLayoutConfig(draft, preview.pageSize);
+  const profile = bookTypographyProfile(draft);
+  const entries = new Map(preview.entries.map(entry => [entry.poemId, entry]));
+  const sectionByPoem = bookSectionMap(draft);
+  return {
+    schema: 1,
+    kind: "zhouqingji-book-manifest",
+    generated_at: new Date().toISOString(),
+    app_version: S.version || null,
+    book: {
+      id: draft.id || null,
+      title: draft.title || "未名诗集",
+      subtitle: draft.subtitle || "",
+      author: draft.author || "",
+      layout: {
+        page_size: preview.pageSize, start_each_poem: true,
+        ...bookPageMarks(draft),
+        section_start: bookSectionStart(draft),
+        date_position: bookDatePosition(draft),
+        interior_color: bookInteriorColor(draft),
+        block_align: bookBlockAlign(draft),
+        running_head_content: bookRunningHeadContent(draft),
+        show_numbering: bookShowNumbering(draft),
+        continue_hint: bookContinueHint(draft),
+        profile_id: config.profileId, profile_overrides: config.overrides,
+      },
+      sections: bookSections(draft).map(section => ({ ...section })),
+      front_matter: bookFrontMatter(draft),
+      // 插入页只进元数据（页型/标题/位置），正文与图片二进制不上清单。
+      pages: bookInsertedPages(draft).map(({ id, kind, title, placement, toc, imageId }) =>
+        ({ id, kind, title, placement, toc, image_id: imageId || null })),
+      tailpieces: { ...(draft.tailpieces || {}) },
+      appendices: { ...(draft.appendices || {}) },
+    },
+    publication_profile: {
+      id: profile.id,
+      name: profile.name,
+      font_stack: [...profile.font_stack],
+      bundled_font: {
+        family: BOOK_BUNDLED_FONT.family,
+        version: BOOK_BUNDLED_FONT.version,
+        sha256: BOOK_BUNDLED_FONT.sha256,
+        mime: BOOK_BUNDLED_FONT.mime,
+        source_file: BOOK_BUNDLED_FONT.url.split("/").pop(),
+      },
+      body_pt: config.bodyPt,
+      leading_pt: config.leadingPt,
+      page: {
+        widthMm: size.widthMm, heightMm: size.heightMm,
+        topMm: config.topMm, bottomMm: config.bottomMm,
+        innerMm: config.innerMm, outerMm: config.outerMm,
+      },
+      overrides: config.overrides,
+    },
+    pagination: {
+      total_pages: preview.pages.length,
+      body_pages: preview.poemPages,
+      front_matter_pages: preview.frontMatterPages || 0,
+      front_blank_pages: preview.frontBlankPages || 0,
+      toc_pages: preview.pages.filter(page => page.kind === "toc").length,
+      section_pages: preview.pages.filter(page => page.kind === "section").length,
+      essay_pages: preview.pages.filter(page => page.kind === "prose").length,
+      blank_pages: preview.pages.filter(page => page.kind === "blank").length,
+    },
+    contents: draft.poem_ids.map((id, index) => {
+      const poem = maps.poem.get(id) || {};
+      const entry = entries.get(id) || {};
+      const section = sectionByPoem.get(id);
+      const proof = bookProofBreakRecord(draft, poem);
+      const version = bookVersionRecord(draft, poem);
+      return {
+        ordinal: index + 1,
+        id,
+        title: poem.title || id,
+        genre: poem.genre || null,
+        source_date: poem.date_written || poem.created || null,
+        content_hash: poem.content_hash || null,
+        start_folio: entry.folio || null,
+        page_count: entry.pageCount || 0,
+        section_id: section?.id || null,
+        proof_line_breaks: proof.active ? [...proof.record.positions] : null,
+        proof_line_breaks_stale: proof.stale,
+        // 源哈希即上方的 content_hash；版本哈希标记"改过字"的出版文本。
+        version_active: version.active,
+        version_stale: version.stale,
+        version_hash: version.active ? bookTextHash(version.record.content) : null,
+      };
+    }),
+  };
+}
+
+function bookSafeFilename(title) {
+  const safe = String(title || "未名诗集").trim().replace(/[<>:"/\\|?*\x00-\x1f]/g, "-")
+    .replace(/[. ]+$/g, "").slice(0, 80) || "未名诗集";
+  return safe;
+}
+
+function bookManifestFilename(title) {
+  return `${bookSafeFilename(title)}-排印清单.json`;
+}
+
+function bookHtmlFilename(title) {
+  return `${bookSafeFilename(title)}-离线排版.html`;
+}
+
+function downloadBookManifest(draft, preview) {
+  const manifest = bookPrintManifest(draft, preview);
+  downloadBlob(new Blob([JSON.stringify(manifest, null, 2)], { type: "application/json;charset=utf-8" }),
+    bookManifestFilename(draft.title));
+}
+
+// 作者主动导出的静态成品：把当前页序、排版 CSS 与不含正文副本的排印清单
+// 收进一个 HTML。文件本身当然含作者选中的诗正文，因此只下载到作者指定位置，
+// 不写仓库、不进入手机快照，也不依赖昼青集服务继续运行。
+function bookStandaloneHtml(draft, preview, cssText, blockShiftPx = [], imageUris = {}) {
+  const profile = bookTypographyProfile(draft);
+  const size = profile.sizes[preview.pageSize] || BOOK_PUBLICATION_PROFILE.sizes.A5;
+  const manifest = JSON.stringify(bookPrintManifest(draft, preview), null, 2)
+    .replace(/</g, "\\u003c");
+  // 图片页在离线 HTML 里内嵌为 data URI：单文件自带全部插图，不需要服务在跑。
+  const pages = preview.pages.map((page, index) =>
+    bookPageMarkup(page, draft, index, preview.pageSize, blockShiftPx[index] || 0)).join("\n")
+    .replace(/\/api\/books\/image\/([0-9a-f]{16})/g,
+      (match, imageId) => imageUris[imageId] || match);
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>${esc(draft.title || "未名诗集")} · 离线排版</title>
+<style>${cssText}</style>
+<style>
+@page { size: ${size.widthMm}mm ${size.heightMm}mm; margin: 0; }
+html, body { margin: 0; min-height: 100%; }
+.book-export-note { position: sticky; top: 0; z-index: 2; }
+@media print { .book-export-note { display: none !important; } }
+</style>
+</head>
+<body>
+<main class="book-print-wide">
+  <section class="book-print-shell">
+    <div class="book-print-guidance book-export-note"><b>离线排版快照</b><span>含所选诗文，请按私人作品妥善保存；打印时使用 100% 缩放。</span></div>
+    <div class="book-print-canvas"><div class="book-print-document book-tone-${bookInteriorColor(draft)} size-${preview.pageSize.toLowerCase()}" style="${bookTypographyStyle(draft, preview.pageSize)}">
+${pages}
+    </div></div>
+  </section>
+</main>
+<script type="application/json" id="book-print-manifest">${manifest}</script>
+</body>
+</html>`;
+}
+
+function bookEmbedBundledFontCss(cssText, base64) {
+  const source = `url("${BOOK_BUNDLED_FONT.url}")`;
+  const embedded = `url("data:${BOOK_BUNDLED_FONT.mime};base64,${base64}")`;
+  if (!cssText.includes(source)) throw new Error("排版样式没有找到随包字体声明");
+  return cssText.split(source).join(embedded);
+}
+
+function bookArrayBufferBase64(buffer) {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let at = 0; at < bytes.length; at += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(at, at + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function uploadBookImage(file) {
+  if (!file || file.size > 10 * 1024 * 1024) throw new Error("图片不能为空且不能超过 10MB");
+  const data = bookArrayBufferBase64(await file.arrayBuffer());
+  const response = await fetch("/api/books/image", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: file.name, data }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `图片上传失败（HTTP ${response.status}）`);
+  return result;
+}
+
+async function downloadBookHtml(draft, preview) {
+  const html = await makeBookStandaloneHtml(draft, preview);
+  downloadBlob(new Blob([html], { type: "text/html;charset=utf-8" }), bookHtmlFilename(draft.title));
+}
+
+async function makeBookStandaloneHtml(draft, preview) {
+  const [styleResponse, fontResponse] = await Promise.all([
+    fetch(new URL("style.css", document.baseURI), { cache: "no-store" }),
+    fetch(new URL(BOOK_BUNDLED_FONT.url, document.baseURI), { cache: "force-cache" }),
+  ]);
+  if (!styleResponse.ok) throw new Error(`无法读取排版样式（HTTP ${styleResponse.status}）`);
+  if (!fontResponse.ok) throw new Error(`无法读取随包字体（HTTP ${fontResponse.status}）`);
+  const css = bookEmbedBundledFontCss(await styleResponse.text(),
+    bookArrayBufferBase64(await fontResponse.arrayBuffer()));
+  // 把屏幕上实测的居中校正烘焙进离线 HTML：专业 PDF 与屏幕同一套居中。
+  const blockShiftPx = [];
+  bookWorkspace.blockShiftPx.forEach((value, key) => { blockShiftPx[key] = value; });
+  // 插图页与短诗尾花的图片取回并内嵌成 data URI；一张失败就整体失败，不静默出坏档。
+  const imageUris = {};
+  const imageIds = [...new Set([
+    ...preview.pages.filter(page => page.kind === "image" && page.imageId).map(page => page.imageId),
+    ...Object.values(draft.tailpieces || {}).map(id => String(id || "").trim()).filter(Boolean),
+  ])];
+  await Promise.all(imageIds.map(async imageId => {
+    const response = await fetch(`/api/books/image/${imageId}`, { cache: "force-cache" });
+    if (!response.ok) throw new Error(`无法读取插图 ${imageId}（HTTP ${response.status}）`);
+    imageUris[imageId] = `data:${response.headers.get("Content-Type") || "image/png"};base64,${
+      bookArrayBufferBase64(await response.arrayBuffer())}`;
+  }));
+  return bookStandaloneHtml(draft, preview, css, blockShiftPx, imageUris);
+}
+
+async function buildBookPdf(draft, preview, button) {
+  const label = button.textContent;
+  button.disabled = true; button.textContent = "正在排版与逐页核验……";
+  try {
+    const html = await makeBookStandaloneHtml(draft, preview);
+    const response = await fetch("/api/book-pdf/build", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: draft.title || "诗集", html }),
+    });
+    if (!response.ok) {
+      const failure = await response.json().catch(() => ({}));
+      throw new Error(failure.error || `HTTP ${response.status}`);
+    }
+    const pages = response.headers.get("X-ZQ-PDF-Pages");
+    downloadBlob(await response.blob(), `${bookSafeFilename(draft.title)}-专业阅读.pdf`);
+    toast(`专业 PDF 已通过核验${pages ? ` · ${pages} 页` : ""}`);
+  } catch (error) {
+    toast("专业输出失败：" + error.message);
+  } finally {
+    button.disabled = false; button.textContent = label;
+  }
+}
+
+// 就地活动稿纸插页：直接在目标书页原位展开轻量稿纸卡片，避免跳出全屏暗色遮罩；
+// 支持散文、诗歌、图片与空白页四种款式，随手输入并一键编译排入全书。
+function openBookInlineDraftSheet(draft, targetSheet, placementPreset, onComplete, existing = null) {
+  document.querySelectorAll(".book-draft-sheet").forEach(el => el.remove());
+
+  const isEditing = Boolean(existing);
+  const initial = {
+    id: existing?.id || `page-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
+    kind: existing?.kind || "prose",
+    title: existing?.title || "",
+    body: existing?.body || "",
+    placement: existing?.placement || placementPreset || "front",
+    toc: existing ? existing.toc !== false : true,
+    imageId: existing?.imageId || existing?.image_id || "",
+  };
+
+  let chosenImageId = initial.imageId || "";
+
+  const container = document.createElement("div");
+  container.className = "book-draft-sheet";
+  container.innerHTML = `
+    <div class="book-draft-sheet-ribbon">
+      <span class="book-draft-sheet-badge">${isEditing ? "稿纸 · 修改" : "稿纸 · 就地插页"}</span>
+      <div class="book-draft-sheet-options">
+        <select class="book-draft-sheet-kind" aria-label="款式">
+          <option value="prose" ${initial.kind === "prose" ? "selected" : ""}>散文 / 序跋页</option>
+          <option value="poem" ${initial.kind === "poem" ? "selected" : ""}>诗页（逐行保真）</option>
+          <option value="image" ${initial.kind === "image" ? "selected" : ""}>图片页（整页插图）</option>
+          <option value="blank" ${initial.kind === "blank" ? "selected" : ""}>空白页（留白）</option>
+        </select>
+        <label class="book-draft-sheet-toc" style="${initial.kind === "blank" || initial.kind === "image" ? "display:none" : ""}">
+          <input type="checkbox" data-draft-toc ${initial.toc ? "checked" : ""}> 编入目录
+        </label>
+      </div>
+      <div class="book-draft-sheet-actions">
+        <button type="button" class="btn mini" data-draft-cancel>放弃</button>
+        <button type="button" class="btn mini primary" data-draft-commit>${isEditing ? "保存修改" : "排入本书"}</button>
+      </div>
+    </div>
+    <div class="book-draft-sheet-content">
+      <div class="book-draft-text-zone" style="${initial.kind === "image" || initial.kind === "blank" ? "display:none" : ""}">
+        <input class="book-draft-title-input" maxlength="60" value="${esc(initial.title)}" placeholder="${initial.kind === "poem" ? "输入诗题（可留空）" : "输入篇名（如：序 / 后记 / 随笔，可留空）"}">
+        <textarea class="book-draft-body-input ${initial.kind === "poem" ? "poem-mode" : ""}" placeholder="${initial.kind === "poem" ? "在此书写诗句，逐行回车……" : "在此书写文字，段落之间空一行，系统会自动按开本折行与分页……"}">${esc(initial.body)}</textarea>
+      </div>
+      <div class="book-draft-image-zone" style="${initial.kind === "image" ? "" : "display:none"}">
+        <input class="book-draft-title-input" maxlength="60" value="${esc(initial.title)}" placeholder="输入图注说明（可留空）">
+        <label class="book-draft-image-uploader">
+          <input type="file" accept="image/jpeg,image/png,image/webp" style="display:none" data-draft-file>
+          <div class="book-draft-image-canvas">
+            <img data-draft-img src="${chosenImageId ? `/api/books/image/${esc(chosenImageId)}` : ""}" alt="" style="${chosenImageId ? "" : "display:none"}">
+            <p data-draft-img-tip style="${chosenImageId ? "display:none" : ""}">点击选择或拖入插图<br><small>JPEG / PNG / WebP，≤10MB</small></p>
+          </div>
+        </label>
+        <span class="book-draft-image-status" data-draft-img-status></span>
+      </div>
+      <div class="book-draft-blank-zone" style="${initial.kind === "blank" ? "" : "display:none"}">
+        <div class="book-draft-blank-box">
+          <p>留白页</p>
+          <small>此页在排印时将保持纯净空白，留出呼吸节奏。</small>
+        </div>
+      </div>
+    </div>
+  `;
+
+  targetSheet.appendChild(container);
+
+  const kindSelect = container.querySelector(".book-draft-sheet-kind");
+  const tocLabel = container.querySelector(".book-draft-sheet-toc");
+  const tocInput = container.querySelector("[data-draft-toc]");
+  const textZone = container.querySelector(".book-draft-text-zone");
+  const titleInput = container.querySelector(".book-draft-text-zone .book-draft-title-input");
+  const bodyInput = container.querySelector(".book-draft-body-input");
+  const imageZone = container.querySelector(".book-draft-image-zone");
+  const imageTitleInput = imageZone.querySelector(".book-draft-title-input");
+  const fileInput = container.querySelector("[data-draft-file]");
+  const previewImg = container.querySelector("[data-draft-img]");
+  const previewTip = container.querySelector("[data-draft-img-tip]");
+  const statusEl = container.querySelector("[data-draft-img-status]");
+  const blankZone = container.querySelector(".book-draft-blank-zone");
+  const cancelBtn = container.querySelector("[data-draft-cancel]");
+  const commitBtn = container.querySelector("[data-draft-commit]");
+
+  kindSelect.onchange = () => {
+    const kind = kindSelect.value;
+    textZone.style.display = kind === "prose" || kind === "poem" ? "" : "none";
+    imageZone.style.display = kind === "image" ? "" : "none";
+    blankZone.style.display = kind === "blank" ? "" : "none";
+    tocLabel.style.display = kind === "blank" || kind === "image" ? "none" : "";
+    if (kind === "poem") {
+      bodyInput.classList.add("poem-mode");
+      titleInput.placeholder = "输入诗题（可留空）";
+      bodyInput.placeholder = "在此书写诗句，逐行回车……";
+    } else if (kind === "prose") {
+      bodyInput.classList.remove("poem-mode");
+      titleInput.placeholder = "输入篇名（如：序 / 后记 / 随笔，可留空）";
+      bodyInput.placeholder = "在此书写文字，段落之间空一行，系统会自动按开本折行与分页……";
+    }
+  };
+
+  fileInput.onchange = async () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { toast("图片不能超过 10MB"); return; }
+    statusEl.textContent = "上传中...";
+    try {
+      const result = await uploadBookImage(file);
+      chosenImageId = result.image_id;
+      previewImg.style.display = "";
+      previewImg.src = `/api/books/image/${chosenImageId}`;
+      previewTip.style.display = "none";
+      statusEl.textContent = "已就绪";
+    } catch (exc) {
+      statusEl.textContent = "";
+      toast(exc.message || "上传失败");
+    }
+  };
+
+  const handleKey = e => {
+    if (e.key === "Escape") {
+      container.remove();
+      window.removeEventListener("keydown", handleKey);
+    }
+  };
+  window.addEventListener("keydown", handleKey);
+
+  cancelBtn.onclick = () => {
+    window.removeEventListener("keydown", handleKey);
+    container.remove();
+  };
+
+  commitBtn.onclick = () => {
+    window.removeEventListener("keydown", handleKey);
+    const kind = kindSelect.value;
+    const activeTitleInput = kind === "image" ? imageTitleInput : titleInput;
+    const title = activeTitleInput.value.trim();
+    const body = (kind === "prose" || kind === "poem")
+      ? bodyInput.value.replace(/\r\n/g, "\n").replace(/\s+$/, "")
+      : "";
+    const toc = (kind === "image" || kind === "blank") ? false : tocInput.checked;
+    if (kind === "image" && !chosenImageId) {
+      toast("请先选择或上传一张图片");
+      return;
+    }
+    if (body && body.length > 20000) {
+      toast("正文太长了（上限 20000 字）");
+      return;
+    }
+
+    const pages = JSON.parse(JSON.stringify(draft.pages || []));
+    const item = {
+      id: initial.id,
+      kind,
+      title,
+      body,
+      placement: initial.placement,
+      toc,
+    };
+    if (kind === "image") item.image_id = chosenImageId;
+
+    const at = pages.findIndex(p => p.id === initial.id);
+    if (at >= 0) {
+      pages[at] = { ...pages[at], ...item };
+      if (kind !== "image") { delete pages[at].image_id; delete pages[at].imageId; }
+    } else {
+      pages.push(item);
+    }
+    draft.pages = pages;
+    markBookDirty();
+    container.remove();
+    toast(isEditing ? "插页草稿已更新，记得保存方案" : "已排入草稿，记得保存方案");
+    if (onComplete) onComplete();
+  };
+
+  setTimeout(() => {
+    if (initial.title) bodyInput.focus();
+    else titleInput.focus();
+  }, 50);
+}
+
+// 排版视图内的就地编辑：悬停诗页/长文页出现“改稿 / 插页 / 尾花”，就地展开稿纸或编辑器；
+// 保存后原地重渲染（输出排版滚动回原页）。全屏试看保持纯页面，不出编辑入口。
+function bindBookSheetEditors(draft, refresh) {
+  document.querySelectorAll(".book-sheet[data-poem-id], .book-sheet[data-essay-id]").forEach(sheet => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "book-edit-affordance";
+    chip.textContent = "改稿";
+    chip.onclick = event => {
+      event.stopPropagation();
+      const essayId = sheet.dataset.essayId;
+      if (essayId) {
+        const page = bookInsertedPages(draft).find(item => item.id === essayId);
+        if (page) openBookInlineDraftSheet(draft, sheet, page.placement, () => refresh(sheet), page);
+        return;
+      }
+      const poem = maps.poem.get(sheet.dataset.poemId);
+      if (poem) openBookPoemEditor(draft, poem, () => refresh(sheet));
+    };
+    sheet.appendChild(chip);
+
+    const insert = document.createElement("button");
+    insert.type = "button";
+    insert.className = "book-insert-affordance";
+    insert.textContent = "插页";
+    insert.onclick = event => {
+      event.stopPropagation();
+      const essayId = sheet.dataset.essayId;
+      const preset = essayId
+        ? ((bookInsertedPages(draft).find(item => item.id === essayId) || {}).placement || "front")
+        : `before:${sheet.dataset.poemId}`;
+      openBookInlineDraftSheet(draft, sheet, preset, () => refresh(sheet));
+    };
+    sheet.appendChild(insert);
+
+    const poemId = sheet.dataset.poemId;
+    const isLastPage = sheet.dataset.isLastPage === "true";
+    if (isLastPage && poemId) {
+      const hasTailpiece = Boolean((draft.tailpieces || {})[poemId]);
+      const tailpieceBtn = document.createElement("button");
+      tailpieceBtn.type = "button";
+      tailpieceBtn.className = `book-tailpiece-affordance ${hasTailpiece ? "on" : ""}`;
+      tailpieceBtn.textContent = hasTailpiece ? "尾花·已设" : "尾花";
+      tailpieceBtn.onclick = event => {
+        event.stopPropagation();
+        openBookTailpieceModal(draft, poemId, () => refresh(sheet));
+      };
+      sheet.appendChild(tailpieceBtn);
+    }
+  });
+}
+
+function renderBookPreview() {
+  hideBookPoemProof();
+  const draft = currentBookDraft();
+  const preview = bookBuildPreview(draft);
+  if (!draft.poem_ids.length) {
+    location.hash = "#/books";
+    toast("先收入至少一首作品，再看校样。");
+    return;
+  }
+  applyBookBlockCorrections(bookWorkspace.previewIndex);
+  const total = preview.pages.length;
+  let index = Math.max(0, Math.min(bookWorkspace.previewIndex, total - 1));
+  if (index > 0 && index % 2 === 0) index--;
+  bookWorkspace.previewIndex = index;
+  const visiblePages = index === 0 ? [preview.pages[0]] : preview.pages.slice(index, index + 2);
+  const shownEnd = Math.min(total, index + visiblePages.length);
+  app.className = "book-preview-wide";
+  app.innerHTML = `<section class="book-preview-shell">
+    <header class="book-preview-toolbar">
+      <div class="book-preview-identity"><button class="btn" id="book-preview-close">← 编稿台</button><div><b>${esc(draft.title || "未名诗集")}</b><span>${preview.pageSize} · ${preview.entries.length} 首 · 正文 ${preview.poemPages} 页</span></div></div>
+      <div class="book-preview-controls">
+        <label>跳到<select id="book-preview-jump">${preview.jumps.map(jump => `<option value="${jump.index}" ${jump.index === index ? "selected" : ""}>${esc(jump.label)}</option>`).join("")}</select></label>
+        <button class="btn" id="book-preview-prev" ${index === 0 ? "disabled" : ""}>上一开</button>
+        <span>${index + 1}${shownEnd > index + 1 ? `–${shownEnd}` : ""} / ${total}</span>
+        <button class="btn" id="book-preview-next" ${shownEnd >= total ? "disabled" : ""}>下一开</button>
+        <button class="btn primary" id="book-preview-print">进入输出排版</button>
+      </div>
+    </header>
+    ${preview.diagnostics.length ? `<p class="book-warning">${esc(preview.diagnostics.map(item => item.message).join("；"))}。导出已暂停。</p>` : ""}
+    <div class="book-preview-stage"><div class="book-spread book-print-document view-spreads book-tone-${bookInteriorColor(draft)} size-${preview.pageSize.toLowerCase()}" style="--book-screen-zoom:.72;${bookTypographyStyle(draft, preview.pageSize)}">
+      ${visiblePages.map((page, offset) => bookPageMarkup(page, draft, index + offset, preview.pageSize)).join("")}
+    </div></div>
+    <p class="book-preview-note">翻页校样与输出排版共用同一印刷样式；点击目录条目可跳到对应页，悬停书页可直接改稿或在当前位置插页。</p>
+  </section>`;
+
+  document.getElementById("book-preview-close").onclick = () => { location.hash = "#/books"; };
+  document.getElementById("book-preview-print").onclick = () => { location.hash = "#/books/print"; };
+  document.getElementById("book-preview-prev").onclick = () => {
+    bookWorkspace.previewIndex = index <= 1 ? 0 : index - 2;
+    renderBookPreview();
+  };
+  document.getElementById("book-preview-next").onclick = () => {
+    bookWorkspace.previewIndex = index === 0 ? 1 : index + 2;
+    renderBookPreview();
+  };
+  app.querySelectorAll(".book-toc-body li[data-folio]").forEach(li => li.onclick = () => {
+    const folio = Number(li.dataset.folio);
+    const at = preview.pages.findIndex(page => page.folio === folio);
+    if (at < 0) return;
+    bookWorkspace.previewIndex = at === 0 ? 0 : (at % 2 === 1 ? at : at - 1);
+    const offset = at - bookWorkspace.previewIndex;
+    renderBookPreview();
+    document.querySelectorAll(".book-preview-stage .book-sheet")[offset]
+      ?.scrollIntoView({ block: "start", behavior: "instant" });
+  });
+  document.getElementById("book-preview-jump").onchange = event => {
+    bookWorkspace.previewIndex = Number(event.target.value) || 0;
+    renderBookPreview();
+  };
+  bindBookSheetEditors(draft, () => renderBookPreview());
+}
+
+function fitBookPrintView(pageSize) {
+  const documentEl = document.querySelector(".book-print-document");
+  const scaleEl = document.getElementById("book-print-scale");
+  if (!documentEl) return;
+  const size = BOOK_PUBLICATION_PROFILE.sizes[pageSize] || BOOK_PUBLICATION_PROFILE.sizes.A5;
+  const pxPerMm = 96 / 25.4;
+  const pageWidth = size.widthMm * pxPerMm;
+  const pageHeight = size.heightMm * pxPerMm;
+  const availableWidth = Math.max(320, window.innerWidth - 48);
+  const availableHeight = Math.max(360, window.innerHeight - 205);
+  const view = bookWorkspace.printView;
+  const across = view === "spreads" ? 2 : 1;
+  const gutter = view === "spreads" ? 10 : 0;
+  const fitted = Math.min(1, availableWidth / (pageWidth * across + gutter), availableHeight / pageHeight);
+  const scale = Math.max(.35, view === "actual" ? 1 : fitted);
+  documentEl.style.setProperty("--book-screen-zoom", String(scale));
+  if (scaleEl) scaleEl.textContent = `${Math.round(scale * 100)}%`;
+}
+
+function renderBookPrint() {
+  hideBookPoemProof();
+  const draft = currentBookDraft();
+  const preview = bookBuildPreview(draft);
+  if (!draft.poem_ids.length) {
+    location.hash = "#/books";
+    toast("先收入至少一首作品，再准备排版页。");
+    return;
+  }
+  applyBookBlockCorrections(0);
+  const config = bookLayoutConfig(draft, preview.pageSize);
+  const profile = bookTypographyProfile(draft);
+  const size = profile.sizes[preview.pageSize] || BOOK_PUBLICATION_PROFILE.sizes.A5;
+  document.getElementById("book-print-page-style")?.remove();
+  const pageStyle = document.createElement("style");
+  pageStyle.id = "book-print-page-style";
+  pageStyle.textContent = `@page { size: ${size.widthMm}mm ${size.heightMm}mm; margin: 0; }`;
+  document.head.appendChild(pageStyle);
+
+  app.className = "book-print-wide";
+  app.innerHTML = `<section class="book-print-shell">
+    <header class="book-print-toolbar">
+      <div><button class="btn" id="book-print-close">← 翻页校样</button><button class="btn" id="book-print-workbench" style="margin-left:.35rem" title="返回编稿台">编稿台</button><span><b>输出排版</b>${esc(draft.title || "未名诗集")} · ${preview.pageSize} · ${preview.pages.length} 页</span></div>
+      <div class="book-print-profile"><span>版式</span><b>${esc(profile.name)}</b><i>${config.bodyPt} pt / ${config.leadingPt} pt${Object.keys(config.overrides).length ? " · 含覆盖" : ""}</i></div>
+      <div class="book-view-switch" role="group" aria-label="屏幕观看方式">
+        <button class="btn ${bookWorkspace.printView === "page" ? "on" : ""}" data-book-view="page">单页</button>
+        <button class="btn ${bookWorkspace.printView === "spreads" ? "on" : ""}" data-book-view="spreads">双页</button>
+        <button class="btn ${bookWorkspace.printView === "actual" ? "on" : ""}" data-book-view="actual">原寸</button>
+        <span id="book-print-scale"></span>
+      </div>
+      <button class="btn" id="book-print-manifest">导出排印清单</button>
+      <button class="btn" id="book-print-fullscreen">全屏试看</button>
+      <button class="btn primary" id="book-print-start">输出 PDF…</button>
+    </header>
+    ${preview.diagnostics.length ? `<p class="book-warning">${esc(preview.diagnostics.map(item => item.message).join("；"))}。导出已暂停。</p>` : ""}
+    <div class="book-print-guidance"><b>屏幕比例不影响成品。</b><span>单页、双页和原寸只改变观看方式；输出仍按固定毫米开本与磅值字号。</span></div>
+    <div class="book-print-canvas"><div class="book-print-document book-tone-${bookInteriorColor(draft)} view-${bookWorkspace.printView} size-${preview.pageSize.toLowerCase()}" style="${bookTypographyStyle(draft, preview.pageSize)}">
+      ${preview.pages.map((page, index) => bookPageMarkup(page, draft, index, preview.pageSize, bookWorkspace.blockShiftPx.get(index) || 0)).join("")}
+    </div></div>
+    <div class="book-fullscreen-bar">
+      <div class="book-view-switch" role="group" aria-label="全屏观看方式">
+        <button class="btn ${bookWorkspace.printView === "page" ? "on" : ""}" data-book-view="page">单页</button>
+        <button class="btn ${bookWorkspace.printView === "spreads" ? "on" : ""}" data-book-view="spreads">双页</button>
+      </div>
+      <button class="btn" id="book-fullscreen-exit">退出全屏</button>
+    </div>
+  </section>`;
+  document.getElementById("book-print-close").onclick = () => {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    location.hash = "#/books/preview";
+  };
+  document.getElementById("book-print-workbench").onclick = () => {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); }
+    location.hash = "#/books";
+  };
+  document.addEventListener("fullscreenchange", () => {
+    if (!document.fullscreenElement) bookWorkspace.printFullscreen = false;
+  });
+  document.getElementById("book-print-manifest").onclick = () => downloadBookManifest(draft, preview);
+  const bookVisibleSheetIndex = () => {
+    const sheets = [...document.querySelectorAll(".book-print-document .book-sheet")];
+    let anchor = 0, bestDist = Infinity;
+    sheets.forEach((sheet, index) => {
+      const rect = sheet.getBoundingClientRect();
+      if (rect.bottom < 0 || rect.top > innerHeight) return;
+      const dist = Math.abs((rect.top + rect.bottom) / 2 - innerHeight / 2);
+      if (dist < bestDist) { bestDist = dist; anchor = index; }
+    });
+    return anchor;
+  };
+  const bookRestoreFullscreen = () => {
+    const shell = document.querySelector(".book-print-shell");
+    if (!shell?.requestFullscreen) return;
+    shell.requestFullscreen().then(() => {
+      const sheets = document.querySelectorAll(".book-print-document .book-sheet");
+      sheets[bookWorkspace.printFullscreenSheet || 0]?.scrollIntoView({ block: "start", behavior: "instant" });
+    }).catch(() => { bookWorkspace.printFullscreen = false; });
+  };
+  document.getElementById("book-print-fullscreen").onclick = () => {
+    if (document.fullscreenElement) { document.exitFullscreen().catch(() => {}); return; }
+    const shell = document.querySelector(".book-print-shell");
+    if (!shell?.requestFullscreen) { toast("当前浏览器不支持全屏。"); return; }
+    bookWorkspace.printFullscreenSheet = bookVisibleSheetIndex();
+    bookWorkspace.printFullscreen = true;
+    bookRestoreFullscreen();
+  };
+  const fullscreenExit = document.getElementById("book-fullscreen-exit");
+  if (fullscreenExit) fullscreenExit.onclick = () => {
+    bookWorkspace.printFullscreen = false;
+    document.exitFullscreen().catch(() => {});
+  };
+  app.querySelectorAll("[data-book-view]").forEach(button => button.onclick = () => {
+    // 全屏中切换单/双页：记住状态与当前页，重渲染后原地回到全屏。
+    bookWorkspace.printFullscreenRestore = Boolean(document.fullscreenElement);
+    bookWorkspace.printFullscreenSheet = bookVisibleSheetIndex();
+    bookWorkspace.printView = button.dataset.bookView;
+    renderBookPrint();
+  });
+  // 目录条目点击跳转到对应页。
+  app.querySelectorAll(".book-toc-body li[data-folio]").forEach(li => li.onclick = () => {
+    const folio = Number(li.dataset.folio);
+    const at = preview.pages.findIndex(page => page.folio === folio);
+    if (at < 0) return;
+    document.querySelectorAll(".book-print-document .book-sheet")[at]
+      ?.scrollIntoView({ block: "start", behavior: "instant" });
+  });
+  document.getElementById("book-print-start").onclick = () => openBookPdfGuide(draft, preview);
+  bindBookSheetEditors(draft, sheet => {
+    const sheets = [...document.querySelectorAll(".book-print-document .book-sheet")];
+    const at = sheets.indexOf(sheet);
+    renderBookPrint();
+    document.querySelectorAll(".book-print-document .book-sheet")[at]
+      ?.scrollIntoView({ block: "center", behavior: "instant" });
+  });
+  if (bookWorkspace.printFullscreenRestore) {
+    bookWorkspace.printFullscreenRestore = false;
+    bookRestoreFullscreen();
+  }
+  applyBookBlockCorrections();
+  requestAnimationFrame(() => fitBookPrintView(preview.pageSize));
+}
+
+window.addEventListener("resize", () => {
+  if (!location.hash.startsWith("#/books/print")) return;
+  const draft = currentBookDraft();
+  fitBookPrintView(bookBuildPreview(draft).pageSize);
+});
+
+window.addEventListener("keydown", event => {
+  if (!location.hash.startsWith("#/books/preview") || /^(INPUT|SELECT|TEXTAREA)$/.test(document.activeElement?.tagName || "")) return;
+  if (event.key === "ArrowLeft") document.getElementById("book-preview-prev")?.click();
+  if (event.key === "ArrowRight") document.getElementById("book-preview-next")?.click();
+  if (event.key === "Escape") document.getElementById("book-preview-close")?.click();
+});
+
+function hideBookPoemProof() {
+  if (bookPoemProof) bookPoemProof.remove();
+  bookPoemProof = null;
+}
+
+function showBookPoemProof(row, poem) {
+  hideBookPoemProof();
+  if (!row || !poem || !window.matchMedia("(hover: hover)").matches) return;
+  const proof = document.createElement("aside");
+  proof.className = "book-poem-proof";
+  proof.setAttribute("aria-hidden", "true");
+  proof.innerHTML = `<span class="book-proof-mark">校样</span><h3>${esc(poem.title)}</h3><div>${esc(bookPreviewText(poem)).replace(/\n/g, "<br>")}</div>`;
+  document.body.appendChild(proof);
+
+  const rowRect = row.getBoundingClientRect();
+  const margin = 12;
+  let left = rowRect.right + 10;
+  if (left + proof.offsetWidth > window.innerWidth - margin) {
+    left = Math.max(margin, rowRect.left - proof.offsetWidth - 10);
+  }
+  const top = Math.min(
+    Math.max(margin, rowRect.top),
+    Math.max(margin, window.innerHeight - proof.offsetHeight - margin),
+  );
+  proof.style.left = `${left}px`;
+  proof.style.top = `${top}px`;
+  bookPoemProof = proof;
+}
+
+window.addEventListener("scroll", hideBookPoemProof, true);
+
+function newBookDraft() {
+  const firstAuthor = (S.poems.find(p => p.author) || {}).author || "";
+  return {
+    id: "", title: "未名诗集", subtitle: "", author: firstAuthor,
+    poem_ids: [], sections: [], proof_breaks: {}, sort_mode: "manual",
+    versions: {}, pages: [], tailpieces: {},
+    layout: { page_size: "A5", start_each_poem: true, running_head: true, folio: true,
+      section_start: "next", date_position: "poem_end", interior_color: "warm", block_align: "center",
+      running_head_content: "book", show_numbering: true, continue_hint: false },
+    front_matter: { title_page: true, colophon: "", dedication: "" },
+    appendices: { author_notes: false, scores: false, author_marks: false, comments: false },
+  };
+}
+
+function bookRows() { return (S.book_projects && S.book_projects.books) || []; }
+
+function cloneBook(book) {
+  const copy = JSON.parse(JSON.stringify(book));
+  if (!Array.isArray(copy.sections)) copy.sections = [];
+  if (!copy.proof_breaks || typeof copy.proof_breaks !== "object") copy.proof_breaks = {};
+  if (!copy.versions || typeof copy.versions !== "object") copy.versions = {};
+  if (!Array.isArray(copy.pages)) copy.pages = [];
+  if (!copy.tailpieces || typeof copy.tailpieces !== "object") copy.tailpieces = {};
+  return copy;
+}
+
+function openBookDraft(id) {
+  bookWorkspace.activeId = id;
+  if (!bookWorkspace.drafts.has(id)) {
+    const source = id === BOOK_NEW ? newBookDraft() : bookRows().find(b => b.id === id);
+    bookWorkspace.drafts.set(id, cloneBook(source || newBookDraft()));
+  }
+  renderBooks();
+}
+
+function currentBookDraft() {
+  const active = bookRows().filter(b => !b.archived_at);
+  if (!bookWorkspace.activeId) bookWorkspace.activeId = active[0]?.id || BOOK_NEW;
+  if (!bookWorkspace.drafts.has(bookWorkspace.activeId)) {
+    const source = bookWorkspace.activeId === BOOK_NEW
+      ? newBookDraft() : bookRows().find(b => b.id === bookWorkspace.activeId);
+    bookWorkspace.drafts.set(bookWorkspace.activeId, cloneBook(source || newBookDraft()));
+  }
+  return bookWorkspace.drafts.get(bookWorkspace.activeId);
+}
+
+function markBookDirty() { bookWorkspace.dirty.add(bookWorkspace.activeId); }
+
+function bookDateKey(poem) { return poem.date_written || poem.created || "9999"; }
+
+function bookQuality(poem) {
+  const s = stats(poem.id);
+  return s.cal != null ? s.cal : (s.n ? s.mean : -1);
+}
+
+function applyBookSort(draft, mode) {
+  const selected = draft.poem_ids.map(id => maps.poem.get(id)).filter(Boolean);
+  if (mode === "time_asc") selected.sort((a, b) => bookDateKey(a).localeCompare(bookDateKey(b)));
+  if (mode === "time_desc") selected.sort((a, b) => bookDateKey(b).localeCompare(bookDateKey(a)));
+  if (mode === "quality_desc") selected.sort((a, b) => bookQuality(b) - bookQuality(a));
+  draft.poem_ids = selected.map(p => p.id);
+  draft.sort_mode = mode;
+  markBookDirty();
+}
+
+function bookEstimate(draft) {
+  const poems = draft.poem_ids.map(id => maps.poem.get(id)).filter(Boolean);
+  const chars = poems.reduce((sum, p) => sum + poemSize(p), 0);
+  const pages = poems.length ? bookBuildPreview(draft).pages.length : 1;
+  return { poems: poems.length, chars, pages };
+}
+
+function bookSectionId() {
+  const token = globalThis.crypto?.randomUUID?.().replace(/-/g, "").slice(0, 10)
+    || `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  return `section-${token.toLowerCase()}`;
+}
+
+function openBookSectionEditor(draft, beforePoemId, existing = null) {
+  const sections = bookSections(draft);
+  const initial = existing || {
+    id: bookSectionId(),
+    title: `第 ${sections.length + 1} 辑`,
+    subtitle: "",
+    before_poem_id: beforePoemId || draft.poem_ids[0],
+  };
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal book-section-modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">${existing ? "编辑分辑" : "添加分辑"}</h3>
+    <div class="modal-body book-section-form">
+      <label>分辑名<input data-section-title maxlength="120" value="${esc(initial.title)}"></label>
+      <label>小题或引句<input data-section-subtitle maxlength="240" value="${esc(initial.subtitle || "")}" placeholder="可留空"></label>
+      <label>从哪一首开始<select data-section-anchor>${draft.poem_ids.map(id => {
+        const poem = maps.poem.get(id);
+        return `<option value="${esc(id)}" ${id === initial.before_poem_id ? "selected" : ""}>${esc(poem?.title || id)}</option>`;
+      }).join("")}</select></label>
+      <p>分辑扉页会放在这首诗之前，并自动从右页开始；前一页必要时留白。</p>
+    </div>
+    <div class="modal-actions"><button class="btn" data-x>取消</button><button class="btn primary" data-ok>保存分辑</button></div>
+  </div>`;
+  const close = () => back.remove();
+  back.addEventListener("click", event => { if (event.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-ok]").onclick = () => {
+    const title = back.querySelector("[data-section-title]").value.trim();
+    const subtitle = back.querySelector("[data-section-subtitle]").value.trim();
+    const anchor = back.querySelector("[data-section-anchor]").value;
+    if (!title) { toast("请填写分辑名"); return; }
+    const conflict = sections.find(section => section.before_poem_id === anchor && section.id !== initial.id);
+    if (conflict) { toast("这首诗前已经有一个分辑"); return; }
+    const next = { id: initial.id, title, subtitle, before_poem_id: anchor };
+    const at = sections.findIndex(section => section.id === initial.id);
+    if (at >= 0) sections[at] = { ...sections[at], ...next }; else sections.push(next);
+    const order = new Map(draft.poem_ids.map((id, index) => [id, index]));
+    sections.sort((a, b) => order.get(a.before_poem_id) - order.get(b.before_poem_id));
+    draft.sections = sections;
+    markBookDirty(); close(); renderBooks();
+  };
+  document.body.appendChild(back);
+  back.querySelector("[data-section-title]").focus();
+}
+
+function bookInsertedPagesMarkup(draft) {
+  const pages = bookInsertedPages(draft);
+  if (!pages.length) return "";
+  const kindLabel = { prose: "文", poem: "诗", blank: "空", image: "图" };
+  const placeLabel = page => {
+    if (page.placement === "front") return "目录后";
+    if (page.placement === "back") return "全书末尾";
+    const poem = maps.poem.get(page.placement.slice(7));
+    return `《${poem?.title || page.placement.slice(7)}》前`;
+  };
+  const sizeLabel = page => {
+    if (page.kind === "blank") return "";
+    if (page.kind === "poem") return ` · ${page.body.split(/\n/).filter(l => l.trim()).length} 行`;
+    return ` · ${page.body.replace(/\s/g, "").length} 字`;
+  };
+  return pages.map((page, index) => `<li>
+    <span class="book-folio">${kindLabel[page.kind] || "文"}</span>
+    <div><b>${esc(page.title || (page.kind === "blank" ? "空白页" : "无题"))}</b><span>${placeLabel(page)}${page.kind !== "blank" && page.toc ? " · 进目录" : ""}${sizeLabel(page)}</span></div>
+    <div class="book-order-actions">
+      ${index > 0 ? `<button data-page-move="${esc(page.id)}" data-dir="-1" aria-label="前移">前移</button>` : ""}
+      ${index < pages.length - 1 ? `<button data-page-move="${esc(page.id)}" data-dir="1" aria-label="后移">后移</button>` : ""}
+      <button data-page-edit="${esc(page.id)}" aria-label="编辑长文页">编辑</button>
+      <button data-page-remove="${esc(page.id)}" aria-label="移除长文页">×</button>
+    </div>
+  </li>`).join("");
+}
+
+function openBookPageEditor(draft, existing = null, onSaved = null, placementPreset = null) {
+  const pages = JSON.parse(JSON.stringify(draft.pages || []));
+  const initial = {
+    id: `page-${Date.now().toString(36)}${Math.floor(Math.random() * 1e4).toString(36)}`,
+    kind: "prose", title: "", body: "",
+    placement: placementPreset || (existing && existing.placement) || "front",
+    toc: true, imageId: "",
+    ...(existing || {}),
+  };
+  const anchorOptions = draft.poem_ids.map(id => {
+    const poem = maps.poem.get(id);
+    return `<option value="before:${esc(id)}" ${initial.placement === `before:${id}` ? "selected" : ""}>《${esc(poem?.title || id)}》前</option>`;
+  }).join("");
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  let chosenImageId = initial.imageId || null;
+  back.innerHTML = `<div class="modal book-page-modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">${existing ? "编辑长文页" : "添加长文页"}</h3>
+    <div class="modal-body book-section-form">
+      <label>款式<select data-page-kind>
+        <option value="prose" ${initial.kind === "prose" ? "selected" : ""}>文字页（序 / 后记 / 随笔）</option>
+        <option value="poem" ${initial.kind === "poem" ? "selected" : ""}>诗页（逐行保真，随诗节对齐）</option>
+        <option value="image" ${initial.kind === "image" ? "selected" : ""}>图片页（整页插图 + 可选图注）</option>
+        <option value="blank" ${initial.kind === "blank" ? "selected" : ""}>空白页</option>
+      </select></label>
+      <label>标题 / 图注<input data-page-title maxlength="60" value="${esc(initial.title)}" placeholder="可留空"></label>
+      <label data-page-image-label style="display:none">插图（JPEG / PNG / WebP，≤10MB）
+        <input type="file" data-page-image accept="image/jpeg,image/png,image/webp">
+        <span class="book-page-image-state" data-page-image-state></span>
+        <span class="book-page-image-preview"><img data-page-image-preview alt="" style="display:none"></span>
+      </label>
+      <label data-page-body-label>正文<textarea data-page-body rows="9" placeholder="段落之间空一行；文字页按出版惯例首行缩进、两端对齐。">${esc(initial.body)}</textarea></label>
+      <label>放在哪里<select data-page-placement>
+        <option value="front" ${initial.placement === "front" ? "selected" : ""}>目录之后（序）</option>
+        <option value="back" ${initial.placement === "back" ? "selected" : ""}>全书末尾（后记 / 跋）</option>
+        ${anchorOptions}
+      </select></label>
+      <label class="book-check" data-page-toc-label><input type="checkbox" data-page-toc ${initial.toc && initial.kind !== "blank" && initial.kind !== "image" ? "checked" : ""}> 进目录</label>
+      <p>正文与插图只存在这本诗集的方案和图片库里，不改作品真源，也不进排印清单正文；图片按内容去重，多本书可共用。</p>
+    </div>
+    <div class="modal-actions"><button class="btn" data-x>取消</button><button class="btn primary" data-ok>保存长文页</button></div>
+  </div>`;
+  const close = () => back.remove();
+  const kindSelect = back.querySelector("[data-page-kind]");
+  const bodyLabel = back.querySelector("[data-page-body-label]");
+  const imageLabel = back.querySelector("[data-page-image-label]");
+  const imagePreview = back.querySelector("[data-page-image-preview]");
+  const imageState = back.querySelector("[data-page-image-state]");
+  const tocLabel = back.querySelector("[data-page-toc-label]");
+  const syncKind = () => {
+    const kind = kindSelect.value;
+    bodyLabel.style.display = kind === "prose" || kind === "poem" ? "" : "none";
+    imageLabel.style.display = kind === "image" ? "" : "none";
+    tocLabel.style.display = kind === "image" || kind === "blank" ? "none" : "";
+    if (kind === "image" && chosenImageId) {
+      imagePreview.style.display = "";
+      imagePreview.src = `/api/books/image/${chosenImageId}`;
+      imageState.textContent = "沿用已上传图片；重新选择可替换。";
+    }
+  };
+  kindSelect.onchange = syncKind;
+  syncKind();
+  back.querySelector("[data-page-image]").onchange = async event => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { toast("图片超过 10MB 上限"); return; }
+    imageState.textContent = "正在上传……";
+    try {
+      const result = await uploadBookImage(file);
+      chosenImageId = result.image_id;
+      imagePreview.style.display = "";
+      imagePreview.src = `/api/books/image/${chosenImageId}`;
+      imageState.textContent = "已上传，保存后生效。";
+    } catch (exc) {
+      imageState.textContent = "";
+      toast(exc.message || "图片上传失败");
+    }
+  };
+  back.addEventListener("click", event => { if (event.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-ok]").onclick = () => {
+    const kind = kindSelect.value;
+    const title = back.querySelector("[data-page-title]").value.trim();
+    const body = kind === "prose" || kind === "poem"
+      ? back.querySelector("[data-page-body]").value.replace(/\r\n/g, "\n").replace(/\s+$/, "")
+      : "";
+    const placement = back.querySelector("[data-page-placement]").value;
+    const toc = kind === "image" || kind === "blank"
+      ? false : back.querySelector("[data-page-toc]").checked;
+    if (kind === "image" && !chosenImageId) { toast("请先选择一张图片"); return; }
+    if (body && body.length > 20000) { toast("正文太长了（上限 20000 字）"); return; }
+    const next = { id: initial.id, kind, title, body, placement, toc };
+    if (kind === "image") next.image_id = chosenImageId;
+    const at = pages.findIndex(page => page.id === initial.id);
+    if (at >= 0) pages[at] = { ...pages[at], ...next }; else pages.push(next);
+    if (kind !== "image") { const changed = pages.find(page => page.id === initial.id); delete changed.image_id; delete changed.imageId; }
+    draft.pages = pages;
+    markBookDirty(); close(); if (onSaved) onSaved(); else renderBooks();
+  };
+  document.body.appendChild(back);
+  back.querySelector("[data-page-title]").focus();
+}
+
+function openBookTailpieceModal(draft, poemId, onSaved = null) {
+  const poem = maps.poem.get(poemId);
+  const currentImageId = (draft.tailpieces || {})[poemId] || null;
+  let chosenImageId = currentImageId;
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal book-tailpiece-modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">末页尾花 · 《${esc(poem?.title || poemId)}》</h3>
+    <div class="modal-body book-section-form">
+      <p class="book-page-hint">尾花（Tailpiece）是传统排印中点缀在短诗末页留白处的小品插图或藏书印，居中沉底点缀，留白更显疏朗雅致。</p>
+      <label>选择插图（JPEG / PNG / WebP，≤10MB）
+        <input type="file" data-tailpiece-file accept="image/jpeg,image/png,image/webp">
+        <span class="book-page-image-state" data-tailpiece-state></span>
+      </label>
+      <div class="book-tailpiece-preview-wrap">
+        <div class="book-tailpiece-preview-box">
+          <img data-tailpiece-preview src="${chosenImageId ? `/api/books/image/${esc(chosenImageId)}` : ""}" alt="尾花预览" style="${chosenImageId ? "" : "display:none"}">
+          <p data-tailpiece-empty style="${chosenImageId ? "display:none" : ""}">暂未设置尾花插图</p>
+        </div>
+        <button type="button" class="btn mini" data-tailpiece-clear style="${chosenImageId ? "" : "display:none"}">清除尾花</button>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn" data-x>取消</button>
+      <button class="btn primary" data-ok>保存尾花</button>
+    </div>
+  </div>`;
+  const fileInput = back.querySelector("[data-tailpiece-file]");
+  const stateEl = back.querySelector("[data-tailpiece-state]");
+  const previewImg = back.querySelector("[data-tailpiece-preview]");
+  const emptyEl = back.querySelector("[data-tailpiece-empty]");
+  const clearBtn = back.querySelector("[data-tailpiece-clear]");
+  const close = () => back.remove();
+
+  clearBtn.onclick = () => {
+    chosenImageId = null;
+    previewImg.style.display = "none";
+    emptyEl.style.display = "";
+    clearBtn.style.display = "none";
+    stateEl.textContent = "已标记清除，保存后生效";
+  };
+
+  fileInput.onchange = async () => {
+    const file = fileInput.files && fileInput.files[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) { toast("图片不能超过 10MB"); return; }
+    stateEl.textContent = "上传中...";
+    try {
+      const result = await uploadBookImage(file);
+      chosenImageId = result.image_id;
+      previewImg.style.display = "";
+      previewImg.src = `/api/books/image/${chosenImageId}`;
+      emptyEl.style.display = "none";
+      clearBtn.style.display = "";
+      stateEl.textContent = "上传成功，保存后生效";
+    } catch (exc) {
+      stateEl.textContent = "";
+      toast(exc.message || "上传失败");
+    }
+  };
+
+  back.addEventListener("click", event => { if (event.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-ok]").onclick = () => {
+    if (!draft.tailpieces || typeof draft.tailpieces !== "object") draft.tailpieces = {};
+    if (chosenImageId) {
+      draft.tailpieces[poemId] = chosenImageId;
+      toast("尾花已设置");
+    } else {
+      delete draft.tailpieces[poemId];
+      toast("尾花已清除");
+    }
+    markBookDirty();
+    close();
+    if (onSaved) onSaved(); else renderBooks();
+  };
+  document.body.appendChild(back);
+}
+
+function bookSuggestedProofText(source) {
+  return bookNormalizeProofText(source).split("\n").map(line => {
+    if (Array.from(line).length < 18) return line;
+    return line.replace(/([，。！？；])(?=.)/gu, "$1\n");
+  }).join("\n");
+}
+
+// 统一诗稿编辑器：翻页校样/输出排版里点开书页即可进入，编稿台“编辑”按钮同用。
+// 一个自由文本框，系统按 bookClassifyPoemEdit 自动选最小记录；真源永远在左侧对照。
+function openBookPoemEditor(draft, poem, onSaved = null) {
+  const original = bookNormalizeProofText(poem.content);
+  const version = bookVersionRecord(draft, poem);
+  const proof = bookProofBreakRecord(draft, poem);
+  const initial = bookProofText(poem, draft);
+  const statusLine = [
+    version.stale ? "版本已停用（原诗已更新）" : (version.active ? "已改字（整首另存出版版本）" : "正文链接真源"),
+    proof.stale ? "分行需重做" : (proof.active ? "已校样分行" : ""),
+  ].filter(Boolean).join(" · ");
+  const back = document.createElement("div");
+  back.className = "modal-back";
+  back.innerHTML = `<div class="modal book-proof-break-modal" role="dialog" aria-modal="true">
+    <h3 class="modal-title">改稿 · ${esc(poem.title)}</h3>
+    <div class="modal-body">
+      ${statusLine ? `<p class="book-poem-edit-status">${esc(statusLine)}</p>` : ""}
+      ${version.stale ? '<p class="book-proof-stale">原诗已经变化，旧版本已自动停用，编辑框显示的是当前真源。</p>' : ""}
+      <p class="book-proof-break-intro">直接对着排好的文字改：只动换行会存为“校样分行”（原诗更新后可重做）；动了字会整首另存“出版版本”（换行随版本走）；与真源改回一致则清除。原诗永远不动。</p>
+      <div class="book-proof-break-grid">
+        <section><b>真源原文</b><pre>${esc(original)}</pre></section>
+        <label><b>本书文本</b><textarea data-poem-text spellcheck="false">${esc(initial)}</textarea></label>
+      </div>
+    </div>
+    <div class="modal-actions book-proof-break-actions">
+      <button class="btn" data-reset>恢复真源文本</button>
+      <button class="btn" data-suggest>按标点建议分行</button>
+      <span></span><button class="btn" data-x>取消</button><button class="btn primary" data-ok>应用到本书</button>
+    </div>
+  </div>`;
+  const editor = back.querySelector("[data-poem-text]");
+  const close = () => back.remove();
+  const finish = () => { markBookDirty(); close(); if (onSaved) onSaved(); else renderBooks(); };
+  back.addEventListener("click", event => { if (event.target === back) close(); });
+  back.querySelector("[data-x]").onclick = close;
+  back.querySelector("[data-reset]").onclick = () => { editor.value = original; editor.focus(); };
+  back.querySelector("[data-suggest]").onclick = () => {
+    const plain = bookProofPlainText(editor.value) === bookProofPlainText(original);
+    editor.value = bookSuggestedProofText(plain ? original : editor.value);
+    editor.focus();
+  };
+  back.querySelector("[data-ok]").onclick = () => {
+    const verdict = bookClassifyPoemEdit(original, editor.value);
+    if (verdict.kind === "invalid") { toast("正文不能为空；要撤销请点“恢复真源文本”后再应用"); return; }
+    if (!draft.proof_breaks || typeof draft.proof_breaks !== "object") draft.proof_breaks = {};
+    if (!draft.versions || typeof draft.versions !== "object") draft.versions = {};
+    if (verdict.kind === "breaks") {
+      draft.proof_breaks[poem.id] = { source_hash: poem.content_hash,
+        text_hash: bookTextHash(bookProofPlainText(poem.content)), positions: verdict.positions };
+      delete draft.versions[poem.id];
+      toast("分行已应用（只动了换行）");
+    } else if (verdict.kind === "version") {
+      draft.versions[poem.id] = { source_hash: poem.content_hash, content: verdict.content };
+      delete draft.proof_breaks[poem.id];
+      toast("出版版本已保存（动了字，换行随版本走）");
+    } else {
+      delete draft.proof_breaks[poem.id];
+      delete draft.versions[poem.id];
+      toast("与真源一致，已清除本书记录");
+    }
+    finish();
+  };
+  document.body.appendChild(back);
+  editor.focus();
+}
+
+function bookSignaturesMarkup(draft) {
+  if (!draft.poem_ids.length) return '<li class="book-empty-signature">从左侧收入作品，它们会在这里形成一本书的次序。</li>';
+  const sectionByPoem = bookSectionMap(draft);
+  return draft.poem_ids.map((id, index) => {
+    const poem = maps.poem.get(id);
+    if (!poem) return "";
+    const section = sectionByPoem.get(id);
+    const proof = bookProofBreakRecord(draft, poem);
+    const proofLabel = proof.stale ? "分行需重做" : (proof.active ? "已校样分行" : "");
+    const version = bookVersionRecord(draft, poem);
+    const versionLabel = version.stale ? "版本需重做" : (version.active ? "已改字" : "");
+    const marker = section ? `<li class="book-section-marker">
+      <span>辑</span><div><b>${esc(section.title)}</b><small>${section.subtitle ? esc(section.subtitle) : `从《${esc(poem.title)}》开始`}</small></div>
+      <div class="book-order-actions"><button data-section-edit="${esc(section.id)}" aria-label="编辑分辑">编辑</button><button data-section-remove="${esc(section.id)}" aria-label="删除分辑">×</button></div>
+    </li>` : "";
+    return `${marker}<li data-index="${index}" draggable="true">
+      <span class="book-folio">${String(index + 1).padStart(2, "0")}</span>
+      <div><b>${esc(poem.title)}</b><span>${yearOf(poem) || "无日期"} · ${poemSize(poem)} 字${proofLabel ? ` · <i class="book-proof-status ${proof.stale ? "stale" : ""}">${proofLabel}</i>` : ""}${versionLabel ? ` · <i class="book-proof-status ${version.stale ? "stale" : ""}">${versionLabel}</i>` : ""}</span></div>
+      <div class="book-order-actions">
+        <button class="book-proof-break-open ${proof.active || version.active ? "on" : ""} ${proof.stale || version.stale ? "stale" : ""}" data-poem-edit="${esc(id)}" aria-label="修改此诗">改稿</button>
+        <button data-section-before="${esc(id)}" aria-label="在此诗前添加或编辑分辑">辑</button>
+        <button data-remove="${esc(id)}" aria-label="移除">×</button>
+      </div></li>`;
+  }).join("");
+}
+
+function removeBookPoem(draft, poemId) {
+  const at = draft.poem_ids.indexOf(poemId);
+  if (at < 0) return;
+  const anchored = bookSections(draft).find(section => section.before_poem_id === poemId);
+  const nextPoemId = draft.poem_ids[at + 1];
+  if (anchored && nextPoemId && !bookSections(draft).some(section => section.before_poem_id === nextPoemId)) {
+    anchored.before_poem_id = nextPoemId;
+    toast("分辑已顺延到下一首之前");
+  } else if (anchored) {
+    draft.sections = bookSections(draft).filter(section => section.id !== anchored.id);
+    toast("末尾分辑随最后一首一并移除");
+  }
+  draft.poem_ids.splice(at, 1);
+  if (draft.proof_breaks && typeof draft.proof_breaks === "object") delete draft.proof_breaks[poemId];
+  if (draft.versions && typeof draft.versions === "object") delete draft.versions[poemId];
+  if (draft.tailpieces && typeof draft.tailpieces === "object") delete draft.tailpieces[poemId];
+  // 级联处理以该诗为锚点的长文插页：顺延至下一首，无下一首则回退为全书末尾
+  if (Array.isArray(draft.pages)) {
+    let cascadedPages = 0;
+    draft.pages.forEach(page => {
+      if (page && page.placement === `before:${poemId}`) {
+        page.placement = nextPoemId ? `before:${nextPoemId}` : "back";
+        cascadedPages++;
+      }
+    });
+    if (cascadedPages > 0) {
+      toast(nextPoemId ? "插页已顺延至下一首之前" : "插页已移至全书末尾");
+    }
+  }
+}
+
+function renderBooks() {
+  const previousPool = app.querySelector(".book-poem-pool");
+  const previousSignatures = app.querySelector(".book-signatures");
+  if (previousPool) bookWorkspace.poolScroll = previousPool.scrollTop;
+  if (previousSignatures) bookWorkspace.signatureScroll = previousSignatures.scrollTop;
+  const poolScroll = bookWorkspace.poolScroll;
+  const signatureScroll = bookWorkspace.signatureScroll;
+  hideBookPoemProof();
+  app.className = "book-wide";
+  const draft = currentBookDraft();
+  const active = bookRows().filter(b => !b.archived_at);
+  const archived = bookRows().filter(b => b.archived_at);
+  const selected = new Set(draft.poem_ids);
+  const genres = ["全部", ...new Set(S.poems.map(p => p.genre).filter(Boolean))];
+  const query = bookWorkspace.query.trim().toLowerCase();
+  const pool = S.poems.filter(p => {
+    if (bookWorkspace.genre !== "全部" && p.genre !== bookWorkspace.genre) return false;
+    if (bookWorkspace.favoriteOnly && !isFav(p.id)) return false;
+    if (bookWorkspace.visibility !== "all" && p.visibility !== bookWorkspace.visibility) return false;
+    if (query && !`${p.title}\n${p.content}`.toLowerCase().includes(query)) return false;
+    return true;
+  });
+  const estimate = bookEstimate(draft);
+  const damaged = S.book_projects && S.book_projects.error;
+
+  app.innerHTML = `
+    <header class="book-head">
+      <div><p class="book-kicker">v1.8 · 诗集设计</p><h1 class="page-title">诗集工作台</h1>
+      <p class="page-hint">先决定收哪些诗、以什么次序相遇。方案只引用作品 ID，正文仍以诗稿为唯一真源。</p></div>
+      <div class="book-tally"><b>${estimate.poems}</b><span>首已入集</span><b>${estimate.chars}</b><span>字</span><b>${estimate.pages}</b><span>页左右·粗估</span></div>
+    </header>
+    ${damaged ? `<div class="book-warning">${esc(damaged)}</div>` : ""}
+    <div class="book-workspace">
+      <aside class="book-shelf" aria-label="诗集方案">
+        <div class="book-shelf-title"><span>方案</span><button class="btn" id="book-new">新建</button></div>
+        <div class="book-project-list">
+          ${active.length ? active.map(b => `<button class="book-project ${bookWorkspace.activeId === b.id ? "on" : ""}" data-book="${esc(b.id)}">
+            <b>${esc(b.title)}</b><span>${b.poem_ids.length} 首 · ${esc((b.layout || {}).page_size || "A5")}</span></button>`).join("")
+            : '<p class="empty mini">还没有保存的方案。</p>'}
+          ${bookWorkspace.activeId === BOOK_NEW ? '<div class="book-project on local"><b>未保存方案</b><span>只在当前页面</span></div>' : ""}
+        </div>
+        ${archived.length ? `<button class="book-archive-toggle" id="book-archive-toggle">${bookWorkspace.showArchived ? "隐藏" : "展开"}已收起 ${archived.length} 册</button>
+          ${bookWorkspace.showArchived ? `<div class="book-archived">${archived.map(b => `<div><span>${esc(b.title)}</span><button class="btn book-restore" data-id="${esc(b.id)}">重新启用</button></div>`).join("")}</div>` : ""}` : ""}
+      </aside>
+
+      <section class="book-pool">
+        <div class="book-section-head"><div><span class="book-step">壹</span><h2>选诗</h2></div><span>${pool.length} 首符合</span></div>
+        <div class="book-filters">
+          <input id="book-search" value="${esc(bookWorkspace.query)}" placeholder="搜标题或正文">
+          <select id="book-genre">${genres.map(g => `<option ${g === bookWorkspace.genre ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
+          <select id="book-visibility">
+            <option value="all" ${bookWorkspace.visibility === "all" ? "selected" : ""}>公开与私密</option>
+            <option value="public" ${bookWorkspace.visibility === "public" ? "selected" : ""}>只看公开</option>
+            <option value="private" ${bookWorkspace.visibility === "private" ? "selected" : ""}>只看私密</option>
+          </select>
+          <label class="book-check"><input type="checkbox" id="book-favs" ${bookWorkspace.favoriteOnly ? "checked" : ""}> 只看偏爱</label>
+        </div>
+        <div class="book-pool-actions"><button class="btn" id="book-add-filtered">收入当前筛选</button><span>悬停可看校样；已入集的作品仍留在列表中。</span></div>
+        <div class="book-poem-pool">
+          ${pool.length ? pool.map(p => { const s = stats(p.id); return `<div class="book-pool-row ${selected.has(p.id) ? "chosen" : ""}" data-preview-id="${esc(p.id)}">
+            <button class="book-pick" data-id="${esc(p.id)}" aria-label="${selected.has(p.id) ? "从诗集移除" : "收入诗集"}">${selected.has(p.id) ? "−" : "+"}</button>
+            <div><b>${esc(p.title)}</b><span>${esc(p.genre || "未分类")} · ${yearOf(p) || "无日期"}${s.n ? ` · ${s.cal != null ? `质 ${fmt2(s.cal)}` : `均 ${fmt1(s.mean)}`}` : ""}${isFav(p.id) ? " · ♥" : ""}</span></div>
+          </div>`; }).join("") : '<p class="empty">没有符合当前条件的作品。</p>'}
+        </div>
+      </section>
+
+      <section class="book-gathering">
+        <div class="book-section-head"><div><span class="book-step">贰</span><h2>编次</h2></div><span>${draft.poem_ids.length} 首</span></div>
+        <div class="book-meta-grid">
+          <label>书名<input id="book-title" maxlength="120" value="${esc(draft.title)}"></label>
+          <label>副题<input id="book-subtitle" maxlength="240" value="${esc(draft.subtitle)}" placeholder="可留空"></label>
+          <label>署名<input id="book-author" maxlength="120" value="${esc(draft.author)}" placeholder="可留空"></label>
+          <label>开本<select id="book-page-size"><option ${draft.layout.page_size === "A5" ? "selected" : ""}>A5</option><option ${draft.layout.page_size === "B5" ? "selected" : ""}>B5</option></select></label>
+          <label>版式<select id="book-profile">${Object.values(BOOK_TYPOGRAPHY_PROFILES).map(p =>
+            `<option value="${esc(p.id)}" ${(draft.layout.profile_id || BOOK_DEFAULT_PROFILE_ID) === p.id ? "selected" : ""}>${esc(p.name)} · ${esc(p.body)}/${esc(p.leading)}</option>`).join("")}</select></label>
+          <div class="book-page-marks"><span>书页标记</span>
+            <label class="book-check"><input type="checkbox" id="book-running-head" ${bookPageMarks(draft).running_head ? "checked" : ""}> 页眉</label>
+            <label class="book-check"><input type="checkbox" id="book-folio" ${bookPageMarks(draft).folio ? "checked" : ""}> 页码</label>
+            <label class="book-check"><input type="checkbox" id="book-continue-hint" ${bookContinueHint(draft) ? "checked" : ""}> 页底“未完”</label>
+            <label class="book-check"><input type="checkbox" id="book-show-numbering" ${bookShowNumbering(draft) ? "checked" : ""}> “第 N 首”编号</label>
+          </div>
+          <label>分辑扉页<select id="book-section-start">
+            <option value="recto" ${bookSectionStart(draft) === "recto" ? "selected" : ""}>右页起（经典）</option>
+            <option value="next" ${bookSectionStart(draft) === "next" ? "selected" : ""}>紧接下一页</option>
+          </select></label>
+          <label>写作时间<select id="book-date-position">
+            <option value="none" ${bookDatePosition(draft) === "none" ? "selected" : ""}>不显示</option>
+            <option value="under_title" ${bookDatePosition(draft) === "under_title" ? "selected" : ""}>标题下</option>
+            <option value="poem_end" ${bookDatePosition(draft) === "poem_end" ? "selected" : ""}>诗末</option>
+          </select></label>
+          <label>书芯颜色<select id="book-interior-color">
+            <option value="warm" ${bookInteriorColor(draft) === "warm" ? "selected" : ""}>暖红点色</option>
+            <option value="mono" ${bookInteriorColor(draft) === "mono" ? "selected" : ""}>黑白书芯</option>
+          </select></label>
+          <label>诗节对齐<select id="book-block-align">
+            <option value="left" ${bookBlockAlign(draft) === "left" ? "selected" : ""}>左对齐</option>
+            <option value="center" ${bookBlockAlign(draft) === "center" ? "selected" : ""}>居中成块</option>
+          </select></label>
+          <label>页眉内容<select id="book-running-head-content">
+            <option value="book" ${bookRunningHeadContent(draft) === "book" ? "selected" : ""}>书名 / 诗题</option>
+            <option value="section" ${bookRunningHeadContent(draft) === "section" ? "selected" : ""}>辑名 / 诗题</option>
+            <option value="both" ${bookRunningHeadContent(draft) === "both" ? "selected" : ""}>书名 · 辑名 / 诗题</option>
+          </select></label>
+          <label class="book-check book-front-toggle"><input type="checkbox" id="book-front-title" ${bookFrontMatter(draft).title_page ? "checked" : ""}> 插入书名页</label>
+          <label class="book-front-toggle book-front-dedication-label">题词 / 献词<textarea id="book-front-dedication" rows="2" maxlength="500" placeholder="可留空；填写后在书名页前生成一页题词，固定从右页起排">${esc(bookFrontMatter(draft).dedication)}</textarea></label>
+          <label class="book-front-colophon-label">出版说明<textarea id="book-front-colophon" rows="2" maxlength="2000" placeholder="可留空；填写后在目录前生成一页出版说明">${esc(bookFrontMatter(draft).colophon)}</textarea></label>
+        </div>
+        <div class="book-sort-row"><span>重排当前入集作品；“辑”可从任一首前加入篇章扉页</span>
+          <button class="btn book-sort" data-sort="time_asc">时间早→晚</button>
+          <button class="btn book-sort" data-sort="time_desc">时间晚→早</button>
+          <button class="btn book-sort" data-sort="quality_desc">质分高→低</button>
+        </div>
+        <div class="book-proof-launch">
+          <div><span>下一步</span><b>翻页校样与输出</b><p>像翻书一样检查左右页、目录和分页，再保存 PDF。</p></div>
+          <button class="btn primary" id="book-preview-open" ${draft.poem_ids.length ? "" : "disabled"}>打开翻页校样</button>
+        </div>
+        <ol class="book-signatures">
+          ${bookSignaturesMarkup(draft)}
+        </ol>
+        <div class="book-inserted-head"><div><b>长文页</b><span>序 / 后记 / 辑间随笔 / 空白页</span></div><button class="btn" id="book-page-add">添加</button></div>
+        ${bookInsertedPages(draft).length ? `<ol class="book-signatures book-inserted-list">${bookInsertedPagesMarkup(draft)}</ol>` : ""}
+        <div class="book-savebar">
+          ${bookWorkspace.activeId !== BOOK_NEW ? '<button class="btn" id="book-archive">收起方案</button>' : '<span></span>'}
+          <span class="book-save-state">${bookWorkspace.dirty.has(bookWorkspace.activeId) ? "有未保存改动" : "已与侧车一致"}</span>
+          <button class="btn primary" id="book-save" ${damaged ? "disabled" : ""}>保存方案</button>
+        </div>
+      </section>
+    </div>`;
+
+  const currentPool = app.querySelector(".book-poem-pool");
+  const currentSignatures = app.querySelector(".book-signatures");
+  if (currentPool) currentPool.scrollTop = poolScroll;
+  if (currentSignatures) currentSignatures.scrollTop = signatureScroll;
+  if (currentPool) currentPool.onscroll = () => { bookWorkspace.poolScroll = currentPool.scrollTop; };
+  if (currentSignatures) currentSignatures.onscroll = () => { bookWorkspace.signatureScroll = currentSignatures.scrollTop; };
+
+  app.querySelectorAll(".book-pool-row[data-preview-id]").forEach(row => {
+    const poem = maps.poem.get(row.dataset.previewId);
+    row.onmouseenter = () => showBookPoemProof(row, poem);
+    row.onmouseleave = hideBookPoemProof;
+    row.onfocusin = () => showBookPoemProof(row, poem);
+    row.onfocusout = event => {
+      if (!row.contains(event.relatedTarget)) hideBookPoemProof();
+    };
+  });
+
+  document.getElementById("book-new").onclick = () => openBookDraft(BOOK_NEW);
+  app.querySelectorAll("[data-book]").forEach(btn => btn.onclick = () => openBookDraft(btn.dataset.book));
+  const archiveToggle = document.getElementById("book-archive-toggle");
+  if (archiveToggle) archiveToggle.onclick = () => { bookWorkspace.showArchived = !bookWorkspace.showArchived; renderBooks(); };
+  app.querySelectorAll(".book-restore").forEach(btn => btn.onclick = async () => {
+    try {
+      const data = await post("/api/book-projects", { action: "restore", id: btn.dataset.id });
+      S.book_projects = data.book_projects; openBookDraft(btn.dataset.id); toast("方案已恢复");
+    } catch (err) { toast("恢复失败：" + err.message); }
+  });
+
+  document.getElementById("book-search").oninput = e => {
+    bookWorkspace.query = e.target.value;
+    clearTimeout(bookSearchTimer);
+    bookSearchTimer = setTimeout(() => {
+      renderBooks();
+      const input = document.getElementById("book-search");
+      if (input) { input.focus(); input.setSelectionRange(input.value.length, input.value.length); }
+    }, 140);
+  };
+  document.getElementById("book-genre").onchange = e => { bookWorkspace.genre = e.target.value; renderBooks(); };
+  document.getElementById("book-visibility").onchange = e => { bookWorkspace.visibility = e.target.value; renderBooks(); };
+  document.getElementById("book-favs").onchange = e => { bookWorkspace.favoriteOnly = e.target.checked; renderBooks(); };
+  document.getElementById("book-preview-open").onclick = () => {
+    bookWorkspace.previewIndex = 0;
+    location.hash = "#/books/preview";
+  };
+  document.getElementById("book-add-filtered").onclick = () => {
+    for (const p of pool) if (!selected.has(p.id)) draft.poem_ids.push(p.id);
+    draft.sort_mode = "manual"; markBookDirty(); renderBooks();
+  };
+  app.querySelectorAll(".book-pick").forEach(btn => btn.onclick = () => {
+    const id = btn.dataset.id, at = draft.poem_ids.indexOf(id);
+    if (at >= 0) removeBookPoem(draft, id); else draft.poem_ids.push(id);
+    draft.sort_mode = "manual"; markBookDirty(); renderBooks();
+  });
+
+  const bindText = (id, key) => { document.getElementById(id).oninput = e => { draft[key] = e.target.value; markBookDirty(); }; };
+  bindText("book-title", "title"); bindText("book-subtitle", "subtitle"); bindText("book-author", "author");
+  document.getElementById("book-front-title").onchange = e => {
+    draft.front_matter = { ...bookFrontMatter(draft), title_page: e.target.checked };
+    markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-front-dedication").oninput = e => {
+    draft.front_matter = { ...bookFrontMatter(draft), dedication: e.target.value };
+    markBookDirty();
+  };
+  document.getElementById("book-front-colophon").oninput = e => {
+    draft.front_matter = { ...bookFrontMatter(draft), colophon: e.target.value };
+    markBookDirty();
+  };
+  document.getElementById("book-page-size").onchange = e => { draft.layout.page_size = e.target.value; markBookDirty(); renderBooks(); };
+  document.getElementById("book-profile").onchange = e => {
+    draft.layout.profile_id = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-running-head").onchange = e => {
+    draft.layout.running_head = e.target.checked; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-folio").onchange = e => {
+    draft.layout.folio = e.target.checked; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-section-start").onchange = e => {
+    draft.layout.section_start = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-date-position").onchange = e => {
+    draft.layout.date_position = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-interior-color").onchange = e => {
+    draft.layout.interior_color = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-block-align").onchange = e => {
+    draft.layout.block_align = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-continue-hint").onchange = e => {
+    draft.layout.continue_hint = e.target.checked; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-show-numbering").onchange = e => {
+    draft.layout.show_numbering = e.target.checked; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-running-head-content").onchange = e => {
+    draft.layout.running_head_content = e.target.value; markBookDirty(); renderBooks();
+  };
+  document.getElementById("book-page-add").onclick = () => openBookPageEditor(draft);
+  app.querySelectorAll("[data-page-edit]").forEach(btn => btn.onclick = () => {
+    openBookPageEditor(draft, bookInsertedPages(draft).find(page => page.id === btn.dataset.pageEdit));
+  });
+  app.querySelectorAll("[data-page-remove]").forEach(btn => btn.onclick = () => {
+    draft.pages = bookInsertedPages(draft).filter(page => page.id !== btn.dataset.pageRemove);
+    markBookDirty(); renderBooks();
+  });
+  app.querySelectorAll("[data-page-move]").forEach(btn => btn.onclick = () => {
+    const pages = JSON.parse(JSON.stringify(draft.pages || []));
+    const at = pages.findIndex(page => page.id === btn.dataset.pageMove);
+    const to = at + Number(btn.dataset.dir);
+    if (at < 0 || to < 0 || to >= pages.length) return;
+    [pages[at], pages[to]] = [pages[to], pages[at]];
+    draft.pages = pages; markBookDirty(); renderBooks();
+  });
+  app.querySelectorAll(".book-sort").forEach(btn => btn.onclick = () => { applyBookSort(draft, btn.dataset.sort); renderBooks(); });
+  app.querySelectorAll("[data-section-before]").forEach(btn => btn.onclick = () => {
+    const existing = bookSections(draft).find(section => section.before_poem_id === btn.dataset.sectionBefore);
+    openBookSectionEditor(draft, btn.dataset.sectionBefore, existing || null);
+  });
+  app.querySelectorAll("[data-section-edit]").forEach(btn => btn.onclick = () => {
+    const section = bookSections(draft).find(item => item.id === btn.dataset.sectionEdit);
+    if (section) openBookSectionEditor(draft, section.before_poem_id, section);
+  });
+  app.querySelectorAll("[data-section-remove]").forEach(btn => btn.onclick = () => {
+    draft.sections = bookSections(draft).filter(section => section.id !== btn.dataset.sectionRemove);
+    markBookDirty(); renderBooks();
+  });
+  app.querySelectorAll("[data-poem-edit]").forEach(btn => btn.onclick = () => {
+    const poem = maps.poem.get(btn.dataset.poemEdit);
+    if (poem) openBookPoemEditor(draft, poem);
+  });
+  // 拖拽排序：抓住任意一首拖到目标位置；分辑锚点跟着作品 ID 走，不受影响。
+  let bookDragIndex = -1;
+  app.querySelectorAll(".book-signatures > li[data-index]").forEach(li => {
+    li.addEventListener("dragstart", e => {
+      bookDragIndex = Number(li.dataset.index);
+      e.dataTransfer.effectAllowed = "move";
+      try { e.dataTransfer.setData("text/plain", String(bookDragIndex)); } catch (err) {}
+      li.classList.add("dragging");
+    });
+    li.addEventListener("dragend", () => {
+      bookDragIndex = -1;
+      li.classList.remove("dragging");
+      app.querySelectorAll(".book-signatures > li.drag-over").forEach(el => el.classList.remove("drag-over"));
+    });
+    li.addEventListener("dragover", e => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "move";
+      li.classList.toggle("drag-over", Number(li.dataset.index) !== bookDragIndex);
+    });
+    li.addEventListener("dragleave", e => {
+      if (!li.contains(e.relatedTarget)) li.classList.remove("drag-over");
+    });
+    li.addEventListener("drop", e => {
+      e.preventDefault();
+      li.classList.remove("drag-over");
+      const ids = draft.poem_ids;
+      const from = bookDragIndex, to = Number(li.dataset.index);
+      bookDragIndex = -1;
+      if (!Number.isFinite(from) || !Number.isFinite(to) || from === to
+        || from < 0 || from >= ids.length || to < 0 || to >= ids.length) return;
+      const [moved] = ids.splice(from, 1);
+      ids.splice(to, 0, moved);
+      draft.sort_mode = "manual"; markBookDirty(); renderBooks();
+    });
+  });
+  app.querySelectorAll("[data-remove]").forEach(btn => btn.onclick = () => {
+    removeBookPoem(draft, btn.dataset.remove);
+    draft.sort_mode = "manual"; markBookDirty(); renderBooks();
+  });
+
+  document.getElementById("book-save").onclick = async () => {
+    try {
+      const oldKey = bookWorkspace.activeId;
+      const data = await post("/api/book-projects", { action: "save", book: draft });
+      S.book_projects = data.book_projects;
+      bookWorkspace.drafts.delete(oldKey); bookWorkspace.dirty.delete(oldKey);
+      bookWorkspace.activeId = data.book.id;
+      bookWorkspace.drafts.set(data.book.id, cloneBook(data.book));
+      toast("诗集方案已保存"); renderBooks();
+    } catch (err) { toast("保存失败：" + err.message); }
+  };
+  const archiveBtn = document.getElementById("book-archive");
+  if (archiveBtn) archiveBtn.onclick = () => confirmPopup({
+    title: "收起这份诗集方案？",
+    bodyHtml: "<p>它会从当前方案列表移走，但不会删除方案，也不会改动作品；以后可从左侧“已收起”重新启用。</p>",
+    okLabel: "收起方案", onOk: async () => {
+      try {
+        const id = bookWorkspace.activeId;
+        const data = await post("/api/book-projects", { action: "archive", id });
+        S.book_projects = data.book_projects; bookWorkspace.drafts.delete(id); bookWorkspace.dirty.delete(id);
+        bookWorkspace.activeId = bookRows().find(b => !b.archived_at)?.id || BOOK_NEW;
+        toast("方案已收起"); renderBooks();
+      } catch (err) { toast("收起失败：" + err.message); }
+    },
+  });
+}
+
+/* ---------- 时间轴 ---------- */
+
+function renderTimeline() {
+  app.className = "";
+  const sorted = [...S.poems].sort((a, b) =>
+    (a.date_written || a.created).localeCompare(b.date_written || b.created));
+  const byYear = new Map();
+  for (const p of sorted) {
+    const y = yearOf(p) || "无日期";
+    if (!byYear.has(y)) byYear.set(y, []);
+    byYear.get(y).push(p);
+  }
+  app.innerHTML = `
+    <h1 class="page-title">时间轴</h1>
+    <p class="page-hint">按写作时间（无则备忘录创建时间）。顺着这些年滚下来看。</p>
+    ${[...byYear.entries()].map(([y, ps]) => `
+      <section class="year-block"><h2>${esc(y)}</h2>
+        ${ps.map(p => { const s = stats(p.id); return `<div class="tl-row">
+          <span class="mon">${(p.date_written || p.created).slice(5, 7)}月</span>
+          <span class="t"><a href="#/poem/${p.id}">${esc(p.title)}</a>${favMark(p.id)}${authorChip(p)}
+            ${p.visibility === "private" ? '<span class="chip warm">私密</span>' : ""}
+            ${s.n ? `<span class="chip" title="${s.n} 次盲读${s.cal != null ? `；展示质分 ${fmt2(s.cal)}；拉伸前校准贝叶斯 ${fmt2(s.calBase)}；原始均分 ${fmt2(s.mean)}` : ""}">${s.cal != null ? `质 ${fmt2(s.cal)}` : `均 ${fmt1(s.mean)}`}</span>` : ""}</span>
+          <span class="first-line">${esc(firstLine(p))}</span>
+        </div>`; }).join("")}
+      </section>`).join("")}`;
+}
+
+/* ---------- 诗详情页 ---------- */
+
+function renderPoemBody(content, poemId) {
+  /* 作者手工分段（侧车）优先；没有则退回启发式 */
+  const breaks = poemId && S.stanzas[poemId];
+  if (Array.isArray(breaks)) {
+    const lines = content.split("\n").filter(l => l.trim());
+    const bset = new Set(breaks);
+    const out = [];
+    lines.forEach((ln, i) => {
+      out.push(`<p>${esc(ln)}</p>`);
+      if (bset.has(i) && i < lines.length - 1) out.push('<p class="gap"></p>');
+    });
+    return out.join("\n");
+  }
+  /* 无侧车覆盖时，老实信任数据：任何空行都算真分段。
+     曾经在这里猜"是否整体双倍行距"，但双倍行距噪音（导出把每行都
+     多算一个空行）和真分段在数据里长得一模一样，猜不出来，猜错了
+     还会悄悄吞掉真分段（见 NOTES.md 华为分段恢复记录）。现在两批
+     语料（华为175/小米182）都已核实/清洗过，不再需要这层猜测；
+     以后新批次务必在导入时就把空行语义提取对，而不是指望这里补救。 */
+  const lines = content.split("\n");
+  const out = [];
+  let blankRun = 0;
+  for (const ln of lines) {
+    if (!ln.trim()) { blankRun++; continue; }
+    if (out.length && blankRun >= 1) out.push('<p class="gap"></p>');
+    blankRun = 0;
+    out.push(`<p>${esc(ln)}</p>`);
+  }
+  return out.join("\n");
+}
+
+function renderPoem(id, goReads) {
+  app.className = "";
+  const p = maps.poem.get(id);
+  if (!p) { app.innerHTML = `<p class="page-hint">没有这首诗。</p>`; return; }
+  const all = blindReads(id).slice().sort((a, b) => a.ts.localeCompare(b.ts));
+  const rs = all.filter(r => !isHidden(r.read_id));
+  const hidden = all.filter(r => isHidden(r.read_id));
+  const ann = annotatedReads(id).slice().sort((a, b) => a.ts.localeCompare(b.ts));
+  const st = stats(id);
+  const mobileNote = mobileLocal.notes[id]?.text || "";
+
+  app.innerHTML = `
+    <article>
+      <header class="poem-head">
+        <h1>${esc(p.title)}${isFav(p.id) ? ' <span class="fav-mark">♥</span>' : ""}</h1>
+        <div class="meta">
+          <span class="chip">${esc(p.genre)}</span>
+          <span>写于 ${esc(whenOf(p))}</span> · <span>${p.id}</span>
+          ${p.visibility === "private" ? '<span class="chip warm">私密 · 不进读者池</span>' : ""}
+        </div>
+        ${IS_MOBILE ? `<div class="mobile-poem-tools">
+          <button class="btn ${isFav(p.id) ? "faved" : ""}" id="btn-mobile-fav">${isFav(p.id) ? "♥ 掌中偏爱" : "♡ 收进掌中偏爱"}</button>
+          <button class="btn" id="btn-mobile-note">${mobileNote ? "续写私人随记" : "写私人随记"}</button>
+        </div>` : `<div class="author-tools">
+          <button class="btn" id="btn-vis">${p.visibility === "public" ? "设为私密" : "设为公开"}</button>
+          <button class="btn" id="btn-edit">编辑</button>
+          <button class="btn" id="btn-bg">背景小注</button>
+          <button class="btn" id="btn-date">写作时间</button>
+          <button class="btn" id="btn-genre">文体</button>
+          <button class="btn ${isFav(p.id) ? "faved" : ""}" id="btn-fav">${isFav(p.id) ? "♥ 已偏爱" : "♡ 我觉得好"}</button>
+        </div>`}
+        <div id="tool-panel"></div>
+      </header>
+      <div class="poem-body" id="poem-body">${renderPoemBody(p.content, p.id)}</div>
+      ${p.background ? `<div class="bg-note">背景小注（读者可见）：${esc(p.background)}</div>` : ""}
+      ${p.note ? `<details class="self-note"><summary>自注 · 仅作者可见</summary>
+          <div class="note-text">${esc(p.note)}</div></details>` : ""}
+      ${IS_MOBILE ? `<details class="mobile-note" id="mobile-note"${mobileNote ? " open" : ""}>
+          <summary>掌中随记 · 只留在这台手机</summary>
+          <textarea id="mobile-note-text" rows="5" placeholder="写下此刻想到的；电脑内容更新时不会覆盖。">${esc(mobileNote)}</textarea>
+          <p id="mobile-note-status">${mobileNote ? `上次保存 ${compactWhen(mobileLocal.notes[id]?.updated_at)}` : "尚未写入"}</p>
+        </details>` : ""}
+      <section class="reads-zone">
+        <h2 style="font-size:1.2rem">众　目${st.n ? `<span style="color:#a4593d;margin-left:.55em;letter-spacing:.04em" title="${st.cal != null ? `展示质分；拉伸前校准贝叶斯 ${fmt2(st.calBase)}，原始均分 ${fmt2(st.mean)}；显示拉伸不改变名次` : "原始均分"}">${st.cal != null ? fmt2(st.cal) : fmt1(st.mean)}</span>` : ""}</h2>
+        <div style="position:relative;text-align:center;font-size:.75rem;color:var(--ink-3);letter-spacing:.14em;margin:-.9rem 0 1.8rem">
+          ${st.n ? `${st.n} 次观看${st.n > 1 ? ` · σ ${fmt1(st.sd)}` : ""}${st.cal != null ? ` · 原始均 ${fmt1(st.mean)}` : ""}` : "虚位以待"}
+          <span style="position:absolute;right:0;top:0">作者 · ${esc(p.author || "未署名")}</span>
+        </div>
+        <div class="dist-wrap" id="dist"></div>
+        <div id="cards">${rs.map(r => readCard(r, p)).join("") ||
+          '<p class="page-hint" style="text-align:center">还没有人读过这首诗。跟 agent 说一声「跑一轮」。</p>'}</div>
+        ${hidden.length ? `<details class="hidden-reads"><summary>已折叠 ${hidden.length} 条（不计入分布与榜单）</summary>
+          ${hidden.map(r => readCard(r, p)).join("")}</details>` : ""}
+        ${ann.length ? `<h2 style="font-size:1.05rem;margin-top:2.8rem">批注本读者</h2>
+        <div style="text-align:center;font-size:.75rem;color:var(--ink-3);letter-spacing:.14em;margin:-.4rem 0 1.4rem">读的是带作者眉批的版本 · 分数只作参照，不入众目与榜单</div>
+        ${ann.map(r => readCard(r, p)).join("")}` : ""}
+      </section>
+    </article>`;
+
+  if (rs.length) renderDist(document.getElementById("dist"), rs, p);
+  if (IS_MOBILE) wireMobilePoem(p);
+  else {
+    wirePoemTools(p);
+    wireCutNote(p);
+    wireCuration(p);
+  }
+  markMobileViewed(p.id);
+  if (goReads) {
+    setTimeout(() => {
+      const z = document.querySelector(".reads-zone");
+      if (z) z.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 350);
+  }
+}
+
+function readCard(r, p) {
+  const stale = r.content_hash !== p.content_hash;
+  const hid = isHidden(r.read_id);
+  const marked = isAuthorMarked(r.read_id);
+  const voteChip = voteBadge(S.votes[r.read_id]);
+  const threadKids = threadChildrenMap().get(r.read_id);
+  const leftLinks = [
+    r.long_form ? `<a class="deep-link" href="#/read/${r.read_id}">深读全文 →</a>` : "",
+    threadKids ? `<a class="deep-link" href="#/thread/${r.read_id}">跟帖 ${threadKids.length} 条 →</a>` : "",
+  ].filter(Boolean).join(" ");
+  return `<div class="read-card${hid ? " dim" : ""}" id="card-${r.read_id}">
+    <div class="rc-head">
+      <span class="rname"><a href="#/reader/${esc(r.reader.persona_id)}">${esc(personaName(r.reader.persona_id))}</a></span>
+      <span class="chip">${esc(modelAlias(r.reader.model))}</span>
+      ${r.reader["knows_诠释"] ? '<span class="chip accent">知情</span>' : ""}
+      ${r.reader["knows_date"] ? '<span class="chip accent">知时</span>' : ""}
+      ${stale ? '<span class="chip warm">读的是旧版</span>' : ""}
+      ${voteChip}
+      ${authorSeal(r.read_id)}
+      ${scorePair(r, false)}
+    </div>
+    <div class="reaction">${esc(r.reaction)}</div>
+    <div class="rc-foot">
+      ${leftLinks || "<span></span>"}
+      ${IS_MOBILE ? "<span></span>" : `<span class="read-actions">
+        <button class="author-mark-btn${marked ? " marked" : ""}" data-rid="${r.read_id}" data-mark="${marked ? 0 : 1}">${marked ? "收回藏印" : "落作者藏印"}</button>
+        <button class="curate-btn" data-rid="${r.read_id}" data-hide="${hid ? 0 : 1}">${hid ? "恢复此评" : "折叠此评"}</button>
+      </span>`}
+    </div>
+  </div>`;
+}
+
+function wireCuration(p) {
+  app.querySelectorAll(".curate-btn").forEach(b => b.onclick = async () => {
+    try {
+      await post("/api/curate", { read_id: b.dataset.rid, hidden: b.dataset.hide === "1" });
+      await loadState();
+      renderPoem(p.id, false);
+      toast(b.dataset.hide === "1" ? "已折叠（不再计入分布与榜单，随时可恢复）" : "已恢复");
+    } catch (e) { toast("失败：" + e.message); }
+  });
+  app.querySelectorAll(".author-mark-btn").forEach(b => b.onclick = async () => {
+    const marked = b.dataset.mark === "1";
+    b.disabled = true;
+    b.textContent = marked ? "正在落印…" : "正在收回…";
+    try {
+      await saveAuthorMark(b.dataset.rid, marked);
+      renderPoem(p.id, false);
+      toast(marked ? "已落作者藏印" : "已收回作者藏印");
+    } catch (e) {
+      b.disabled = false;
+      b.textContent = marked ? "落作者藏印" : "收回藏印";
+      toast("失败：" + e.message);
+    }
+  });
+}
+
+/* ---------- 反应分布图（SVG 点状直方图，单系列） ---------- */
+
+function renderDist(el, reads, poem) {
+  const W = 640, padL = 24, padR = 24, axisH = 30;
+  const x = s => padL + (s / 10) * (W - padL - padR);
+  const bins = new Map();
+  const dots = [];
+  for (const r of reads) {
+    const b = Math.round(r.score * 2) / 2;
+    const k = bins.get(b) || 0;
+    bins.set(b, k + 1);
+    dots.push({ r, b, level: k });
+  }
+  const maxStack = Math.max(...bins.values());
+  // 自适应：点多时压缩堆叠间距，让图高不超过 ~380px（大 n 时成密度柱）
+  const step = Math.max(3.2, Math.min(13, 330 / maxStack));
+  const dotR = Math.max(2.2, Math.min(5, step / 2 + 1));
+  const H = 26 + maxStack * step + axisH;
+  const baseY = H - axisH;
+  const mean = reads.reduce((a, r) => a + r.score, 0) / reads.length;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="评分分布图">`;
+  svg += `<line x1="${padL - 6}" y1="${baseY}" x2="${W - padR + 6}" y2="${baseY}" stroke="#e3dac7" stroke-width="1"/>`;
+  for (let t = 0; t <= 10; t++) {
+    svg += `<line x1="${x(t)}" y1="${baseY}" x2="${x(t)}" y2="${baseY + 4}" stroke="#e3dac7"/>` +
+      `<text x="${x(t)}" y="${baseY + 18}" text-anchor="middle" font-size="11" fill="#a29786">${t}</text>`;
+  }
+  svg += `<line x1="${x(mean)}" y1="10" x2="${x(mean)}" y2="${baseY}" stroke="#a4593d" stroke-width="1" stroke-dasharray="3 4" opacity=".7"/>` +
+    `<text x="${x(mean) + 6}" y="18" font-size="11" fill="#a4593d">均 ${fmt1(mean)}</text>`;
+  let hasStale = false;
+  for (const d of dots) {
+    const dp = poem || maps.poem.get(d.r.poem_id);
+    const stale = dp ? d.r.content_hash !== dp.content_hash : false;
+    if (stale) hasStale = true;
+    const fillAttr = stale
+      ? `fill="#f6f1e7" stroke="#2f6d62" stroke-width="1.6"`
+      : `fill="#2f6d62" fill-opacity=".82" stroke="#f6f1e7" stroke-width="1.5"`;
+    svg += `<circle class="dot" data-rid="${d.r.read_id}" cx="${x(d.b)}" cy="${baseY - 8 - d.level * step}" r="${dotR}"
+      ${fillAttr} style="cursor:pointer"/>`;
+  }
+  svg += "</svg>";
+  el.innerHTML = svg + `<div class="dist-caption">一点即一次盲读${hasStale ? " · 空心点 = 读的是旧版" : ""} · 悬停看是谁 · 点击跳到那条短评</div>`;
+
+  let tip = document.querySelector(".tip");
+  if (!tip) { tip = document.createElement("div"); tip.className = "tip"; document.body.appendChild(tip); }
+  el.querySelectorAll(".dot").forEach(c => {
+    c.addEventListener("mousemove", e => {
+      const r = maps.readById.get(c.dataset.rid);
+      const label = poem ? personaName(r.reader.persona_id)
+        : `《${(maps.poem.get(r.poem_id) || {}).title || r.poem_id}》`;
+      tip.innerHTML = `<b>${esc(label)}</b> · ${fmt1(r.score)}<br>${esc(r.reaction.slice(0, 60))}${r.reaction.length > 60 ? "…" : ""}`;
+      tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 260) + "px";
+      tip.style.top = (e.clientY + 14) + "px";
+      tip.classList.add("show");
+    });
+    c.addEventListener("mouseleave", () => tip.classList.remove("show"));
+    c.addEventListener("click", () => {
+      const card = document.getElementById("card-" + c.dataset.rid);
+      if (card) {
+        card.scrollIntoView({ behavior: "smooth", block: "center" });
+        document.querySelectorAll(".read-card.hl").forEach(x => x.classList.remove("hl"));
+        card.classList.add("hl");
+      }
+    });
+  });
+}
+
+/* ---------- 作者工具 ---------- */
+
+async function doAction(body, okMsg) {
+  try {
+    await post("/api/action", body);
+    await loadState();
+    route();
+    toast(okMsg);
+  } catch (e) { toast("失败：" + e.message); }
+}
+
+function wirePoemTools(p) {
+  const panel = document.getElementById("tool-panel");
+  document.getElementById("btn-vis").onclick = () => {
+    const v = p.visibility === "public" ? "private" : "public";
+    doAction({ id: p.id, action: "set_visibility", value: v },
+      v === "private" ? "已设为私密，立即退出读者池" : "已公开");
+  };
+  document.getElementById("btn-bg").onclick = () => {
+    panel.innerHTML = `<div style="margin-top:1rem">
+      <textarea id="bg-in" rows="3" style="width:100%;font-family:inherit;font-size:.9rem;padding:.6em;border:1px solid var(--line);border-radius:8px;background:var(--panel)"
+        placeholder="只给读者看的背景小注（写于何时/何境）">${esc(p.background)}</textarea>
+      <div style="margin-top:.5rem"><button class="btn primary" id="bg-save">保存</button></div></div>`;
+    document.getElementById("bg-save").onclick = () =>
+      doAction({ id: p.id, action: "set_background",
+        value: document.getElementById("bg-in").value.trim() }, "背景小注已保存");
+  };
+  document.getElementById("btn-fav").onclick = async () => {
+    try {
+      await post("/api/favorite", { poem_id: p.id, value: !isFav(p.id) });
+      await loadState();
+      renderPoem(p.id, false);
+      toast(isFav(p.id) ? "已标记「我觉得好」，进作者偏爱榜" : "已取消偏爱标记");
+    } catch (e) { toast("失败：" + e.message); }
+  };
+  document.getElementById("btn-genre").onclick = () => {
+    const presets = ["现代诗", "词", "歌词", "杂文", "草稿"];
+    panel.innerHTML = `<div style="margin-top:1rem">
+      <div style="display:flex;gap:.5em;justify-content:center;flex-wrap:wrap;margin-bottom:.6rem">
+        ${presets.map(g => `<button class="btn genre-pick ${g === p.genre ? "on" : ""}" data-g="${g}">${g}</button>`).join("")}
+      </div>
+      <input id="genre-in" value="${esc(p.genre)}" placeholder="或自定义文体"
+        style="font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel)">
+      <button class="btn primary" id="genre-save">保存</button>
+      <div style="font-size:.75rem;color:var(--ink-3);margin-top:.4rem">只有 现代诗 / 词 / 歌词 默认在读者池；设为其他文体即退出，可在「设置 · 阅读文体」里勾选让 AI 以该文体的眼光继续读。</div></div>`;
+    panel.querySelectorAll(".genre-pick").forEach(b => b.onclick = () => {
+      document.getElementById("genre-in").value = b.dataset.g;
+    });
+    document.getElementById("genre-save").onclick = () => {
+      const v = document.getElementById("genre-in").value.trim();
+      doAction({ id: p.id, action: "set_genre", value: v },
+        `文体已改为「${v}」` + (POETRY_GENRES.includes(v) ? "" : "，已退出读者池（可在设置里勾选文体重新加入）"));
+    };
+  };
+  document.getElementById("btn-edit").onclick = () => renderEditMode(p);
+  document.getElementById("btn-date").onclick = () => {
+    panel.innerHTML = `<div style="margin-top:1rem">
+      <input id="date-in" value="${esc(p.date_written || "")}" placeholder="如 2022-06（留空 = 未标明）"
+        style="font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel)">
+      <button class="btn primary" id="date-save">保存</button></div>`;
+    document.getElementById("date-save").onclick = () =>
+      doAction({ id: p.id, action: "set_date_written",
+        value: document.getElementById("date-in").value.trim() }, "写作时间已标注");
+  };
+}
+
+/* ---------- 统一编辑（标题 + 正文一个入口） ----------
+ * 正文按"当前显示效果"编辑：手工分段侧车先物化成空行再进编辑框，所见即
+ * 所得。保存时正文没动 → 只走改标题（不动 content_hash，不触发旧版）；
+ * 正文动了 → content_hash 更新，旧读数按 hash 自动标"旧版"（保留不删），
+ * 该诗的分段侧车并入正文空行（服务端丢弃旧侧车，避免行号错位覆盖）。 */
+
+function effectiveContent(p) {
+  const breaks = S.stanzas[p.id];
+  if (!Array.isArray(breaks)) return p.content;
+  const lines = p.content.split("\n").filter(l => l.trim());
+  const bset = new Set(breaks);
+  const out = [];
+  lines.forEach((ln, i) => {
+    out.push(ln);
+    if (bset.has(i) && i < lines.length - 1) out.push("");
+  });
+  return out.join("\n");
+}
+
+function renderEditMode(p) {
+  const body = document.getElementById("poem-body");
+  const base = effectiveContent(p);
+  const inputCss = "font-family:inherit;font-size:.95rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel);width:100%;box-sizing:border-box";
+  body.innerHTML = `
+    <div style="text-align:left">
+      <input id="edit-title" value="${esc(p.title)}" placeholder="标题" style="${inputCss};font-weight:600">
+      <div style="display:flex;gap:.5em;flex-wrap:wrap;margin:.5rem 0">
+        <button class="btn" id="edit-up" title="把正文第一行剪切为标题（矫正导出时首行被吞进正文的诗）">首行升为标题</button>
+        <button class="btn" id="edit-down" title="把标题插入为正文首行，标题改为「无题」（矫正导出时首行被抬成标题的诗）">标题沉为首行</button>
+        <button class="btn" id="edit-stanza" title="只调空行分段（存侧车），不改原文、不触发旧版">仅调分段</button>
+      </div>
+      <textarea id="edit-content" rows="${Math.min(40, base.split("\n").length + 3)}" style="${inputCss};line-height:1.9;resize:vertical">${esc(base)}</textarea>
+      <div style="font-size:.75rem;color:var(--ink-3);margin-top:.5rem;line-height:1.7">空行即分段。正文有改动时保存：content_hash 更新，已有读数标「旧版」（保留不删），手工分段侧车并入正文空行；只改标题不触发旧版。写前自动备份到 corpus/.backups/。</div>
+      <div style="margin-top:.7rem;display:flex;gap:.6em">
+        <button class="btn primary" id="edit-save">保存</button>
+        <button class="btn" id="edit-cancel">取消</button>
+      </div>
+    </div>`;
+  const titleIn = document.getElementById("edit-title");
+  const ta = document.getElementById("edit-content");
+  document.getElementById("edit-cancel").onclick = () => renderPoem(p.id, false);
+  document.getElementById("edit-stanza").onclick = () => renderStanzaEditor(p);
+  document.getElementById("edit-up").onclick = () => {
+    const lines = ta.value.split("\n");
+    const i = lines.findIndex(l => l.trim());
+    if (i < 0) { toast("正文是空的"); return; }
+    titleIn.value = lines[i].trim();
+    lines.splice(i, 1);
+    while (lines.length && !lines[0].trim()) lines.shift();
+    ta.value = lines.join("\n");
+  };
+  document.getElementById("edit-down").onclick = () => {
+    const t = titleIn.value.trim();
+    if (!t) { toast("标题是空的"); return; }
+    ta.value = t + "\n" + ta.value;
+    // 词牌式命名：无题（首句）——取沉下去那句的第一个停顿前的分句，防标题过长
+    const clause = t.split(/[，。、；：？！,.;:!?\s]/).find(s => s) || t;
+    titleIn.value = `无题（${clause.slice(0, 12)}）`;
+  };
+  document.getElementById("edit-save").onclick = () => {
+    const title = titleIn.value.trim();
+    if (!title) { toast("标题不能为空"); return; }
+    const txt = ta.value.replace(/\r\n/g, "\n");
+    const contentChanged = txt.replace(/^\n+|\n+$/g, "") !== base.replace(/^\n+|\n+$/g, "");
+    if (!contentChanged && title === p.title) { toast("没有改动"); return; }
+    const req = { id: p.id, action: "edit", title };
+    if (contentChanged) req.content = txt;
+    doAction(req, contentChanged
+      ? "已保存：正文已更新，旧读数将标为「旧版」"
+      : `标题已改为《${title}》`);
+  };
+}
+
+/* ---------- 分段编辑 ----------
+ * 空行分段是恢复备忘录导出时丢失的信息，不是修订：存 corpus/分段.json 侧车，
+ * 不动 content、不改 content_hash，已有评论不会变旧版；runner 会把分段
+ * 应用进今后读者读到的正文。从统一编辑面板的「仅调分段」进入。 */
+
+function currentBreaks(p) {
+  if (Array.isArray(S.stanzas[p.id])) return new Set(S.stanzas[p.id]);
+  // 无侧车时，老实信任数据：任何空行都算真分段（与 renderPoemBody 一致）
+  const lines = p.content.split("\n");
+  const set = new Set();
+  let idx = -1, blankRun = 0;
+  for (const ln of lines) {
+    if (!ln.trim()) { blankRun++; continue; }
+    if (idx >= 0 && blankRun >= 1) set.add(idx);
+    blankRun = 0; idx++;
+  }
+  return set;
+}
+
+function renderStanzaEditor(p) {
+  const body = document.getElementById("poem-body");
+  const lines = p.content.split("\n").filter(l => l.trim());
+  const cur = currentBreaks(p);
+  body.classList.add("stanza-edit");
+  body.innerHTML = lines.map((ln, i) =>
+    `<p>${esc(ln)}</p>` + (i < lines.length - 1
+      ? `<div class="gap-toggle${cur.has(i) ? " on" : ""}" data-i="${i}" title="点击：在此分段/取消"></div>` : "")
+  ).join("") + `
+    <div class="stanza-hint">点行间空隙插入或取消分段（¶）。分段只影响显示与今后读者读到的排版，不改原文、不会让已有评论变旧版。</div>
+    <div class="stanza-bar">
+      <button class="btn primary" id="stanza-save">保存分段</button>
+      <button class="btn" id="stanza-clear">清空</button>
+      <button class="btn" id="stanza-cancel">取消</button>
+    </div>`;
+  body.querySelectorAll(".gap-toggle").forEach(g => g.onclick = () => g.classList.toggle("on"));
+  document.getElementById("stanza-cancel").onclick = () => renderPoem(p.id, false);
+  document.getElementById("stanza-clear").onclick = () =>
+    body.querySelectorAll(".gap-toggle.on").forEach(g => g.classList.remove("on"));
+  document.getElementById("stanza-save").onclick = async () => {
+    const breaks = [...body.querySelectorAll(".gap-toggle.on")].map(g => +g.dataset.i);
+    try {
+      await post("/api/stanzas", { poem_id: p.id, breaks });
+      await loadState();
+      renderPoem(p.id, false);
+      toast(breaks.length ? `已保存 ${breaks.length} 处分段（不触发旧版）` : "已清除手工分段");
+    } catch (e) { toast("失败：" + e.message); }
+  };
+}
+
+/* 划取正文一段 → 剪入自注 */
+function wireCutNote(p) {
+  const body = document.getElementById("poem-body");
+  if (!body) return;
+  let btn = null;
+  const clear = () => { if (btn) { btn.remove(); btn = null; } };
+  document.addEventListener("mousedown", e => { if (btn && !btn.contains(e.target)) clear(); });
+  body.addEventListener("mouseup", () => {
+    setTimeout(() => {
+      const sel = window.getSelection();
+      const text = sel ? sel.toString() : "";
+      if (!text.trim() || !sel.rangeCount) { return; }
+      const rect = sel.getRangeAt(0).getBoundingClientRect();
+      clear();
+      btn = document.createElement("button");
+      btn.className = "btn primary cut-btn";
+      btn.textContent = "✂ 剪入自注";
+      btn.style.left = (rect.left + rect.width / 2 + window.scrollX) + "px";
+      btn.style.top = (rect.top + window.scrollY) + "px";
+      document.body.appendChild(btn);
+      btn.onclick = () => {
+        const span = findSourceSpan(p.content, text);
+        clear();
+        if (!span) { toast("没能在原文中定位选中的文本"); return; }
+        doAction({ id: p.id, action: "cut_note", text: span },
+          "已剪入自注（正文与 content_hash 已更新，旧评论将标为旧版）");
+      };
+    }, 10);
+  });
+}
+
+/* 把浏览器选区映射回源文本的精确子串（渲染丢了空行，需按行首尾定位） */
+function findSourceSpan(content, selected) {
+  if (content.includes(selected)) return selected;
+  const lines = selected.split("\n").map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return null;
+  const start = content.indexOf(lines[0]);
+  if (start < 0) return null;
+  const last = lines[lines.length - 1];
+  const lastIdx = content.indexOf(last, start);
+  if (lastIdx < 0) return null;
+  const span = content.slice(start, lastIdx + last.length);
+  for (const ln of lines) if (!span.includes(ln)) return null;
+  return span;
+}
+
+/* ---------- 统计页：从盲读记录事后派生的图（纯 SVG，无依赖） ---------- */
+
+let statsCalMode = false;   // 作品四图的口径开关：false=原始分，true=校准分（会话内记忆）
+
+function renderStats() {
+  app.className = "wide";
+  const reads = S.reads.filter(r => r.context_mode === "blind" && !isHidden(r.read_id));
+  const calMap = S.calibration.reads || {};
+  const hasCal = Object.keys(calMap).length > 0;
+  const useCal = statsCalMode && hasCal;
+  /* 口径开关只换原料（每条读数的分），公式不变：统计页始终是描述统计，
+     不掺贝叶斯收缩与展示拉伸——那是榜单的事 */
+  const sc = useCal ? (r => calMap[r.read_id] != null ? calMap[r.read_id] : r.score)
+    : (r => r.score);
+  const n = reads.length;
+  const scores = reads.map(sc);
+  const mean = n ? scores.reduce((a, b) => a + b, 0) / n : 0;
+  const sd = n ? Math.sqrt(scores.reduce((a, b) => a + (b - mean) ** 2, 0) / n) : 0;
+
+  app.innerHTML = `
+    <h1 class="page-title">统计</h1>
+    <p class="page-hint">全部从诚实的单篇盲读里事后派生（已折叠的不计入）。共 ${n} 次盲读 · 总均 ${fmt1(mean)} · σ ${fmt1(sd)}${useCal ? "（校准口径）" : ""}。</p>
+    ${hasCal ? `<div class="filter-row" style="display:flex;justify-content:flex-end;align-items:center;gap:.45em;margin:-.4rem 0 .6rem">
+      <span style="font-size:.75rem;color:var(--ink-3)">作品四图（全景 / 趋势 / 散点 / 文体）口径：</span>
+      <button class="btn${useCal ? "" : " on"}" id="st-mode-raw">原始</button>
+      <button class="btn${useCal ? " on" : ""}" id="st-mode-cal" title="每条读数换成校准分（人设×模型分位 → 参考分布），再走同样的统计">校准</button>
+    </div>` : ""}
+    <div class="boards">
+      <section class="board hero"><h2>分数分布全景</h2>
+        <p class="board-note">所有盲读评分，0.5 分一档；悬停看档位次数</p>
+        <div class="dist-wrap" style="max-width:none" id="st-hist"></div>
+        <div style="text-align:center;margin-top:.6rem;font-size:.85rem;color:var(--ink-2)">
+          曾有读者给出 ≥8 的诗：<b id="club8-n" style="color:#a4593d"></b> 首
+          <button class="btn" id="club8-btn" style="margin-left:.7em">详情</button></div>
+        <div id="club8" style="display:none;margin-top:.8rem"></div></section>
+      <section class="board hero"><h2>均分趋势</h2>
+        <p class="board-note">按诗的写作月份：淡点 = 单月均分（点越大读数越多），实线 = ±4 个月加权滑动平均</p>
+        <div class="dist-wrap" style="max-width:none" id="st-year"></div></section>
+      <section class="board hero"><h2>两极散点</h2>
+        <p class="board-note">每首诗一个点：横轴均分，纵轴 σ（读者分歧）。右上角 = 分高且撕裂的危险好诗；取景掐掉两端极值，出界的离群点钉在图缘画成空心点。悬停看详情，点击直达该诗</p>
+        <div class="dist-wrap" style="max-width:none" id="st-polar"></div></section>
+      <section class="board hero"><h2>文体对比</h2>
+        <p class="board-note">细线 = 该文体得分的 5–95 百分位（个别极端分不拉伸，全距在悬停里），粗段 = 均值 ± σ，实心点 = 均值；按均值排序</p>
+        <div class="dist-wrap" style="max-width:none" id="st-genre"></div></section>
+      <section class="board hero"><h2>覆盖层数</h2>
+        <p class="board-note">读者池内每首诗被盲读的次数分布——派发前看缺口在哪</p>
+        <div class="dist-wrap" style="max-width:none" id="st-cov"></div></section>
+      <section class="board hero"><h2>读者的松紧</h2>
+        <p class="board-note">细线 = 该读者给分的 5–95 百分位，粗段 = 均值 ± σ，实心点 = 均值（数值在行尾）；从松到紧排。始终原始口径——这一页看的就是松紧本身</p>
+        <div class="dist-wrap" style="max-width:none" id="st-readers"></div></section>
+      <section class="board hero echo-board"><h2>读者回声簿</h2>
+        <p class="board-note">按人设汇总其未折叠盲读评语收到的主动票。赞、踩、AI 同批加精与作者藏印分列；它反映社区回声，也受出场和被投票次数影响，不是读者能力排名。</p>
+        <div id="st-echo"></div></section>
+      <section class="board hero"><h2>评分门槛</h2>
+        <p class="board-note">每位读者给出 ≥X 分的比例；X 可调，虚线是不分读者的总体比例，从高到低排</p>
+        <div style="display:flex;align-items:center;gap:.8em;margin-bottom:.6em">
+          <input type="range" id="st-thresh-x" min="0" max="10" step="0.5" value="8" style="flex:1">
+          <span id="st-thresh-label" style="font-weight:600;min-width:3.4em;text-align:right"></span>
+        </div>
+        <div class="dist-wrap" style="max-width:none" id="st-thresh"></div></section>
+      <section class="board hero"><h2>幕后演员</h2>
+        <p class="board-note">同一位读者由不同模型扮演时，手势不同。细线 = 5–95 百分位，粗段 = 均值 ± σ，行尾 = 均值与 ≥8 发放率；只列 ≥30 读的模型。始终原始口径</p>
+        <div class="dist-wrap" style="max-width:none" id="st-models"></div></section>
+      <section class="board hero"><h2>松紧修正</h2>
+        <p class="board-note">每个模型的全部读数经正式校准（人设×模型分位 → 参考分布，与榜单"质"分同一套）后的均分位移：Δ 为正 = 手紧被抬回，为负 = 手松被压回。始终双列并示，不随口径开关。</p>
+        <div class="dist-wrap" style="max-width:none" id="st-cal"></div></section>
+    </div>`;
+  histChart(document.getElementById("st-hist"), scores);
+  // ≥8 俱乐部：曾有任一读者给出 ≥8 的诗——用"曾得高分"而非"均分过线"，
+  // 不会因为评委团里进来一位手紧的读者而整批除名
+  const club = pool().map(p => {
+    const rs = statReads(p.id).map(sc);
+    const cMean = rs.length ? rs.reduce((a, b) => a + b, 0) / rs.length : 0;
+    return { p, mean: cMean, hi: rs.filter(s => s >= 8).length, max: rs.length ? Math.max(...rs) : 0 };
+  }).filter(o => o.hi > 0).sort((a, b) => b.max - a.max || b.hi - a.hi);
+  const btn8 = document.getElementById("club8-btn"), box8 = document.getElementById("club8");
+  document.getElementById("club8-n").textContent = club.length;
+  btn8.onclick = () => {
+    if (!box8.innerHTML) box8.innerHTML = boardList(club.map(o => o.p), p => {
+      const o = club.find(c => c.p.id === p.id);
+      return `最高 ${fmt1(o.max)} · ${o.hi} 次 ≥8 · 均 ${fmt1(o.mean)}`;
+    });
+    box8.style.display = box8.style.display === "none" ? "" : "none";
+    btn8.classList.toggle("on");
+  };
+  trendChart(document.getElementById("st-year"), reads, sc);
+  polarChart(document.getElementById("st-polar"), sc);
+  genreChart(document.getElementById("st-genre"), sc);
+  covChart(document.getElementById("st-cov"));
+  readerChart(document.getElementById("st-readers"));
+  readerEchoBoard(document.getElementById("st-echo"));
+  const threshSlider = document.getElementById("st-thresh-x");
+  const threshLabel = document.getElementById("st-thresh-label");
+  const threshEl = document.getElementById("st-thresh");
+  const renderThresh = () => {
+    const x = parseFloat(threshSlider.value);
+    threshLabel.textContent = `≥ ${fmt1(x)}`;
+    thresholdChart(threshEl, reads, x);
+  };
+  threshSlider.addEventListener("input", renderThresh);
+  renderThresh();
+  modelChart(document.getElementById("st-models"), reads, 30);
+  calShiftBoard(document.getElementById("st-cal"), reads, calMap);
+  if (hasCal) {
+    const setMode = v => { if (statsCalMode !== v) { statsCalMode = v; renderStats(); } };
+    document.getElementById("st-mode-raw").onclick = () => setMode(false);
+    document.getElementById("st-mode-cal").onclick = () => setMode(true);
+  }
+}
+
+function histChart(el, scores) {
+  if (!scores.length) { el.innerHTML = '<p class="empty">暂无数据</p>'; return; }
+  const W = 640, H = 220, padL = 24, padR = 24, axisH = 26;
+  const bins = new Array(21).fill(0);
+  for (const s of scores) bins[Math.max(0, Math.min(20, Math.round(s * 2)))]++;
+  const maxB = Math.max(...bins);
+  const x = s => padL + (s / 10) * (W - padL - padR);
+  const baseY = H - axisH;
+  const bw = (W - padL - padR) / 21;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="分数分布">`;
+  svg += `<line x1="${padL - 6}" y1="${baseY}" x2="${W - padR + 6}" y2="${baseY}" stroke="#e3dac7"/>`;
+  for (let t = 0; t <= 10; t++)
+    svg += `<line x1="${x(t)}" y1="${baseY}" x2="${x(t)}" y2="${baseY + 4}" stroke="#e3dac7"/>` +
+      `<text x="${x(t)}" y="${baseY + 17}" text-anchor="middle" font-size="11" fill="#a29786">${t}</text>`;
+  bins.forEach((c, i) => {
+    if (!c) return;
+    const h = Math.max(2, (baseY - 22) * c / maxB);
+    svg += `<rect x="${x(i / 2) - bw * .42}" y="${baseY - h}" width="${bw * .84}" height="${h}" rx="2"
+      fill="#2f6d62" fill-opacity=".8"><title>${(i / 2).toFixed(1)} 分 · ${c} 次</title></rect>` +
+      `<text x="${x(i / 2)}" y="${baseY - h - 4}" text-anchor="middle" font-size="9.5" fill="#a29786">${c}</text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* 均分趋势：行业标准的「原始点 + 平滑线」叠加——
+ * 淡点 = 单月均分（半径随读数），实线 = ±4 个月加权滑动平均（按读数加权，间隙月自然跨过）。 */
+function trendChart(el, reads, sc = r => r.score) {
+  const byMonth = new Map(); // monthIndex -> {sum, n}
+  for (const r of reads) {
+    const p = maps.poem.get(r.poem_id);
+    const d = p ? (p.date_written || p.created || "") : "";
+    if (d.length < 7) continue;
+    const mi = (+d.slice(0, 4)) * 12 + (+d.slice(5, 7)) - 1;
+    const m = byMonth.get(mi) || { sum: 0, n: 0 };
+    m.sum += sc(r); m.n++;
+    byMonth.set(mi, m);
+  }
+  const mis = [...byMonth.keys()].sort((a, b) => a - b);
+  if (mis.length < 3) { el.innerHTML = '<p class="empty">月份太少，画不成趋势。</p>'; return; }
+  const lo_mi = mis[0], hi_mi = mis[mis.length - 1];
+
+  // 加权滑动平均：窗口 ±4 个月，窗内读数 < 3 时跳过（避免孤月假信号）
+  const HALF = 4;
+  const smooth = [];
+  for (let i = lo_mi; i <= hi_mi; i++) {
+    let sum = 0, n = 0;
+    for (let j = i - HALF; j <= i + HALF; j++) {
+      const m = byMonth.get(j);
+      if (m) { sum += m.sum; n += m.n; }
+    }
+    if (n >= 3) smooth.push({ mi: i, mean: sum / n });
+  }
+  const monthly = mis.map(mi => ({ mi, n: byMonth.get(mi).n, mean: byMonth.get(mi).sum / byMonth.get(mi).n }));
+
+  const W = 640, H = 260, padL = 40, padR = 24, padT = 16, axisH = 30;
+  const allVals = monthly.map(m => m.mean).concat(smooth.map(s => s.mean));
+  const lo = Math.max(0, Math.floor(Math.min(...allVals) - .5));
+  const hi = Math.min(10, Math.ceil(Math.max(...allVals) + .5));
+  const x = mi => padL + (mi - lo_mi) / (hi_mi - lo_mi) * (W - padL - padR);
+  const yy = v => padT + (hi - v) / (hi - lo) * (H - padT - axisH);
+  const baseY = H - axisH;
+
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="均分趋势">`;
+  for (let v = lo; v <= hi; v++)
+    svg += `<line x1="${padL}" y1="${yy(v)}" x2="${W - padR}" y2="${yy(v)}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${padL - 8}" y="${yy(v) + 4}" text-anchor="end" font-size="11" fill="#a29786">${v}</text>`;
+  // 年份刻度：每年 1 月；起点若在年中，也补一个起始年刻度
+  for (let i = lo_mi; i <= hi_mi; i++) {
+    if (i % 12 === 0) {
+      svg += `<line x1="${x(i)}" y1="${baseY}" x2="${x(i)}" y2="${baseY + 4}" stroke="#e3dac7"/>` +
+        `<text x="${x(i)}" y="${baseY + 18}" text-anchor="middle" font-size="11" fill="#a29786">${i / 12}</text>`;
+    }
+  }
+  if (lo_mi % 12 !== 0)
+    svg += `<line x1="${x(lo_mi)}" y1="${baseY}" x2="${x(lo_mi)}" y2="${baseY + 4}" stroke="#e3dac7"/>` +
+      `<text x="${x(lo_mi)}" y="${baseY + 18}" text-anchor="middle" font-size="11" fill="#a29786">${Math.floor(lo_mi / 12)}</text>`;
+  // 淡点：单月均分（悬停出提示框）
+  for (const m of monthly) {
+    const yr = Math.floor(m.mi / 12), mo = String(m.mi % 12 + 1).padStart(2, "0");
+    svg += `<circle class="tdot" data-l="${yr}-${mo}" data-m="${fmt1(m.mean)}" data-n="${m.n}"
+      cx="${x(m.mi)}" cy="${yy(m.mean)}" r="${2 + Math.min(3.5, m.n / 4)}"
+      fill="#2f6d62" fill-opacity=".28" style="cursor:pointer"/>`;
+  }
+  // 实线：加权滑动平均
+  svg += `<polyline points="${smooth.map(s => `${x(s.mi)},${yy(s.mean)}`).join(" ")}"
+    fill="none" stroke="#a4593d" stroke-width="2" stroke-linejoin="round"/>`;
+  // 首尾端点标数值
+  const ends = [smooth[0], smooth[smooth.length - 1]];
+  for (const s of ends)
+    svg += `<circle cx="${x(s.mi)}" cy="${yy(s.mean)}" r="3.5" fill="#a4593d"/>` +
+      `<text x="${x(s.mi)}" y="${yy(s.mean) - 9}" text-anchor="middle" font-size="10.5" fill="#a4593d" font-weight="600">${fmt1(s.mean)}</text>`;
+  el.innerHTML = svg + "</svg>";
+
+  let tip = document.querySelector(".tip");
+  if (!tip) { tip = document.createElement("div"); tip.className = "tip"; document.body.appendChild(tip); }
+  el.querySelectorAll(".tdot").forEach(c => {
+    c.addEventListener("mousemove", e => {
+      tip.innerHTML = `<b>${c.dataset.l}</b> · 均 ${c.dataset.m} · ${c.dataset.n} 读`;
+      tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 200) + "px";
+      tip.style.top = (e.clientY + 14) + "px";
+      tip.classList.add("show");
+    });
+    c.addEventListener("mouseleave", () => tip.classList.remove("show"));
+  });
+}
+
+function readerChart(el) {
+  const rows = readerRanking().filter(r => r.n > 0);
+  if (!rows.length) { el.innerHTML = '<p class="empty">暂无数据</p>'; return; }
+  const W = 640, rowH = 26, padL = 150, padR = 72, axisH = 26, padT = 8;
+  const H = padT + rows.length * rowH + axisH;
+  const x = s => padL + (s / 10) * (W - padL - padR);
+  const baseY = padT + rows.length * rowH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="读者松紧">`;
+  for (let t = 0; t <= 10; t += 2)
+    svg += `<line x1="${x(t)}" y1="${padT}" x2="${x(t)}" y2="${baseY}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${x(t)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">${t}</text>`;
+  rows.forEach((r, i) => {
+    const cy = padT + i * rowH + rowH / 2;
+    const ss = r.reads.map(x => x.score);
+    const lo = quant(ss, .05), hi = quant(ss, .95);
+    svg += `<text x="${padL - 10}" y="${cy + 4}" text-anchor="end" font-size="11" fill="#6b6154">${esc(r.persona.name)}</text>` +
+      `<line x1="${x(lo)}" y1="${cy}" x2="${x(hi)}" y2="${cy}" stroke="#2f6d62" stroke-width="1.2" opacity=".5"/>` +
+      `<line x1="${x(Math.max(0, r.mean - r.sd))}" y1="${cy}" x2="${x(Math.min(10, r.mean + r.sd))}" y2="${cy}" stroke="#2f6d62" stroke-width="4" opacity=".35"/>` +
+      `<circle cx="${x(r.mean)}" cy="${cy}" r="4" fill="#2f6d62"><title>${esc(r.persona.name)} · 均 ${fmt1(r.mean)} · σ ${fmt1(r.sd)} · ${r.n} 读 · ${fmt1(r.min)}–${fmt1(r.max)}</title></circle>` +
+      `<text x="${W - 6}" y="${cy + 4}" text-anchor="end" font-size="10.5" fill="#6b6154"><tspan font-weight="600">${fmt1(r.mean)}</tspan><tspan fill="#a29786"> ±${fmt1(r.sd)}</tspan></text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* 评分门槛：每位读者给出 ≥threshold 分的比例，横条从高到低排；虚线 = 不分读者的总体比例 */
+function thresholdChart(el, allReads, threshold) {
+  const rows = readerRanking().filter(r => r.n > 0).map(r => {
+    const hits = r.reads.filter(x => x.score >= threshold).length;
+    return { persona: r.persona, n: r.n, hits, pct: hits / r.n * 100 };
+  }).sort((a, b) => b.pct - a.pct || b.n - a.n);
+  if (!rows.length) { el.innerHTML = '<p class="empty">暂无数据</p>'; return; }
+  const allHits = allReads.filter(r => r.score >= threshold).length;
+  const allPct = allReads.length ? allHits / allReads.length * 100 : 0;
+
+  const W = 640, rowH = 22, padL = 150, padR = 56, axisH = 24, padT = 8;
+  const H = padT + rows.length * rowH + axisH;
+  const x = pct => padL + (pct / 100) * (W - padL - padR);
+  const baseY = padT + rows.length * rowH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="评分门槛比例">`;
+  for (let t = 0; t <= 100; t += 25)
+    svg += `<line x1="${x(t)}" y1="${padT}" x2="${x(t)}" y2="${baseY}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${x(t)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">${t}%</text>`;
+  svg += `<line x1="${x(allPct)}" y1="${padT}" x2="${x(allPct)}" y2="${baseY}" stroke="#a4593d" stroke-width="1.2" stroke-dasharray="4 3" opacity=".8"><title>总体（不分读者）· ${fmt1(allPct)}%</title></line>`;
+  rows.forEach((r, i) => {
+    const cy = padT + i * rowH + rowH / 2, bh = rowH * .62;
+    svg += `<text x="${padL - 10}" y="${cy + 4}" text-anchor="end" font-size="11" fill="#6b6154">${esc(r.persona.name)}</text>` +
+      `<rect x="${padL}" y="${cy - bh / 2}" width="${Math.max(0, x(r.pct) - padL)}" height="${bh}" rx="2" fill="#2f6d62" fill-opacity=".8">` +
+      `<title>${esc(r.persona.name)} · ${fmt1(r.pct)}% (${r.hits}/${r.n})</title></rect>` +
+      `<text x="${x(r.pct) + 6}" y="${cy + 4}" font-size="10.5" fill="#6b6154">${fmt1(r.pct)}%</text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* 线性插值分位数：t ∈ [0,1] */
+function quant(arr, t) {
+  const b = [...arr].sort((m, n) => m - n);
+  const i = (b.length - 1) * t, lo = Math.floor(i);
+  return b[lo] + (b[Math.ceil(i)] - b[lo]) * (i - lo);
+}
+
+/* 共享悬停提示框（与趋势图同一个 .tip div） */
+function tipFor(el, sel, htmlOf) {
+  let tip = document.querySelector(".tip");
+  if (!tip) { tip = document.createElement("div"); tip.className = "tip"; document.body.appendChild(tip); }
+  el.querySelectorAll(sel).forEach(c => {
+    c.addEventListener("mousemove", e => {
+      tip.innerHTML = htmlOf(c);
+      tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 220) + "px";
+      tip.style.top = (e.clientY + 14) + "px";
+      tip.classList.add("show");
+    });
+    c.addEventListener("mouseleave", () => tip.classList.remove("show"));
+  });
+}
+
+/* 两极散点：x = 均分，y = σ。虚线十字 = 全体中位，右上象限即「分高且撕裂」。
+ * σ 至少要 2 读才有意义，单读的诗不上图。 */
+function polarChart(el, sc = r => r.score) {
+  const pts = pool().map(p => {
+    const rs = statReads(p.id);
+    if (rs.length < 2) return null;
+    const ss = rs.map(sc);
+    const mean = ss.reduce((a, b) => a + b, 0) / ss.length;
+    const sd = Math.sqrt(ss.reduce((a, b) => a + (b - mean) ** 2, 0) / ss.length);
+    return { p, n: ss.length, mean, sd };
+  }).filter(Boolean);
+  if (pts.length < 3) { el.innerHTML = '<p class="empty">≥2 读的诗太少，画不成散点。</p>'; return; }
+  const W = 640, H = 300, padL = 40, padR = 20, padT = 14, axisH = 30;
+  const xs = pts.map(o => o.mean), ys = pts.map(o => o.sd);
+  // 取景按 2–98 百分位定界，主群不被个别极值挤扁；出界点钉在图缘画成空心点
+  const xlo = Math.max(0, Math.floor((quant(xs, .02) - .3) * 2) / 2);
+  const xhi = Math.min(10, Math.ceil((quant(xs, .98) + .3) * 2) / 2);
+  const yhi = Math.max(.5, Math.ceil((quant(ys, .98) + .2) * 2) / 2);
+  const x = v => padL + (v - xlo) / (xhi - xlo) * (W - padL - padR);
+  const y = v => padT + (yhi - v) / yhi * (H - padT - axisH);
+  const baseY = H - axisH;
+  const mx = quant(xs, .5), my = quant(ys, .5);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="两极散点">`;
+  for (let v = Math.ceil(xlo); v <= xhi; v++)
+    svg += `<line x1="${x(v)}" y1="${baseY}" x2="${x(v)}" y2="${baseY + 4}" stroke="#e3dac7"/>` +
+      `<text x="${x(v)}" y="${baseY + 17}" text-anchor="middle" font-size="11" fill="#a29786">${v}</text>`;
+  for (let v = 0; v <= yhi; v += .5)
+    svg += `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${padL - 8}" y="${y(v) + 4}" text-anchor="end" font-size="11" fill="#a29786">${v.toFixed(1)}</text>`;
+  svg += `<line x1="${x(mx)}" y1="${padT}" x2="${x(mx)}" y2="${baseY}" stroke="#a4593d" stroke-dasharray="4 4" opacity=".4"/>` +
+    `<line x1="${padL}" y1="${y(my)}" x2="${W - padR}" y2="${y(my)}" stroke="#a4593d" stroke-dasharray="4 4" opacity=".4"/>` +
+    `<text x="${W - padR - 4}" y="${padT + 12}" text-anchor="end" font-size="10.5" fill="#a4593d" opacity=".75">分高且撕裂 →</text>`;
+  for (const o of pts) {
+    const cxv = Math.min(xhi, Math.max(xlo, o.mean)), cyv = Math.min(yhi, o.sd);
+    const out = cxv !== o.mean || cyv !== o.sd;
+    svg += `<circle class="sdot" data-id="${o.p.id}" data-t="${esc(o.p.title)}" data-m="${fmt1(o.mean)}" data-s="${fmt1(o.sd)}" data-n="${o.n}"${out ? ' data-o="1"' : ""}
+      cx="${x(cxv)}" cy="${y(cyv)}" r="${3 + Math.min(2, o.n / 6)}"
+      ${out ? 'fill="none" stroke="#a4593d" stroke-width="1.6"' : 'fill="#2f6d62" fill-opacity=".5"'} pointer-events="all" style="cursor:pointer"/>`;
+  }
+  el.innerHTML = svg + "</svg>";
+  tipFor(el, ".sdot", c => `<b>《${c.dataset.t}》</b> · 均 ${c.dataset.m} · σ ${c.dataset.s} · ${c.dataset.n} 读${c.dataset.o ? "（离群，钉在图缘）" : ""}`);
+  el.querySelectorAll(".sdot").forEach(c => c.onclick = () => { location.hash = "#/poem/" + c.dataset.id; });
+}
+
+/* 文体对比：与读者松紧同一图式，行 = 文体 */
+function genreChart(el, sc = r => r.score) {
+  const agg = new Map();
+  for (const p of pool()) {
+    const rs = statReads(p.id);
+    if (!rs.length) continue;
+    const g = p.genre || "未分类";
+    const a = agg.get(g) || { scores: [], poems: 0 };
+    for (const r of rs) a.scores.push(sc(r));
+    a.poems++;
+    agg.set(g, a);
+  }
+  const rows = [...agg.entries()].map(([g, a]) => {
+    const mean = a.scores.reduce((m, n) => m + n, 0) / a.scores.length;
+    const sd = Math.sqrt(a.scores.reduce((m, n) => m + (n - mean) ** 2, 0) / a.scores.length);
+    return { g, poems: a.poems, n: a.scores.length, mean, sd,
+      min: Math.min(...a.scores), max: Math.max(...a.scores),
+      lo: quant(a.scores, .05), hi: quant(a.scores, .95) };
+  }).sort((a, b) => b.mean - a.mean);
+  if (!rows.length) { el.innerHTML = '<p class="empty">暂无数据</p>'; return; }
+  const W = 640, rowH = 26, padL = 150, padR = 72, axisH = 26, padT = 8;
+  const H = padT + rows.length * rowH + axisH;
+  const x = s => padL + (s / 10) * (W - padL - padR);
+  const baseY = padT + rows.length * rowH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="文体对比">`;
+  for (let t = 0; t <= 10; t += 2)
+    svg += `<line x1="${x(t)}" y1="${padT}" x2="${x(t)}" y2="${baseY}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${x(t)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">${t}</text>`;
+  rows.forEach((r, i) => {
+    const cy = padT + i * rowH + rowH / 2;
+    svg += `<text x="${padL - 10}" y="${cy + 4}" text-anchor="end" font-size="11" fill="#6b6154">${esc(r.g)}<tspan fill="#a29786">（${r.poems} 首）</tspan></text>` +
+      `<line x1="${x(r.lo)}" y1="${cy}" x2="${x(r.hi)}" y2="${cy}" stroke="#2f6d62" stroke-width="1.2" opacity=".5"/>` +
+      `<line x1="${x(Math.max(0, r.mean - r.sd))}" y1="${cy}" x2="${x(Math.min(10, r.mean + r.sd))}" y2="${cy}" stroke="#2f6d62" stroke-width="4" opacity=".35"/>` +
+      `<circle cx="${x(r.mean)}" cy="${cy}" r="4" fill="#2f6d62"><title>${esc(r.g)} · 均 ${fmt1(r.mean)} · σ ${fmt1(r.sd)} · ${r.poems} 首 ${r.n} 读 · 全距 ${fmt1(r.min)}–${fmt1(r.max)}</title></circle>` +
+      `<text x="${W - 6}" y="${cy + 4}" text-anchor="end" font-size="10.5" fill="#6b6154"><tspan font-weight="600">${fmt1(r.mean)}</tspan><tspan fill="#a29786"> ±${fmt1(r.sd)}</tspan></text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* 松紧修正：正式校准（calibrate.py 下发的单读校准分，与榜单"质"分同一套）
+ * 对每个模型读数的均分位移。取代旧的前端 z 分"校准视角"原型——那套独立
+ * 算法算出的数字与"质"分对不上，两种"校准"并存只会误导。 */
+function calShiftBoard(el, reads, calMap) {
+  const byM = new Map();
+  for (const r of reads) {
+    const c = calMap[r.read_id];
+    if (c == null) continue;
+    const a = byM.get(modelAlias(r.reader.model)) || { n: 0, raw: 0, cal: 0 };
+    a.n++; a.raw += r.score; a.cal += c;
+    byM.set(modelAlias(r.reader.model), a);
+  }
+  if (!byM.size) { el.innerHTML = '<p class="empty">暂无校准数据（calibrate.py 还没跑出 scores.json）。</p>'; return; }
+  const rows = [...byM.entries()].map(([m, a]) => {
+    const raw = a.raw / a.n, cal = a.cal / a.n;
+    return { m, n: a.n, raw, cal, d: cal - raw };
+  }).sort((a, b) => b.d - a.d);
+  const W = 640, rowH = 26, padL = 150, padR = 178, padT = 8, axisH = 26;
+  const H = padT + rows.length * rowH + axisH;
+  const dmax = Math.max(.3, ...rows.map(r => Math.abs(r.d))) * 1.15;
+  const x = d => padL + (d + dmax) / (2 * dmax) * (W - padL - padR);
+  const baseY = padT + rows.length * rowH;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="松紧修正">`;
+  for (const t of [-.6, -.4, -.2, .2, .4, .6]) if (Math.abs(t) <= dmax + 1e-9)
+    svg += `<line x1="${x(t)}" y1="${padT}" x2="${x(t)}" y2="${baseY}" stroke="#e3dac7" stroke-dasharray="2 5"/>` +
+      `<text x="${x(t)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">${(t > 0 ? "+" : "") + t.toFixed(1)}</text>`;
+  svg += `<line x1="${x(0)}" y1="${padT}" x2="${x(0)}" y2="${baseY}" stroke="#a29786" stroke-dasharray="2 4"/>` +
+    `<text x="${x(0)}" y="${baseY + 16}" text-anchor="middle" font-size="11" fill="#a29786">0</text>`;
+  rows.forEach((r, i) => {
+    const cy = padT + i * rowH + rowH / 2, bh = rowH * .56;
+    const x0 = x(0), x1 = x(r.d);
+    const col = r.d >= 0 ? "#2f6d62" : "#a4593d";
+    svg += `<text x="${padL - 10}" y="${cy + 4}" text-anchor="end" font-size="11" fill="#6b6154">${esc(r.m)}<tspan fill="#a29786">（${r.n}）</tspan></text>` +
+      `<rect x="${Math.min(x0, x1)}" y="${cy - bh / 2}" width="${Math.max(1.5, Math.abs(x1 - x0))}" height="${bh}" rx="2" fill="${col}" fill-opacity=".75">` +
+      `<title>${esc(r.m)} · 原始均 ${fmt2(r.raw)} → 校准均 ${fmt2(r.cal)}（Δ ${(r.d >= 0 ? "+" : "") + fmt2(r.d)}）· ${r.n} 读</title></rect>` +
+      `<text x="${W - 6}" y="${cy + 4}" text-anchor="end" font-size="10.5" fill="#6b6154">${fmt2(r.raw)} → <tspan font-weight="600">${fmt2(r.cal)}</tspan><tspan fill="${col}">（${(r.d >= 0 ? "+" : "") + fmt2(r.d)}）</tspan></text>`;
+  });
+  el.innerHTML = svg + "</svg>";
+}
+
+/* 覆盖层数：x = 被盲读次数，y = 有几首诗停在这个层数 */
+function covChart(el) {
+  const counts = pool().map(p => statReads(p.id).length);
+  if (!counts.length) { el.innerHTML = '<p class="empty">暂无数据</p>'; return; }
+  const maxC = Math.max(...counts);
+  const bins = new Array(maxC + 1).fill(0);
+  for (const c of counts) bins[c]++;
+  const maxB = Math.max(...bins);
+  const W = 640, H = 214, padL = 24, padR = 24, axisH = 44;
+  const x = i => padL + (maxC ? i / maxC : 0) * (W - padL - padR);
+  const baseY = H - axisH;
+  const bw = (W - padL - padR) / (maxC + 1);
+  let svg = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="覆盖层数">`;
+  svg += `<line x1="${padL - 6}" y1="${baseY}" x2="${W - padR + 6}" y2="${baseY}" stroke="#e3dac7"/>`;
+  bins.forEach((c, i) => {
+    svg += `<text x="${x(i)}" y="${baseY + 17}" text-anchor="middle" font-size="11" fill="#a29786">${i}</text>`;
+    if (!c) return;
+    const h = Math.max(2, (baseY - 24) * c / maxB);
+    svg += `<rect x="${x(i) - bw * .36}" y="${baseY - h}" width="${bw * .72}" height="${h}" rx="2"
+      fill="${i === 0 ? "#a4593d" : "#2f6d62"}" fill-opacity=".8"><title>${i} 读 · ${c} 首</title></rect>` +
+      `<text x="${x(i)}" y="${baseY - h - 4}" text-anchor="middle" font-size="9.5" fill="#a29786">${c}</text>`;
+  });
+  svg += `<text x="${W - padR}" y="${H - 4}" text-anchor="end" font-size="10.5" fill="#a29786">被盲读次数 →</text>`;
+  el.innerHTML = svg + "</svg>";
+}
+
+/* ---------- 深读页 ---------- */
+
+function renderDeepRead(rid) {
+  app.className = "";
+  const r = maps.readById.get(rid);
+  if (!r || !r.long_form) { app.innerHTML = `<p class="page-hint">没有这篇深读。</p>`; return; }
+  const p = maps.poem.get(r.poem_id);
+  const marked = isAuthorMarked(rid);
+  app.innerHTML = `<div class="deep-read">
+    <a class="back" href="#/poem/${r.poem_id}">← 回到《${esc(p ? p.title : r.poem_id)}》</a>
+    <h1 class="page-title" style="margin-top:1.2rem">深读 · ${esc(personaName(r.reader.persona_id))}</h1>
+    <p class="page-hint">
+      <span class="chip">${esc(modelAlias(r.reader.model))}</span>
+      <span class="chip">${esc(r.transport)}</span>
+      ${authorSeal(rid)}
+      ${scorePair(r, true)}
+      ${r.content_hash !== (p && p.content_hash) ? '<span class="chip warm">读的是旧版</span>' : ""}
+    </p>
+    <div class="long-form">${esc(r.long_form)}</div>
+    ${IS_MOBILE ? "" : `<div class="deep-mark-tools">
+      <button class="btn${marked ? " on" : ""}" id="deep-mark">${marked ? "收回作者藏印" : "落作者藏印"}</button>
+      <span>藏印只是一枚可撤回的作者认可，不复制全文、不改变榜单或校准。</span>
+    </div>`}</div>`;
+  const btn = document.getElementById("deep-mark");
+  if (btn) btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = marked ? "正在收回…" : "正在落印…";
+    try {
+      await saveAuthorMark(rid, !marked);
+      renderDeepRead(rid);
+      toast(marked ? "已收回作者藏印" : "已落作者藏印");
+    } catch (e) {
+      btn.disabled = false;
+      btn.textContent = marked ? "收回作者藏印" : "落作者藏印";
+      toast("失败：" + e.message);
+    }
+  };
+}
+
+/* ---------- 掌中册：手机本地偏爱 / 进度 / 随记 ---------- */
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1200);
+}
+
+function wireMobilePoem(p) {
+  document.getElementById("btn-mobile-fav").onclick = () => {
+    setMobileFavorite(p.id, !isFav(p.id));
+    renderPoem(p.id, false);
+    toast(isFav(p.id) ? "已收进这台手机的掌中偏爱" : "已移出掌中偏爱");
+  };
+  document.getElementById("btn-mobile-note").onclick = () => {
+    const details = document.getElementById("mobile-note");
+    details.open = true;
+    document.getElementById("mobile-note-text").focus();
+  };
+  const area = document.getElementById("mobile-note-text");
+  const status = document.getElementById("mobile-note-status");
+  let timer = null;
+  area.addEventListener("input", () => {
+    status.textContent = "正在记下…";
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const text = area.value;
+      if (text.trim()) mobileLocal.notes[p.id] = { text, updated_at: new Date().toISOString() };
+      else delete mobileLocal.notes[p.id];
+      if (saveMobileLocal()) status.textContent = `已留在这台手机 · ${compactWhen(new Date().toISOString())}`;
+      else status.textContent = "浏览器禁止本地保存；可复制文字后再离开。";
+    }, 450);
+  });
+}
+
+function renderMobileDesk() {
+  app.className = "";
+  const notes = Object.values(mobileLocal.notes).filter(x => x && x.text?.trim()).length;
+  const favs = Object.keys(mobileLocal.favorites).filter(id => isFav(id)).length;
+  const recent = Object.entries(mobileLocal.viewed)
+    .sort((a, b) => b[1].localeCompare(a[1])).slice(0, 8)
+    .map(([id, ts]) => ({ p: maps.poem.get(id), ts })).filter(x => x.p);
+  const installable = !!installPrompt;
+  const secure = window.isSecureContext;
+  const portable = IS_PORTABLE_MOBILE;
+  const localCount = favs + notes + Object.keys(mobileLocal.viewed).length;
+  const lastExport = mobileLocal.last_exported_at;
+  const exportAge = lastExport ? Date.now() - new Date(lastExport).getTime() : Infinity;
+  const backupDue = localCount > 0 && (!lastExport || exportAge > 30 * 24 * 60 * 60 * 1000);
+  const deltaText = mobileDeltaText(mobileConnection.delta);
+  const returnGuide = IS_SNAPSHOT
+    ? "这是一个独立离线文件。下次从手机的“文件”或浏览器下载记录中再次打开；电脑内容变化后需要重新导出。"
+    : portable
+      ? "把昼青集安装到桌面或添加主屏幕。以后直接点图标进入；没有电脑也能看上次留影，回到同一 Wi‑Fi 且电脑入口开启时会自动检查更新。"
+      : secure
+      ? "把昼青集安装到桌面或添加主屏幕。以后直接点图标进入；打开页面或点“现在更新”时才向电脑拉取，不会一直在后台连接。"
+      : "把当前页面收藏，或用浏览器菜单“添加到主屏幕”建立快捷入口。只要电脑这一次的手机入口还开着，就能直接回来；电脑停止入口、退出程序或重新开启后，旧口令会失效，需要重新扫码。";
+  app.innerHTML = `
+    <p class="pocket-kicker">掌中册 · 只在这台手机</p>
+    <h1 class="page-title">带走最近的一次观看</h1>
+    <p class="page-hint">电脑内容更新时，手机的偏爱、阅读足迹与私人随记留在本机，不会被新快照覆盖，也不会写回作品总集。</p>
+    <section class="pocket-status ${mobileConnection.online ? "online" : "offline"}">
+      <div class="pocket-seal">${mobileConnection.online ? "连" : "影"}</div>
+      <div><b>${mobileConnection.online ? "电脑入口可用" : "正在阅读离线留影"}</b>
+        <p>${esc(mobileConnection.error || `最近更新：${compactWhen(mobileConnection.savedAt)}`)}</p></div>
+      ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-refresh">现在更新</button>' : ""}
+    </section>
+    ${deltaText ? `<section class="pocket-delta"><span>本次带回</span><b>${esc(deltaText)}</b></section>` : ""}
+    <section class="board pocket-return">
+      <h2>下次怎么回来</h2>
+      <p class="board-note">${returnGuide}</p>
+    </section>
+    <section class="pocket-counts">
+      <div><b>${favs}</b><span>手机偏爱</span></div>
+      <div><b>${notes}</b><span>私人随记</span></div>
+      <div><b>${Object.keys(mobileLocal.viewed).length}</b><span>阅读足迹</span></div>
+    </section>
+    <section class="board pocket-recent">
+      <h2>最近翻过</h2>
+      ${recent.length ? recent.map(x => `<p><a href="#/poem/${x.p.id}">${esc(x.p.title)}</a><span>${compactWhen(x.ts)}</span></p>`).join("")
+        : '<p class="empty">打开一首作品后，这里会留下书签。</p>'}
+    </section>
+    <section class="board pocket-manage">
+      <h2>这台手机的数据</h2>
+      <p class="board-note">刷新电脑快照不会动这些记录。导出会把一个很小的 JSON 备份文件下载到手机“下载/文件”中，不会上传电脑，也不会进入作品仓库。换入口、换浏览器或清除网站数据前，可用它恢复偏爱、足迹和随记。</p>
+      ${backupDue ? `<p class="pocket-backup-reminder">这些掌中记录还没有近期备份。它不是作品版本回滚，只保护这台手机上的使用痕迹。</p>`
+        : lastExport ? `<p class="pocket-backup-ok">上次备份：${compactWhen(lastExport)}</p>` : ""}
+      <div class="pocket-actions">
+        <button class="btn" id="mobile-local-export">导出掌中记录</button>
+        <label class="btn file-btn">导入掌中记录<input id="mobile-local-import" type="file" accept="application/json,.json"></label>
+        ${!IS_SNAPSHOT ? '<button class="btn" id="mobile-repair">重新配对</button>' : ""}
+      </div>
+    </section>
+    <section class="board pocket-install">
+      <h2>放到手机桌面</h2>
+      <p class="board-note">${portable
+        ? "这是安卓离线应用入口。首次取到内容后，电脑关机、程序关闭或手机离开家中 Wi‑Fi，仍能打开最近留影；回家后再次打开会尝试更新。"
+        : secure
+        ? "当前连接满足安装条件。安装后可以像普通应用一样启动；电脑不在线时仍会打开最近留影。"
+        : "当前是同一 Wi‑Fi 的临时浏览入口。它适合马上看一次；若要离线保存，请回电脑扫描“带到安卓”二维码。"}</p>
+      ${installable ? '<button class="btn primary" id="mobile-install">安装昼青集</button>'
+        : '<p class="pocket-install-hint">若浏览器支持安装，请在浏览器菜单中选择“安装应用”或“添加到主屏幕”。</p>'}
+    </section>`;
+
+  document.getElementById("mobile-refresh")?.addEventListener("click", async e => {
+    e.currentTarget.disabled = true; e.currentTarget.textContent = "更新中…";
+    try { await loadState({ forceMobileRefresh: true }); const summary = mobileDeltaText(mobileConnection.delta);
+      renderMobileDesk(); toast(summary || "已经是电脑中的最新内容"); }
+    catch (err) { toast("更新失败：" + err.message); renderMobileDesk(); }
+  });
+  document.getElementById("mobile-local-export").onclick = () => {
+    mobileLocal.last_exported_at = new Date().toISOString();
+    saveMobileLocal();
+    const data = { kind: "zhouqingji-mobile-local", schema: 1,
+      exported_at: mobileLocal.last_exported_at, data: mobileLocal };
+    downloadBlob(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }),
+      `昼青集-掌中记录-${new Date().toISOString().slice(0, 10)}.json`);
+    renderMobileDesk(); toast("掌中记录已下载到这台手机");
+  };
+  document.getElementById("mobile-local-import").onchange = async e => {
+    const file = e.target.files?.[0]; if (!file) return;
+    try {
+      const parsed = JSON.parse(await file.text());
+      if (parsed.kind !== "zhouqingji-mobile-local" || parsed.schema !== 1 || !parsed.data)
+        throw new Error("这不是昼青集掌中记录文件");
+      mobileLocal = {
+        favorites: { ...mobileLocal.favorites, ...(parsed.data.favorites || {}) },
+        notes: { ...mobileLocal.notes, ...(parsed.data.notes || {}) },
+        viewed: { ...mobileLocal.viewed, ...(parsed.data.viewed || {}) },
+        last_exported_at: mobileLocal.last_exported_at || null, version: 1,
+      };
+      saveMobileLocal(); renderMobileDesk(); toast("掌中记录已合并");
+    } catch (err) { toast("导入失败：" + err.message); }
+  };
+  document.getElementById("mobile-repair")?.addEventListener("click", () => {
+    try {
+      localStorage.removeItem(MOBILE_TOKEN_KEY);
+      localStorage.removeItem(MOBILE_REMOTE_KEY);
+    } catch (_) {}
+    toast("旧配对已移除，请回电脑重新扫码");
+  });
+  document.getElementById("mobile-install")?.addEventListener("click", async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt(); await installPrompt.userChoice; installPrompt = null; renderMobileDesk();
+  });
+}
+
+/* ---------- 设置页：作者偏好（corpus/settings.json 侧车，GUI 与派发 agent 共用） ---------- */
+
+function renderSettings() {
+  if (IS_MOBILE) return renderMobileDesk();
+  app.className = "";
+  const st = S.settings || {};
+  const d = st.dispatch || {};
+  const ic = "font-family:inherit;font-size:.9rem;padding:.5em .8em;border:1px solid var(--line);border-radius:8px;background:var(--panel);width:100%;box-sizing:border-box";
+  const row = (label, inner, hint) => `<div style="margin-bottom:1.15rem">
+    <div style="font-size:.85rem;color:var(--ink-2);margin-bottom:.35rem">${label}</div>${inner}
+    ${hint ? `<div style="font-size:.72rem;color:var(--ink-3);margin-top:.3rem;line-height:1.6">${hint}</div>` : ""}</div>`;
+  const views = [["boards", "榜单"], ["readers", "读者"], ["timeline", "时间轴"], ["stats", "统计"], ["all", "全部作品"]];
+  const rg = st.read_genres || [];
+  const gn = st.genre_notes || {};
+  const hiddenGenreBoards = new Set(st.hidden_genre_boards || []);
+  // 候选文体 = 常见建议 + corpus 里实际出现的 + 已勾选的，去掉诗类与草稿（草稿永远不读）
+  const genreCands = [...new Set(["散文", "小说", "杂文",
+    ...S.poems.map(p => p.genre), ...rg, ...Object.keys(gn)])]
+    .filter(g => g && !POETRY_GENRES.includes(g) && g !== "草稿");
+  const genreRows = genreCands.map(g => `
+    <div style="margin-bottom:.9rem">
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.9rem;cursor:pointer">
+        <input type="checkbox" class="set-genre" data-g="${esc(g)}"${rg.includes(g) ? " checked" : ""}> ${esc(g)}
+      </label>
+      <input class="set-gnote" data-g="${esc(g)}" style="${ic};margin-top:.35rem"
+        placeholder="（可选）给读者的补充评判要求，一两句即可"
+        value="${esc(gn[g] || "")}">
+    </div>`).join("");
+  const genreBoardRows = genreCands.length ? genreCands.map(g => `
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.88rem;cursor:pointer;margin:.45rem 0">
+        <input type="checkbox" class="set-genre-board" data-g="${esc(g)}"${hiddenGenreBoards.has(g) ? "" : " checked"}> ${esc(g)}榜
+      </label>`).join("") : '<span style="font-size:.75rem;color:var(--ink-3)">当前还没有非诗文体。</span>';
+  app.innerHTML = `
+    <h1 class="page-title">设置</h1>
+    <p class="page-hint">偏好存在 corpus/settings.json（作者资产层侧车，不碰任何冻结 schema）；清空某项即恢复默认。派发 agent 读的也是这一份。</p>
+    <section class="board" style="text-align:left">
+      <h2 style="font-size:1rem">站点</h2>
+      ${row("集名", `<input id="set-title" style="${ic}" value="${esc(st.site_title || "")}">`, "顶栏与浏览器标签页的主名。")}
+      ${row("副题", `<input id="set-sub" style="${ic}" value="${esc(st.site_subtitle || "")}">`)}
+      ${row("页脚句", `<input id="set-foot" style="${ic}" value="${esc(st.footer_text || "")}">`, "页面底部那一行字——换成你自己的句子。")}
+      ${row("打开时先看", `<select id="set-view" style="${ic}">${views.map(([v, n]) =>
+        `<option value="${v}"${(st.default_view || "boards") === v ? " selected" : ""}>${n}</option>`).join("")}</select>`,
+        "首页（点集名）落地到哪一页；顶栏各入口不受影响。")}
+      ${row("评分口径", `<select id="set-score" style="${ic}">
+          <option value="cal"${(st.score_badge || "cal") !== "raw" ? " selected" : ""}>质分优先（校准聚合后的展示尺度）</option>
+          <option value="raw"${(st.score_badge || "cal") === "raw" ? " selected" : ""}>只看原始均分</option></select>`,
+        "影响榜单排序与各处分数徽章；统计页另有自己的口径开关。")}
+      <h2 style="font-size:1rem;margin-top:1.8rem">榜单显示</h2>
+      <div style="font-size:.75rem;color:var(--ink-3);line-height:1.7;margin-bottom:.7rem">
+        这里只控制榜单首页是否出现，不删除作品、分数或直达页面。诗类专榜默认开启；没有诗词，或想让首页更安静时可以关闭。</div>
+      <label style="display:flex;align-items:center;gap:.5em;font-size:.9rem;cursor:pointer;margin-bottom:.75rem">
+        <input type="checkbox" id="set-poetry-boards"${st.show_poetry_boards !== false ? " checked" : ""}> 显示诗词榜、长诗榜与短诗榜
+      </label>
+      <details${(st.hidden_genre_boards || []).length ? " open" : ""}>
+        <summary style="font-size:.85rem;color:var(--ink-2);cursor:pointer">对应文体榜</summary>
+        <div style="padding:.45rem 0 .5rem 1rem">${genreBoardRows}</div>
+      </details>
+      ${row("端口", `<input id="set-port" style="${ic}" type="number" min="1024" max="65535" value="${st.port || 8737}">`, "重启服务器后生效。")}
+      ${row("手机临时访问端口", `<input id="set-mobile-port" style="${ic}" type="number" min="1024" max="65535" value="${st.mobile_port || 8738}">`,
+        "只读入口使用；开始访问时生效，通常不需要修改。")}
+      <h2 style="font-size:1rem;margin-top:1.8rem">阅读文体</h2>
+      <div style="font-size:.75rem;color:var(--ink-3);line-height:1.7;margin-bottom:1rem">
+        诗（现代诗 / 词 / 歌词）总是会被读。勾选的其他文体也进读者池——同一批读者、同样欣赏的眼光，
+        读者的 prompt 会自动声明「这不是诗」并换用该文体的判据；每个文体下可以写一两句你自己的评判要求（留空只用通用转换）。</div>
+      ${genreRows}
+      ${row("添加文体", `<input id="set-newgenre" style="${ic}" placeholder="如：剧本（保存后出现在上方，已勾选，可再补要求）">`)}
+      <details class="mobile-tradeoff" style="margin-top:1.8rem">
+        <summary>高级派发偏好（通常不用设置）</summary>
+        <div style="padding-top:1rem">
+          ${row("固定盲读模型（可选）", `<input id="set-model" style="${ic}" value="${esc(d.default_model || "")}" placeholder="留空：每次派发时确认">`,
+            "模型更新很快，通常留空更可靠。只有你明确长期固定某个真实模型 ID 时才填写。")}
+          ${row("固定执行通道（可选）", `<input id="set-transport" style="${ic}" value="${esc(d.default_transport === "auto" ? "" : (d.default_transport || ""))}" placeholder="留空：按当前工具自动选择">`,
+            "Codex、Claude Code、AGY、CodeBuddy 的可用通道会变化；留空时由当次执行环境选择。")}
+          ${row("固定覆盖目标（可选）", `<input id="set-depth" style="${ic}" type="number" min="1" max="99" value="${d.target_depth ?? ""}" placeholder="留空：按当前最薄覆盖继续一层">`,
+            "留空时，agent 先计算当前覆盖账，再报告建议层数与任务量；固定数字不会随着数据增长自动变化。")}
+        </div>
+      </details>
+      <div style="margin-top:1.4rem"><button class="btn primary" id="set-save">保存</button></div>
+    </section>
+    <section class="board mobile-access-board" style="text-align:left;margin-top:1.6rem">
+      <div class="mobile-access-head">
+        <div><p class="pocket-kicker">安卓掌中册</p><h2>把最近内容带到手机</h2></div>
+        <span class="mobile-access-light" id="mobile-access-light">未开启</span>
+      </div>
+      <p class="board-note">同一 Wi‑Fi 下扫码一次，手机会保存最近留影。以后电脑不在线也能阅读；回到同一网络并再次打开时，会自动尝试更新。公开页面只是一层空应用壳，不含你的作品和评论。</p>
+      <div id="mobile-access-status" class="mobile-access-status"><p>正在检查本机状态……</p></div>
+      <label class="mobile-trust-choice">
+        <input type="checkbox" id="mobile-trusted">
+        <span><b>信任这台手机，30 天内可自动更新</b><small>建议个人安卓设备开启。实际信任的是这张连接签：任何拿到完整二维码的人都能使用；停止并撤销后立即失效。</small></span>
+      </label>
+      <div class="mobile-access-actions">
+        <button class="btn primary" id="mobile-start">开始手机访问</button>
+        <button class="btn" id="mobile-stop">停止</button>
+        <button class="btn" id="mobile-export">导出离线 HTML</button>
+        <span id="mobile-export-status"></span>
+      </div>
+      <details class="mobile-tradeoff"><summary>只临时看一次，或改用离线文件</summary>
+        <p><b>临时浏览：</b>同一 Wi‑Fi 下直接打开电脑地址，电脑或入口关闭后不可用；不负责离线保存。</p>
+        <p><b>离线 HTML：</b>完全不开放网络，内容固定在导出时刻；适合归档或不支持安卓应用入口的设备。</p>
+        <p><b>安全边界：</b>家中或个人热点最合适。局域网传输是 HTTP，不要在陌生公共 Wi‑Fi 使用；二维码含只读口令，不要转发。</p>
+      </details>
+      <details class="mobile-private"><summary>旧版兼容：Tailscale Serve（不推荐，也非必需）</summary>
+        <p>只供已经稳定使用 Tailscale 的旧用户。若它曾影响你的网络，请不要安装或启用。地址只在当前页面使用，不会写进设置。</p>
+        <div class="mobile-private-row"><input id="mobile-private-base" style="${ic}" inputmode="url"
+          placeholder="https://你的电脑名.你的网络名.ts.net"><button class="btn" id="mobile-private-qr">生成二维码</button></div>
+        <div id="mobile-private-result"></div>
+      </details>
+    </section>
+    <section class="board" style="text-align:left;margin-top:1.6rem">
+      <h2 style="font-size:1rem">版本与更新</h2>
+      ${row("当前版本",
+        `<div style="font-size:1.05rem;color:var(--ink);font-weight:600">v${esc(S.version || "?")}</div>`,
+        "从仓库根目录的 VERSION 文件读取。")}
+      <div style="display:flex;gap:.6em;flex-wrap:wrap;align-items:center;margin-top:.4rem">
+        <button class="btn" id="upd-check">检查更新</button>
+        <button class="btn" id="upd-pull">安装更新</button>
+        <span id="upd-status" style="font-size:.82rem;color:var(--ink-3)"></span>
+      </div>
+      <div style="font-size:.72rem;color:var(--ink-3);margin-top:.7rem;line-height:1.7">
+        Git 克隆版只做安全快进（<code>git pull --ff-only</code>）；ZIP 版从固定的官方公开仓库下载，
+        校验后只替换发行代码与文档，并在 <code>.update-backups/</code> 备份旧文件。
+        两条路径都不会更新 corpus、results、个人设置或批次回执；成功后需重启服务器。</div>
+    </section>`;
+  document.getElementById("set-save").onclick = async () => {
+    const gv = id => document.getElementById(id).value.trim();
+    const num = id => { const v = gv(id); return v === "" ? null : +v; };
+    const read_genres = [...document.querySelectorAll(".set-genre")]
+      .filter(x => x.checked).map(x => x.dataset.g);
+    const ng = gv("set-newgenre");
+    if (ng) read_genres.push(...ng.split(/[,，、\s]+/).filter(Boolean));
+    const genre_notes = {};
+    document.querySelectorAll(".set-gnote").forEach(x => {
+      if (x.value.trim()) genre_notes[x.dataset.g] = x.value.trim();
+    });
+    const hidden_genre_boards = [...document.querySelectorAll(".set-genre-board")]
+      .filter(x => !x.checked).map(x => x.dataset.g);
+    try {
+      await post("/api/settings", {
+        site_title: gv("set-title"), site_subtitle: gv("set-sub"), footer_text: gv("set-foot"),
+        default_view: gv("set-view"), score_badge: gv("set-score"), port: num("set-port"),
+        mobile_port: num("set-mobile-port"),
+        show_poetry_boards: document.getElementById("set-poetry-boards").checked,
+        hidden_genre_boards, read_genres, genre_notes,
+        dispatch: { default_model: gv("set-model"), default_transport: gv("set-transport"),
+          target_depth: num("set-depth") } });
+      await loadState();
+      renderSettings();
+      toast("已保存（端口改动需重启服务器后生效）");
+    } catch (e) { toast("失败：" + e.message); }
+  };
+
+  const mobileBox = document.getElementById("mobile-access-status");
+  const mobileLight = document.getElementById("mobile-access-light");
+  const renderMobileStatus = status => {
+    mobileLight.textContent = status.running ? (status.trusted ? "可信入口" : "本次开放") : "未开启";
+    mobileLight.classList.toggle("on", !!status.running);
+    document.getElementById("mobile-start").disabled = !!status.running;
+    document.getElementById("mobile-stop").disabled = !status.running;
+    document.getElementById("mobile-stop").textContent = status.trusted ? "停止并撤销" : "停止";
+    document.getElementById("mobile-trusted").disabled = !!status.running;
+    document.getElementById("mobile-trusted").checked = !!status.trusted;
+    if (!status.running) {
+      mobileBox.innerHTML = '<p class="mobile-access-empty">入口关闭。作品仍只在电脑本机。</p>';
+      return;
+    }
+    const urls = status.urls || [];
+    const pwaUrls = status.pwa_urls || [];
+    if (!urls.length) {
+      mobileBox.innerHTML = `<p class="mobile-access-empty">入口已开启，但没有找到可用的局域网地址。请确认电脑已连接 Wi‑Fi；Windows 若询问防火墙，只允许“专用网络”。</p>`;
+      return;
+    }
+    const first = pwaUrls[0] || urls[0];
+    const portable = !!pwaUrls.length;
+    mobileBox.innerHTML = `<div class="connection-slip ${portable ? "portable-slip" : ""}">
+      <img class="connection-qr" src="/api/mobile/qr?text=${encodeURIComponent(first)}" alt="${portable ? "带到安卓二维码" : "手机临时访问二维码"}">
+      <div class="connection-copy"><b>${portable ? "用安卓 Chrome 或 Edge 扫码" : "用手机相机扫码"}</b><p>${portable
+        ? `首次允许访问本地网络，等内容出现后再点浏览器菜单“安装应用”或“添加到主屏幕”。${status.trusted ? `连接签有效至 ${esc(compactWhen(status.trust_expires_at))}。` : "若希望以后自动更新，请停止后勾选“信任这台手机”再开启。"}`
+        : "当前网络没有可用于安卓离线应用的私有地址；仍可临时打开。"}</p>
+        <button class="connection-url mobile-primary-url" data-url="${esc(first)}"><span>${portable ? "安卓应用地址" : "临时地址"}</span>${portable ? "公开空壳 + 本机私密数据" : esc(first.replace(/\?pair=.*/, ""))}<em>复制</em></button>
+        ${portable ? `<details class="mobile-direct-list"><summary>离线入口打不开？展开同 Wi‑Fi 临时二维码</summary>
+          <div class="mobile-direct-qr-wrap">
+            <img class="connection-qr mobile-direct-qr" src="/api/mobile/qr?text=${encodeURIComponent(urls[0])}" alt="同 Wi-Fi 临时浏览二维码">
+            <p>这张二维码不经过 GitHub。电脑和手机保持同一 Wi‑Fi、昼青集保持开启时，可以立即阅读；它不负责离线保存。</p>
+          </div>
+          ${urls.map((url, i) => `<button class="connection-url" data-url="${esc(url)}"><span>${i ? "备用地址" : "局域网地址"}</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>`).join("")}
+        </details>` : ""}
+        <small>二维码含只读口令，不要转发；手机只会保存快照和自己的偏爱、足迹、随记，不会改写电脑作品。</small></div></div>`;
+    mobileBox.querySelectorAll(".connection-url").forEach(btn => btn.onclick = async () => {
+      try { await navigator.clipboard.writeText(btn.dataset.url); toast("访问地址已复制"); }
+      catch (_) { toast("浏览器未允许复制，请用二维码"); }
+    });
+  };
+  document.getElementById("mobile-private-qr").onclick = () => {
+    const out = document.getElementById("mobile-private-result");
+    if (!lastMobileStatus?.running || !lastMobileStatus.token) {
+      out.innerHTML = '<p class="mobile-access-empty">请先开始手机访问。</p>';
+      return;
+    }
+    const raw = document.getElementById("mobile-private-base").value.trim();
+    let base;
+    try {
+      base = new URL(raw);
+      if (base.protocol !== "https:" || !base.hostname.endsWith(".ts.net") || base.username || base.password)
+        throw new Error("invalid");
+    } catch (_) {
+      out.innerHTML = '<p class="mobile-access-empty">请填写 Tailscale Serve 给出的 https://……ts.net 地址。</p>';
+      return;
+    }
+    base.searchParams.set("pair", lastMobileStatus.token);
+    const url = base.toString();
+    out.innerHTML = `<div class="connection-slip private-slip">
+      <img class="connection-qr" src="/api/mobile/qr?base=${encodeURIComponent(raw)}" alt="Tailscale 私密访问二维码">
+      <div class="connection-copy"><b>私密 HTTPS 连接签</b><p>手机也登录同一 Tailscale 网络后扫码。</p>
+        <button class="connection-url" data-url="${esc(url)}"><span>私密地址</span>${esc(url.replace(/\?pair=.*/, ""))}<em>复制</em></button>
+        <small>${lastMobileStatus.trusted ? "可信口令在撤销前保持不变；" : "口令随停止访问立即失效；"}Tailscale Serve 也应在不用时停止。</small></div></div>`;
+    out.querySelector(".connection-url").onclick = async e => {
+      try { await navigator.clipboard.writeText(e.currentTarget.dataset.url); toast("私密地址已复制"); }
+      catch (_) { toast("浏览器未允许复制，请用二维码"); }
+    };
+  };
+  let lastMobileStatus = null;
+  const refreshMobileStatus = async () => {
+    try { const res = await fetch("/api/mobile/status"); lastMobileStatus = await res.json(); renderMobileStatus(lastMobileStatus); }
+    catch (e) { mobileBox.innerHTML = `<p class="mobile-access-empty">状态读取失败：${esc(e.message)}</p>`; }
+  };
+  document.getElementById("mobile-start").onclick = async () => {
+    try {
+      const port = +document.getElementById("set-mobile-port").value || 8738;
+      const trusted = document.getElementById("mobile-trusted").checked;
+      lastMobileStatus = await post("/api/mobile/start", { port, trusted });
+      renderMobileStatus(lastMobileStatus);
+      mobileBox.scrollIntoView({ behavior: "smooth", block: "center" });
+      toast(trusted ? "可信入口已开启，二维码在下方" : "手机入口已开启，二维码在下方");
+    } catch (e) { toast("开启失败：" + e.message); }
+  };
+  const stopMobile = async revoke => {
+    try { lastMobileStatus = await post("/api/mobile/stop", { revoke });
+      renderMobileStatus(lastMobileStatus); toast(revoke ? "可信入口已停止并撤销" : "手机入口已停止"); }
+    catch (e) { toast("停止失败：" + e.message); }
+  };
+  document.getElementById("mobile-stop").onclick = () => {
+    if (!lastMobileStatus?.trusted) return stopMobile(false);
+    confirmPopup({ title: "停止并撤销可信入口？",
+      bodyHtml: "<p>手机上已保存的作品留影、偏爱和随记不会被删除；只是这张连接签将立刻失效，下次需要重新扫码。</p>",
+      okLabel: "停止并撤销", onOk: () => stopMobile(true) });
+  };
+  document.getElementById("mobile-export").onclick = async e => {
+    const btn = e.currentTarget, out = document.getElementById("mobile-export-status");
+    btn.disabled = true; out.textContent = "正在收拢作品与评论……";
+    try {
+      const res = await fetch("/api/mobile/export", { method: "POST",
+        headers: { "Content-Type": "application/json" }, body: "{}" });
+      if (!res.ok) throw new Error((await res.json()).error || res.status);
+      const stamp = new Date().toISOString().slice(0, 16).replace(/[T:]/g, "-");
+      downloadBlob(await res.blob(), `昼青集-离线留影-${stamp}.html`);
+      out.textContent = "已导出 ✓";
+    } catch (err) { out.textContent = "导出失败：" + err.message; }
+    finally { btn.disabled = false; }
+  };
+  refreshMobileStatus();
+
+  const status = document.getElementById("upd-status");
+  document.getElementById("upd-check").onclick = async () => {
+    status.textContent = "检查中…";
+    try {
+      const r = await post("/api/update/check", {});
+      if (!r.ok) { status.textContent = r.error || "检查失败"; return; }
+      if (r.behind > 0) {
+        status.textContent = (r.install_type === "archive" ? "有新版本可安装" : `有 ${r.behind} 个新提交可拉取`)
+          + (r.remote_version && r.remote_version !== "?" ? `（远端 v${r.remote_version}）` : "");
+      } else {
+        status.textContent = "已是最新 ✓";
+      }
+    } catch (e) { status.textContent = "检查失败：" + e.message; }
+  };
+  document.getElementById("upd-pull").onclick = () => {
+    confirmPopup({
+      title: "安装更新？",
+      bodyHtml: `<p>Git 克隆版将执行安全快进；ZIP 版将从官方公开仓库下载并校验发行文件。</p>
+        <p style="color:var(--ink-2)">corpus、results、个人设置与批次回执不会被覆盖。Git 有未提交改动或历史分叉时会自动中止；ZIP 覆盖前会备份旧文件。</p>
+        <p style="color:var(--ink-3);font-size:.85em">成功后需重启服务器（重新运行 server.py）才生效。</p>`,
+      okLabel: "安装", cancelLabel: "取消",
+      onOk: async () => {
+        status.textContent = "拉取中…";
+        try {
+          const r = await post("/api/update/pull", {});
+          if (!r.ok) { status.textContent = r.error || "拉取失败"; toast(r.error || "拉取失败"); return; }
+          status.textContent = `已更新到 v${r.new_version || "?"}，重启服务器后生效`;
+          toast("已安装更新，请重启服务器");
+        } catch (e) { status.textContent = "拉取失败：" + e.message; toast("拉取失败：" + e.message); }
+      },
+    });
+  };
+}
+
+/* ---------- 启动 ---------- */
+
+window.addEventListener("beforeinstallprompt", event => {
+  event.preventDefault(); installPrompt = event;
+  if (IS_MOBILE && location.hash === "#/settings") renderMobileDesk();
+});
+
+if (!IS_SNAPSHOT && "serviceWorker" in navigator) {
+  navigator.serviceWorker.register(IS_PORTABLE_MOBILE ? "./mobile-sw.js" : "./sw.js").catch(() => {
+    /* 同一 Wi-Fi 的普通 HTTP 不是安全上下文，临时浏览仍可正常使用。 */
+  });
+}
+
+if (IS_PORTABLE_MOBILE) {
+  window.addEventListener("online", () => syncPortableMobile({ force: true }).catch(() => {}));
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") syncPortableMobile().catch(() => {});
+  });
+}
+
+route().catch(showRouteError);
