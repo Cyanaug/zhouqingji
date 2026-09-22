@@ -1,10 +1,11 @@
 {
   "schema": 1,
   "kind": "zhouqingji-mobile-pages-deployment",
-  "total_bytes": 1235796,
+  "total_bytes": 1230046,
   "files": {
+    ".gitattributes": "7846b37551c23529eb00c68fbb5a435390e922d9db2625cb88681c31746b289e",
     ".nojekyll": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-    "app.js": "f357b23b09e204b36b2d4aeceb2699da26b1bd7464fef34bb133e3eeb144accc",
+    "app.js": "b33b35bf3a61f97e123cee4e423cdaf00905097a1c644ae1c67089d19b846125",
     "apple-touch-icon.png": "5d775cc447fd30312f8d0e2dd907736fb2a29309a5392e216e45a47ed9f4ddc3",
     "favicon.png": "8e11427345646259d9177218930b784ac3e44b8a029aa86229b3a8374e44f21c",
     "icon-192.png": "b431f96e88d5d419dddbf6e57d628ecf444c1b2d0d7129fde7cbe85b4dad7f0d",
