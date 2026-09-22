@@ -1,7 +1,7 @@
 /* 昼青集 Android 掌中册：程序外壳离线，私人快照由 app.js 保存到 IndexedDB。 */
 "use strict";
 
-const SHELL_CACHE = "zhouqingji-pocket-v1";
+const SHELL_CACHE = "zhouqingji-pocket-v2";
 const SHELL = [
   "./mobile.html",
   "./style.css",

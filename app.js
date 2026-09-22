@@ -5780,12 +5780,13 @@ function renderSettings() {
       </div>
       <p class="board-note">同一 Wi‑Fi 下扫码一次，手机会保存最近留影。以后电脑不在线也能阅读；回到同一网络并再次打开时，会自动尝试更新。公开页面只是一层空应用壳，不含你的作品和评论。</p>
       <div id="mobile-access-status" class="mobile-access-status"><p>正在检查本机状态……</p></div>
-      <label class="mobile-trust-choice">
+      <label class="mobile-trust-choice" id="mobile-trust-choice">
         <input type="checkbox" id="mobile-trusted">
-        <span><b>信任这台手机，30 天内可自动更新</b><small>建议个人安卓设备开启。实际信任的是这张连接签：任何拿到完整二维码的人都能使用；停止并撤销后立即失效。</small></span>
+        <span><b>保持手机同步</b><small>连续 30 天没有成功同步才会失效；常用手机会在临近到期时自动续期。实际保存的是这张连接签，停止并撤销后立即失效。</small></span>
       </label>
       <div class="mobile-access-actions">
-        <button class="btn primary" id="mobile-start">开始手机访问</button>
+        <button class="btn primary" id="mobile-start">开启手机同步</button>
+        <button class="btn" id="mobile-renew" hidden>延长 30 天</button>
         <button class="btn" id="mobile-stop">停止</button>
         <button class="btn" id="mobile-export">导出离线 HTML</button>
         <span id="mobile-export-status"></span>
@@ -5848,15 +5849,23 @@ function renderSettings() {
   const mobileBox = document.getElementById("mobile-access-status");
   const mobileLight = document.getElementById("mobile-access-light");
   const renderMobileStatus = status => {
-    mobileLight.textContent = status.running ? (status.trusted ? "可信入口" : "本次开放") : "未开启";
-    mobileLight.classList.toggle("on", !!status.running);
-    document.getElementById("mobile-start").disabled = !!status.running;
-    document.getElementById("mobile-stop").disabled = !status.running;
+    const running = !!status.running;
+    const expired = running && !!status.trust_expired;
+    mobileLight.textContent = expired ? "连接已过期" : running ? (status.trusted ? "同步已保持" : "本次开放") : "未开启";
+    mobileLight.classList.toggle("on", running && !expired);
+    mobileLight.classList.toggle("expired", expired);
+    document.getElementById("mobile-start").hidden = running;
+    document.getElementById("mobile-stop").hidden = !running;
+    document.getElementById("mobile-renew").hidden = !running || !status.trusted;
     document.getElementById("mobile-stop").textContent = status.trusted ? "停止并撤销" : "停止";
-    document.getElementById("mobile-trusted").disabled = !!status.running;
+    document.getElementById("mobile-trust-choice").hidden = running;
     document.getElementById("mobile-trusted").checked = !!status.trusted;
-    if (!status.running) {
+    if (!running) {
       mobileBox.innerHTML = '<p class="mobile-access-empty">入口关闭。作品仍只在电脑本机。</p>';
+      return;
+    }
+    if (expired) {
+      mobileBox.innerHTML = `<div class="mobile-access-empty mobile-access-expired"><b>这张连接签已经超过 30 天没有同步。</b><span>手机里的离线留影仍然可以阅读。点“延长 30 天”即可恢复原连接，不需要重新扫码。</span></div>`;
       return;
     }
     const urls = status.urls || [];
@@ -5870,7 +5879,7 @@ function renderSettings() {
     mobileBox.innerHTML = `<div class="connection-slip ${portable ? "portable-slip" : ""}">
       <img class="connection-qr" src="/api/mobile/qr?text=${encodeURIComponent(first)}" alt="${portable ? "带到安卓二维码" : "手机临时访问二维码"}">
       <div class="connection-copy"><b>${portable ? "用安卓 Chrome 或 Edge 扫码" : "用手机相机扫码"}</b><p>${portable
-        ? `首次允许访问本地网络，等内容出现后再点浏览器菜单“安装应用”或“添加到主屏幕”。${status.trusted ? `连接签有效至 ${esc(compactWhen(status.trust_expires_at))}。` : "若希望以后自动更新，请停止后勾选“信任这台手机”再开启。"}`
+        ? `首次允许访问本地网络，等内容出现后再点浏览器菜单“安装应用”或“添加到主屏幕”。${status.trusted ? `连接签有效至 ${esc(compactWhen(status.trust_expires_at))}；${status.last_sync_at ? `最近同步 ${esc(compactWhen(status.last_sync_at))}` : "尚未收到首次同步"}。` : "若希望以后自动更新，请停止后开启“保持手机同步”。"}`
         : "当前网络没有可用于安卓离线应用的私有地址；仍可临时打开。"}</p>
         <button class="connection-url mobile-primary-url" data-url="${esc(first)}"><span>${portable ? "安卓应用地址" : "临时地址"}</span>${portable ? "公开空壳 + 本机私密数据" : esc(first.replace(/\?pair=.*/, ""))}<em>复制</em></button>
         ${portable ? `<details class="mobile-direct-list"><summary>离线入口打不开？展开同 Wi‑Fi 临时二维码</summary>
@@ -5928,6 +5937,13 @@ function renderSettings() {
       mobileBox.scrollIntoView({ behavior: "smooth", block: "center" });
       toast(trusted ? "可信入口已开启，二维码在下方" : "手机入口已开启，二维码在下方");
     } catch (e) { toast("开启失败：" + e.message); }
+  };
+  document.getElementById("mobile-renew").onclick = async () => {
+    try {
+      lastMobileStatus = await post("/api/mobile/renew", {});
+      renderMobileStatus(lastMobileStatus);
+      toast("原连接签已延长 30 天，手机无需重新扫码");
+    } catch (e) { toast("续期失败：" + e.message); }
   };
   const stopMobile = async revoke => {
     try { lastMobileStatus = await post("/api/mobile/stop", { revoke });

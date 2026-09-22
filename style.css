@@ -1553,6 +1553,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
   background: var(--panel-2); color: var(--ink-3); font-size: .72rem;
 }
 .mobile-access-light.on { background: var(--accent-soft); color: var(--accent-deep); }
+.mobile-access-light.expired { background: #f6e8df; color: #8a4938; }
 .mobile-access-status { margin: 1.2rem 0; }
 .mobile-trust-choice {
   display: grid; grid-template-columns: auto 1fr; gap: .7rem; align-items: start;
@@ -1563,10 +1564,14 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .mobile-trust-choice b { display: block; color: var(--accent-deep); font-size: .82rem; }
 .mobile-trust-choice small { display: block; margin-top: .18rem; color: var(--ink-3); font-size: .7rem; line-height: 1.55; }
 .mobile-trust-choice:has(input:disabled) { cursor: default; opacity: .78; }
+.mobile-trust-choice[hidden], .mobile-access-actions > [hidden] { display: none; }
 .mobile-access-empty {
   padding: 1rem; border: 1px dashed var(--line); border-radius: 8px;
   text-align: center; color: var(--ink-3); font-size: .82rem;
 }
+.mobile-access-expired { display: grid; gap: .35rem; text-align: left; border-color: #dfc2b6; background: #fbf3ee; }
+.mobile-access-expired b { color: #7d4032; font-size: .82rem; }
+.mobile-access-expired span { line-height: 1.6; }
 .connection-slip {
   display: grid; grid-template-columns: minmax(9rem, 12rem) 1fr; gap: 1.35rem; align-items: center;
   padding: 1.2rem; border: 1px solid #cbdad4; border-radius: 12px;
