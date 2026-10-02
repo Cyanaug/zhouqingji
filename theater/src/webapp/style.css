@@ -1,5 +1,13 @@
 /* 昼青集 · 读诗剧场 —— 暖纸、墨字、青瓷点缀。以诗为中心，评论不挤诗。 */
 
+@font-face {
+  font-family: "ZQ Source Han Serif CN";
+  src: url("fonts/SourceHanSerifCN-Regular.otf") format("opentype");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
 :root {
   --paper: #f6f1e7;
   --panel: #fcf9f2;
@@ -109,6 +117,65 @@ main.wide { width: min(58rem, 94vw); }
   display: flex; justify-content: flex-end; gap: .6em; margin-top: 1.3rem;
 }
 
+.book-output-modal { max-width: 46rem; padding: 1.7rem 1.8rem 1.45rem; }
+.book-output-heading {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem;
+  padding-bottom: 1rem; border-bottom: 1px solid var(--line);
+}
+.book-output-heading span {
+  color: var(--warm); font-size: .72rem; letter-spacing: .32em;
+}
+.book-output-heading h3 { margin-top: .18rem; font-size: 1.25rem; font-weight: 500; }
+.book-output-summary {
+  display: flex; flex-wrap: wrap; gap: .35rem 1rem; padding: .75rem .15rem;
+  border-bottom: 1px solid var(--line); color: var(--ink-3); font-size: .72rem;
+  font-variant-numeric: tabular-nums;
+}
+.book-output-summary span + span::before { content: "·"; margin-right: 1rem; color: #b9ae9d; }
+.book-output-blockers {
+  margin-top: .85rem; padding: .7rem .85rem; border-left: 3px solid #a6553b;
+  color: #7f4937; background: rgba(181, 104, 75, .08); font-size: .78rem; line-height: 1.65;
+}
+.book-output-blockers b { font-weight: 600; }
+.book-output-blockers ol { margin: .3rem 0 0 1.15rem; }
+.book-output-blockers p { margin: .3rem 0 0; }
+.book-output-routes { border-bottom: 1px solid var(--line); }
+.book-output-route {
+  display: grid; grid-template-columns: 3.5rem minmax(0, 1fr) auto;
+  align-items: center; gap: 1rem; padding: 1.15rem .15rem;
+  border-top: 1px dashed var(--line); margin-top: -1px;
+}
+.book-output-route.is-default { background: linear-gradient(90deg, rgba(159, 112, 78, .07), transparent 58%); }
+.book-output-mark {
+  display: grid; place-items: center; width: 2.7rem; height: 2.7rem;
+  border: 1px solid var(--warm); border-radius: 50%; color: var(--warm);
+  font-size: .72rem; letter-spacing: .08em;
+}
+.book-output-route h4 { margin: 0 0 .28rem; font-size: 1rem; font-weight: 600; }
+.book-output-route p { margin: 0 0 .24rem; color: var(--ink-2); font-size: .88rem; line-height: 1.6; }
+.book-output-route small { color: var(--ink-3); line-height: 1.5; }
+.book-output-route small.is-ready { color: var(--accent-deep); }
+.book-output-footnote { margin: .9rem 0 0; color: var(--ink-3); font-size: .76rem; line-height: 1.65; }
+.book-output-boundary {
+  margin-top: .9rem; padding: .72rem .85rem; border-left: 3px solid #a6553b;
+  color: var(--ink-3); background: rgba(181, 104, 75, .06); font-size: .78rem; line-height: 1.65;
+}
+.book-output-boundary summary { cursor: pointer; color: var(--ink-2); font-weight: 600; }
+.book-output-boundary p { margin: .45rem 0 0; }
+.book-output-setup { grid-column: 2 / -1; margin-top: -.25rem; color: var(--ink-3); font-size: .76rem; }
+.book-output-setup summary { cursor: pointer; color: var(--accent-deep); }
+.book-output-setup ol { margin: .55rem 0 .35rem 1.2rem; line-height: 1.7; }
+.book-output-setup p { margin: 0; line-height: 1.65; }
+.book-output-setup code { background: var(--panel-2); padding: .08em .35em; }
+
+@media (max-width: 640px) {
+  .book-output-modal { padding: 1.35rem 1.2rem 1.15rem; }
+  .book-output-route { grid-template-columns: 2.8rem 1fr; gap: .8rem; }
+  .book-output-mark { width: 2.35rem; height: 2.35rem; }
+  .book-output-route > .btn { grid-column: 2; justify-self: start; }
+  .book-output-summary span + span::before { margin-right: .35rem; }
+}
+
 /* ---------- 通用件 ---------- */
 
 .chip {
@@ -158,6 +225,921 @@ h1.page-title {
   margin-bottom: .4rem;
 }
 .page-hint { color: var(--ink-3); font-size: .85rem; margin-bottom: 2.2rem; }
+
+/* ---------- 诗集工作台：编稿桌 / 折叶号 ---------- */
+
+main.book-wide { width: min(86rem, 96vw); }
+.book-head {
+  display: flex; align-items: flex-end; justify-content: space-between; gap: 2rem;
+  margin-bottom: 1.4rem; border-bottom: 1px solid var(--line); padding-bottom: 1.35rem;
+}
+.book-head .page-hint { max-width: 46rem; margin-bottom: 0; }
+.book-kicker {
+  color: var(--warm); font-size: .72rem; letter-spacing: .22em; margin-bottom: .35rem;
+}
+.book-tally {
+  display: grid; grid-template-columns: auto auto; gap: .05rem .6rem;
+  color: var(--ink-3); font-size: .7rem; line-height: 1.45; white-space: nowrap;
+  border-left: 1px solid var(--line); padding-left: 1.25rem;
+}
+.book-tally b { color: var(--accent-deep); font-size: 1.05rem; text-align: right; font-variant-numeric: tabular-nums; }
+.book-warning {
+  border: 1px solid #d7ae95; background: var(--warm-soft); color: #81482f;
+  padding: .75rem 1rem; margin-bottom: 1rem; font-size: .82rem;
+}
+.book-workspace {
+  display: grid; grid-template-columns: minmax(10rem, .48fr) minmax(20rem, 1fr) minmax(23rem, 1.28fr);
+  gap: 1rem; align-items: start;
+}
+.book-shelf, .book-pool, .book-gathering {
+  border: 1px solid var(--line); background: rgba(252, 249, 242, .72);
+  min-width: 0;
+}
+.book-shelf { position: sticky; top: 6.2rem; }
+.book-shelf-title, .book-section-head {
+  display: flex; align-items: center; justify-content: space-between; gap: .8rem;
+  border-bottom: 1px solid var(--line); padding: .8rem .9rem;
+}
+.book-shelf-title > span { font-size: .78rem; letter-spacing: .18em; color: var(--ink-2); }
+.book-section-head > div { display: flex; align-items: center; gap: .65rem; }
+.book-section-head h2 { font-size: 1rem; letter-spacing: .14em; font-weight: 600; }
+.book-section-head > span { color: var(--ink-3); font-size: .72rem; }
+.book-step {
+  width: 1.55rem; height: 1.55rem; display: grid; place-items: center;
+  border: 1px solid var(--warm); color: var(--warm); font-size: .7rem;
+  transform: rotate(-2deg);
+}
+.book-project-list { padding: .55rem; }
+.book-project {
+  width: 100%; display: block; text-align: left; padding: .7rem .65rem;
+  border: 0; border-left: 2px solid transparent; background: transparent;
+  color: var(--ink); font-family: var(--serif); cursor: pointer;
+}
+.book-project + .book-project { border-top: 1px solid rgba(227, 218, 199, .62); }
+.book-project:hover, .book-project.on { background: var(--accent-soft); border-left-color: var(--accent); }
+.book-project b, .book-project span { display: block; }
+.book-project b { font-size: .82rem; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.book-project span { color: var(--ink-3); font-size: .68rem; margin-top: .16rem; }
+.book-project.local { margin: .55rem; width: calc(100% - 1.1rem); }
+.empty.mini { font-size: .72rem; padding: .5rem; }
+.book-archive-toggle {
+  border: 0; border-top: 1px solid var(--line); width: 100%; padding: .7rem .9rem;
+  background: transparent; color: var(--ink-3); font-family: var(--serif); font-size: .7rem;
+  text-align: left; cursor: pointer;
+}
+.book-archived { border-top: 1px solid var(--line); padding: .45rem .65rem; }
+.book-archived > div { display: flex; align-items: center; justify-content: space-between; gap: .4rem; padding: .35rem 0; font-size: .72rem; }
+
+.book-filters { display: grid; grid-template-columns: 1fr 8rem; gap: .55rem; padding: .8rem; }
+.book-filters input, .book-filters select, .book-meta-grid input, .book-meta-grid select {
+  min-width: 0; width: 100%; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink); font: inherit; font-size: .78rem; padding: .48rem .58rem; border-radius: 0;
+}
+.book-filters input:focus, .book-filters select:focus, .book-meta-grid input:focus, .book-meta-grid select:focus {
+  border-color: var(--accent); outline: none;
+}
+.book-check { display: flex; align-items: center; gap: .35rem; font-size: .73rem; color: var(--ink-2); }
+.book-check input { width: auto; accent-color: var(--accent); }
+.book-pool-actions {
+  display: flex; align-items: center; justify-content: space-between; gap: .7rem;
+  padding: 0 .8rem .75rem; color: var(--ink-3); font-size: .66rem;
+}
+.book-poem-pool { max-height: 38rem; overflow: auto; border-top: 1px solid var(--line); }
+.book-pool-row {
+  display: grid; grid-template-columns: 1.9rem 1fr; gap: .55rem; align-items: center;
+  padding: .58rem .7rem; border-bottom: 1px solid rgba(227, 218, 199, .68);
+}
+.book-pool-row:hover, .book-pool-row:focus-within { background: rgba(241, 234, 220, .5); }
+.book-pool-row.chosen { background: rgba(226, 235, 231, .72); }
+.book-pick {
+  width: 1.6rem; height: 1.6rem; border: 1px solid var(--line); border-radius: 50%;
+  background: var(--panel); color: var(--accent-deep); cursor: pointer; font-size: 1rem; line-height: 1;
+}
+.book-pool-row.chosen .book-pick { background: var(--accent); color: white; border-color: var(--accent); }
+.book-pool-row b, .book-pool-row span { display: block; }
+.book-pool-row b { font-size: .78rem; font-weight: 600; }
+.book-pool-row span { color: var(--ink-3); font-size: .66rem; margin-top: .08rem; }
+.book-poem-proof {
+  position: fixed; z-index: 90; width: min(20rem, calc(100vw - 1.5rem));
+  max-height: min(25rem, calc(100vh - 1.5rem)); overflow: hidden;
+  padding: 1rem 1.15rem 1.05rem 2.15rem;
+  border: 1px solid #cdbb9c; background: #fffdf7; color: var(--ink);
+  box-shadow: 0 14px 34px rgba(73, 61, 43, .18); pointer-events: none;
+}
+.book-poem-proof::before {
+  content: ""; position: absolute; left: 1.55rem; top: 0; bottom: 0;
+  border-left: 1px solid rgba(164, 116, 84, .32);
+}
+.book-proof-mark {
+  position: absolute; left: .48rem; top: .85rem; writing-mode: vertical-rl;
+  color: var(--warm); font-size: .62rem; letter-spacing: .18em;
+}
+.book-poem-proof h3 {
+  margin-bottom: .65rem; padding-bottom: .5rem; border-bottom: 1px solid var(--line);
+  font-size: .93rem; font-weight: 600; letter-spacing: .08em;
+}
+.book-poem-proof div { color: var(--ink-2); font-size: .75rem; line-height: 1.82; }
+
+/* 屏幕试排：不是后台卡片，而是一张能翻的实体开本校样 */
+main.book-preview-wide { width: 100%; max-width: none; padding: 0; }
+.book-preview-shell { min-height: calc(100vh - 9rem); background: #d8d2c6; }
+.book-preview-toolbar {
+  display: flex; align-items: center; justify-content: space-between; gap: 1.2rem;
+  padding: .8rem max(1.2rem, 4vw); border-bottom: 1px solid #c5bba9;
+  background: rgba(241, 234, 220, .94); color: var(--ink-2);
+}
+.book-preview-identity, .book-preview-controls { display: flex; align-items: center; gap: .75rem; }
+.book-preview-identity > div b, .book-preview-identity > div span { display: block; }
+.book-preview-identity > div b { color: var(--ink); font-size: .86rem; font-weight: 600; }
+.book-preview-identity > div span { color: var(--ink-3); font-size: .67rem; }
+.book-view-save-state { color: var(--accent-deep) !important; font-size: .64rem; white-space: nowrap; }
+.book-view-save-state.warn { color: var(--warm) !important; font-weight: 650; }
+.book-preview-controls { font-size: .7rem; white-space: nowrap; }
+.book-preview-controls label { display: flex; align-items: center; gap: .35rem; }
+.book-preview-controls select {
+  max-width: 10rem; border: 1px solid #c9bfad; background: var(--panel);
+  color: var(--ink); font: inherit; padding: .38rem .5rem;
+}
+.book-preview-controls .btn:disabled { opacity: .32; cursor: default; }
+.book-preview-stage {
+  min-height: 44rem; display: grid; place-items: center; overflow: auto;
+  padding: 2.2rem 1.5rem 2.6rem;
+  background-color: #d8d2c6;
+  background-image: linear-gradient(rgba(255, 255, 255, .16) 1px, transparent 1px);
+  background-size: 100% 2rem;
+}
+.book-spread {
+  display: flex; align-items: center; justify-content: center; gap: 2px;
+  min-width: min-content; filter: drop-shadow(0 18px 20px rgba(61, 52, 40, .17));
+}
+.book-sheet {
+  position: relative; flex: 0 0 auto; width: min(25.5rem, 39vw); aspect-ratio: 148 / 210;
+  overflow: hidden; padding: 7.5% 9% 8%; background: #fffef9; color: #27231d;
+  font-family: "ZQ Source Han Serif CN", "Songti SC", "Noto Serif SC", "Source Han Serif SC", "思源宋体", "STSong", "SimSun", serif;
+  font-size: clamp(.68rem, .86vw, .82rem); line-height: 1.9;
+}
+.book-sheet.size-b5 { width: min(27rem, 41vw); aspect-ratio: 176 / 250; }
+.book-sheet.verso { border-right: 1px solid #c8bdab; box-shadow: inset -11px 0 16px -17px rgba(43, 38, 32, .65); }
+.book-sheet.recto { border-left: 1px solid #eee8dc; box-shadow: inset 11px 0 16px -17px rgba(43, 38, 32, .52); }
+.book-spread.cover-only .book-sheet { box-shadow: 9px 10px 0 #bcb3a4, 18px 18px 24px rgba(61, 52, 40, .14); }
+.book-page-running {
+  position: absolute; top: 4.2%; left: 9%; right: 9%; display: flex;
+  justify-content: space-between; gap: 1rem; padding-bottom: .28rem;
+  border-bottom: 1px solid #ded6c8; color: #9a8e7c; font-size: .58rem; letter-spacing: .12em;
+}
+.book-page-running span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.book-page-folio {
+  position: absolute; bottom: 3.8%; left: 0; right: 0; text-align: center;
+  color: #9b8f7d; font-size: .62rem; font-variant-numeric: tabular-nums;
+}
+/* 页底“未完”提示：跨页诗的非末页页脚外侧小字，随“书页标记”开关。 */
+.book-page-continue {
+  position: absolute; bottom: 3.8%; right: 9%;
+  color: #9b8f7d; font-size: .58rem; letter-spacing: .12em;
+}
+
+.book-cover-sheet { background: #f7f1e5; }
+.book-title-sheet, .book-colophon-sheet, .book-dedication-sheet { background: #f7f1e5; }
+.book-title-page {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; gap: .8rem; text-align: center;
+  padding: 0 12%;
+}
+.book-title-page h2 { font-size: clamp(1.15rem, 1.9vw, 1.8rem); font-weight: 500; letter-spacing: .06em; }
+.book-title-page p { color: #746a5c; font-size: .72rem; letter-spacing: .12em; }
+.book-title-page span { margin-top: 1.6rem; color: #4c443a; font-size: .72rem; letter-spacing: .28em; }
+.book-colophon-page {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  justify-content: center; padding: 0 14%;
+}
+.book-colophon-page > p { color: #9a8e7c; font-size: .55rem; letter-spacing: .18em; }
+.book-colophon-page h2 { margin: .35rem 0 1.1rem; font-size: .95rem; font-weight: 500; letter-spacing: .1em; }
+.book-colophon-page div {
+  color: #4c443a; font-size: .72rem; line-height: 2;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+/* 题词/献词页只有正文、无标题：居中一页，保留作者换行。 */
+.book-dedication-page {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; text-align: center;
+  padding: 0 16%;
+}
+.book-dedication-page div {
+  color: #4c443a; font-size: .78rem; line-height: 2.1; letter-spacing: .06em;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.book-cover-sheet::before {
+  content: ""; position: absolute; top: 10%; bottom: 10%; left: 20%;
+  border-left: 1px solid #b56246;
+}
+.book-cover-proof {
+  position: absolute; top: 9%; right: 10%; border: 1px solid #b56246;
+  color: #a4593d; padding: .15rem .22rem; font-size: .55rem; letter-spacing: .12em;
+  writing-mode: vertical-rl;
+}
+.book-cover-title { position: absolute; top: 29%; left: 29%; right: 11%; }
+.book-cover-title h2 {
+  font-size: clamp(1.4rem, 2.35vw, 2.25rem); line-height: 1.35; font-weight: 500;
+  letter-spacing: .16em; overflow-wrap: anywhere;
+}
+.book-cover-title p { margin-top: .9rem; color: #746a5c; font-size: .72rem; letter-spacing: .12em; }
+.book-cover-rule { position: absolute; left: 29%; right: 11%; top: 62%; border-top: 1px solid #d9cfbe; }
+.book-cover-author { position: absolute; left: 29%; bottom: 13%; font-size: .72rem; letter-spacing: .22em; }
+
+.book-toc-body { padding-top: 8%; }
+.book-toc-kicker { color: #ad644a; font-size: .55rem; letter-spacing: .26em; }
+.book-toc-body h2 { margin: .15rem 0 1.15rem; font-size: 1.35rem; font-weight: 500; letter-spacing: .22em; }
+.book-toc-body ol { list-style: none; }
+.book-toc-body li {
+  display: grid; grid-template-columns: 1.65rem auto 1fr auto; gap: .45rem; align-items: baseline;
+  min-width: 0; padding: .16rem 0; font-size: .69rem; line-height: 1.55;
+}
+.book-toc-body li > span { color: #b36a4e; font-size: .55rem; font-variant-numeric: tabular-nums; }
+.book-toc-body li > b { max-width: 14rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 400; }
+.book-toc-body li > i { min-width: .5rem; border-bottom: 1px dotted #cfc5b4; transform: translateY(-.22rem); }
+.book-toc-body li > em { color: #766c5e; font-style: normal; font-variant-numeric: tabular-nums; }
+.book-toc-body li.section-entry { margin-top: .48rem; }
+.book-toc-body li.section-entry > span,
+.book-toc-body li.section-entry > b { color: #99563f; font-weight: 600; letter-spacing: .08em; }
+
+.book-section-sheet { background: #f7f2e8; }
+.book-section-page { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: center; padding: 15% 19% 20%; }
+.book-section-page::before { content: ""; width: 2.8rem; margin-bottom: 1.4rem; border-top: 1px solid #b76c50; }
+.book-section-page > p { color: #b06a50; font-size: .55rem; letter-spacing: .28em; }
+.book-section-page h2 { margin-top: .55rem; font-size: 1.65rem; line-height: 1.45; font-weight: 500; letter-spacing: .16em; }
+.book-section-page > div { margin-top: 1.15rem; color: #766b5e; font-size: .72rem; line-height: 1.8; letter-spacing: .08em; }
+.book-blank-sheet { background: #f8f5ed; }
+
+.book-typeset-body { padding-top: 6%; }
+/* 长文页（序/后记/随笔）：首行缩进两字、段间不空行、两端对齐——段落靠缩进
+   识别（中文出版物惯例）；行盒与诗段同源，分页估算与渲染共用一套行高。
+   散文标题常置中，与“标题居中只属居中成块”的诗规则互不影响。 */
+.book-prose-body { padding-top: 6%; }
+.book-prose-body > header { margin: 3% 0 1.55rem; }
+.book-prose-body > header h2 {
+  font-size: 1.08rem; line-height: 1.5; font-weight: 500; letter-spacing: .18em;
+  text-align: center; overflow-wrap: anywhere;
+}
+.book-prose-body p {
+  min-height: 1.9em; margin: 0; text-indent: 2em; text-align: justify;
+  letter-spacing: .05em;
+  overflow-wrap: anywhere; word-break: normal; line-break: strict;
+}
+.book-prose-body p.no-indent { text-indent: 0; }
+.book-typeset-body > header { margin: 2.2% 0 1.55rem; }
+.book-typeset-body > header > p {
+  color: #ad644a; font-size: .55rem; letter-spacing: .18em; margin-bottom: .45rem;
+}
+.book-typeset-body > header h2 {
+  font-size: 1.08rem; line-height: 1.5; font-weight: 500; letter-spacing: .18em;
+  overflow-wrap: anywhere;
+}
+/* 标题居中只属于“居中成块”；左对齐模式下标题随正文左齐。 */
+.book-typeset-body.book-align-center > header h2 { text-align: center; }
+.book-poem-date { display: block; color: #8d8375; font-size: .58rem; line-height: 1.6; letter-spacing: .08em; }
+.book-poem-date.under-title { margin-top: .35rem; }
+.book-poem-date.poem-end { margin-top: 1.15rem; text-align: right; }
+.book-typeset-body.continued { padding-top: 8%; }
+.book-continuation { color: #9b8e7d; font-size: .6rem; letter-spacing: .12em; margin-bottom: .8rem; }
+/* 段间空隙 = 一个空行（一行 leading）：“回车本来就占有一行”，随版式缩放。 */
+.book-typeset-poem > div + div { margin-top: var(--bm-leading-pt, 18pt); }
+/* 居中成块：整块诗节按该页最长行取中平移，块内保持左齐（参照《海子的诗》）。
+   用 padding 而非 transform：容器加宽量恰好被块的最长行余出，不会二次折行，
+   也不会把透明盒子推出页外。标题下的日期跟随诗节对齐。 */
+.book-align-center .book-typeset-poem { padding-left: var(--poem-block-shift, 0em); }
+.book-align-center .book-poem-date.under-title { text-align: center; }
+.book-typeset-poem p {
+  min-height: 1.9em;
+  padding-left: calc(var(--poem-indent, 0em) + 1em);
+  text-indent: -1em;
+  /* 正文字距 .05em：思源宋体的全角字形几乎相触，加一点呼吸感；
+     折行宽度（charsPerLine）已按 1.05 倍收窄，不会越出版心。 */
+  letter-spacing: .05em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: normal;
+  line-break: strict;
+  text-align: left;
+}
+.book-typeset-poem p.machine-continuation { color: inherit; }
+/* 仅超出行宽不足一个全角字的行：整行保留并以负字距收进版心，
+   避免“孤字成行”。净字距 -.025em，视觉上不可辨。 */
+.book-typeset-poem p.tight { letter-spacing: -.025em; }
+.book-tone-mono .book-sheet:not(.book-cover-sheet),
+.book-tone-mono .book-title-sheet,
+.book-tone-mono .book-colophon-sheet,
+.book-tone-mono .book-dedication-sheet,
+.book-tone-mono .book-section-sheet,
+.book-tone-mono .book-blank-sheet { background: #fff; color: #222; }
+.book-tone-mono .book-page-running { border-bottom-color: #bbb; color: #666; }
+.book-tone-mono .book-page-folio,
+.book-tone-mono .book-title-page p,
+.book-tone-mono .book-title-page span,
+.book-tone-mono .book-colophon-page > p,
+.book-tone-mono .book-colophon-page div,
+.book-tone-mono .book-dedication-page div,
+.book-tone-mono .book-toc-kicker,
+.book-tone-mono .book-toc-body li > span,
+.book-tone-mono .book-toc-body li > em,
+.book-tone-mono .book-toc-body li.section-entry > span,
+.book-tone-mono .book-toc-body li.section-entry > b,
+.book-tone-mono .book-section-page > p,
+.book-tone-mono .book-section-page > div,
+.book-tone-mono .book-typeset-body > header > p,
+.book-tone-mono .book-poem-date,
+.book-tone-mono .book-continuation,
+.book-tone-mono .book-page-continue { color: #555; }
+.book-tone-mono .book-toc-body li > i { border-bottom-color: #aaa; }
+.book-tone-mono .book-section-page::before { border-top-color: #666; }
+.book-preview-note {
+  margin: 0; padding: .75rem 1.2rem 1rem; text-align: center;
+  color: #73695b; font-size: .66rem; letter-spacing: .06em;
+}
+
+/* 输出排版：屏幕观看比例与固定 mm / pt 成品彼此独立 */
+main.book-print-wide { width: 100%; max-width: none; padding: 0; }
+.book-print-shell { min-height: calc(100vh - 9rem); background: #d4cec2; }
+.book-print-shell:fullscreen { overflow: auto; }
+/* 全屏 = 纯页面：工具栏整体隐藏，右上角只留迷你条（单/双页 + 退出全屏）。 */
+.book-print-shell:fullscreen .book-print-toolbar { display: none; }
+.book-fullscreen-bar { display: none; }
+.book-print-shell:fullscreen .book-fullscreen-bar {
+  display: flex; position: fixed; top: .7rem; right: .7rem; z-index: 60;
+  align-items: center; gap: .3rem; padding: .3rem;
+  border: 1px solid #c8beac; background: rgba(241, 234, 220, .94);
+}
+.book-fullscreen-bar .btn { padding: .2em .7em; }
+.book-print-toolbar {
+  position: sticky; top: 5rem; z-index: 35; display: grid;
+  grid-template-columns: minmax(0, 1fr) repeat(6, auto); align-items: center; gap: .55rem;
+  padding: .75rem max(1.2rem, 4vw); border-bottom: 1px solid #c5bba9;
+  background: rgba(241, 234, 220, .96);
+}
+.book-print-toolbar > div:first-child { display: flex; align-items: center; gap: .75rem; }
+.book-print-toolbar > div:first-child > .btn { flex: 0 0 auto; white-space: nowrap; }
+.book-print-toolbar .book-view-save-state { display: block; margin-top: .12rem; }
+.book-print-toolbar > div:first-child > span b,
+.book-print-toolbar > div:first-child > span { display: block; }
+.book-print-toolbar > div:first-child > span { color: var(--ink-3); font-size: .66rem; line-height: 1.5; }
+.book-print-toolbar > div:first-child > span b { color: var(--ink); font-size: .82rem; }
+.book-print-jump {
+  display: flex; align-items: center; gap: .35rem; margin-left: .35rem;
+  color: var(--ink-3); font-size: .65rem; white-space: nowrap;
+}
+.book-print-jump select {
+  width: min(13rem, 20vw); padding: .32rem .45rem; border: 1px solid #c8beac;
+  color: var(--ink-2); background: #fffaf0; font: inherit;
+}
+.book-print-profile {
+  display: grid; grid-template-columns: auto auto; align-items: baseline; gap: 0 .45rem;
+  padding-left: 1rem; border-left: 1px solid #c8beac; line-height: 1.45; white-space: nowrap;
+}
+.book-print-profile span { grid-row: 1 / 3; color: #a45b40; font-size: .58rem; letter-spacing: .16em; writing-mode: vertical-rl; }
+.book-print-profile b { color: var(--ink); font-size: .75rem; font-weight: 600; }
+.book-print-profile i { color: var(--ink-3); font-size: .62rem; font-style: normal; }
+.book-view-switch {
+  display: flex; align-items: center; gap: .2rem; padding: .18rem;
+  border: 1px solid #c8beac; background: rgba(255, 252, 245, .55);
+}
+.book-view-switch .btn { min-width: 2.5rem; padding: .28rem .42rem; border-color: transparent; }
+.book-view-switch .btn.on { border-color: #aa6a50; color: #7d3f2c; background: #f6e9dc; }
+.book-view-switch span { min-width: 2.4rem; color: var(--ink-3); font-size: .6rem; text-align: center; }
+.book-print-guidance {
+  display: flex; justify-content: center; gap: .45rem; padding: .55rem 1rem;
+  color: #756b5d; background: #e7dfd1; font-size: .67rem;
+}
+.book-print-guidance b { color: #8e4f38; font-weight: 600; }
+.book-print-canvas { padding: 2.2rem 1rem 3.5rem; overflow: auto; }
+.book-print-document {
+  display: grid; justify-content: center; width: max-content; min-width: 100%;
+  zoom: var(--book-screen-zoom, 1);
+}
+.book-print-document.view-page,
+.book-print-document.view-actual { grid-template-columns: auto; gap: 1.5rem; }
+.book-print-document.view-spreads { grid-template-columns: auto auto; column-gap: 2px; row-gap: 1.5rem; }
+.book-print-document.view-spreads .book-cover-sheet { grid-column: 1 / -1; justify-self: center; }
+.book-print-document.size-a5 { --bm-top: 18mm; --bm-bottom: 20mm; --bm-inner: 23mm; --bm-outer: 18mm; }
+.book-print-document.size-b5 { --bm-top: 20mm; --bm-bottom: 22mm; --bm-inner: 25mm; --bm-outer: 20mm; }
+.book-print-document .book-sheet {
+  aspect-ratio: auto; font-family: "ZQ Source Han Serif CN", "STSong", "Source Han Serif SC", "思源宋体", "SimSun", "Noto Serif SC", serif;
+  font-size: var(--bm-body-pt, 10.5pt); line-height: var(--bm-leading-pt, 18pt);
+  filter: drop-shadow(0 10px 16px rgba(61, 52, 40, .2));
+  -webkit-print-color-adjust: exact; print-color-adjust: exact;
+}
+.book-print-document.size-a5 .book-sheet { width: 148mm; height: 210mm; }
+.book-print-document.size-b5 .book-sheet { width: 176mm; height: 250mm; }
+.book-print-document.size-a5 .book-sheet.recto { padding: var(--bm-top) var(--bm-outer) var(--bm-bottom) var(--bm-inner); }
+.book-print-document.size-a5 .book-sheet.verso { padding: var(--bm-top) var(--bm-inner) var(--bm-bottom) var(--bm-outer); }
+.book-print-document.size-b5 .book-sheet.recto { padding: var(--bm-top) var(--bm-outer) var(--bm-bottom) var(--bm-inner); }
+.book-print-document.size-b5 .book-sheet.verso { padding: var(--bm-top) var(--bm-inner) var(--bm-bottom) var(--bm-outer); }
+.book-print-document .book-cover-sheet { padding: 0; }
+.book-print-document .book-page-running {
+  top: 9mm; padding-bottom: 1.5mm; font-size: 7.5pt; line-height: 10pt;
+}
+.book-print-document.size-a5 .recto .book-page-running { left: 23mm; right: 18mm; }
+.book-print-document.size-a5 .verso .book-page-running { left: 18mm; right: 23mm; }
+.book-print-document.size-b5 .recto .book-page-running { left: 25mm; right: 20mm; }
+.book-print-document.size-b5 .verso .book-page-running { left: 20mm; right: 25mm; }
+.book-print-document .book-page-folio { bottom: 8mm; font-size: 8pt; line-height: 10pt; }
+.book-print-document .book-page-continue { bottom: 8mm; font-size: 7pt; line-height: 10pt; }
+.book-print-document.size-a5 .recto .book-page-continue { right: 18mm; }
+.book-print-document.size-a5 .verso .book-page-continue { right: 23mm; }
+.book-print-document.size-b5 .recto .book-page-continue { right: 20mm; }
+.book-print-document.size-b5 .verso .book-page-continue { right: 25mm; }
+.book-print-document .book-typeset-body { padding-top: 8mm; }
+/* “第 N 首”小字上抬而标题原位：页眉顶距让出的 1mm 补到小字与标题之间。 */
+.book-print-document .book-typeset-body > header { margin: 1.5mm 0 9mm; }
+.book-print-document .book-typeset-body > header > p { font-size: 7.5pt; line-height: 10pt; margin: 0 0 1mm; }
+.book-print-document .book-typeset-body > header h2 { font-size: 15pt; line-height: 22pt; }
+.book-print-document .book-poem-date { font-size: 7.5pt; line-height: 12pt; }
+.book-print-document .book-poem-date.under-title { margin-top: 2mm; }
+.book-print-document .book-poem-date.poem-end { margin-top: 6mm; }
+.book-print-document .book-typeset-body.continued { padding-top: 10mm; }
+.book-print-document .book-continuation { margin-bottom: 9mm; font-size: 8pt; line-height: 12pt; }
+/* 段间空隙 = 一个空行（一行 leading），与“回车占一行”的预期一致，随版式自动缩放。 */
+.book-print-document .book-typeset-poem > div + div { margin-top: var(--bm-leading-pt, 18pt); }
+.book-print-document .book-typeset-poem p { min-height: var(--bm-leading-pt, 18pt); }
+.book-print-document .book-prose-body { padding-top: 8mm; }
+.book-print-document .book-prose-body > header { margin: 2.5mm 0 9mm; }
+.book-print-document .book-prose-body > header h2 { font-size: 15pt; line-height: 22pt; }
+.book-print-document .book-prose-body p { min-height: var(--bm-leading-pt, 18pt); }
+.book-print-document .book-toc-kicker { font-size: 7pt; line-height: 10pt; }
+.book-print-document .book-toc-body h2 { margin: 1mm 0 8mm; font-size: 18pt; line-height: 24pt; }
+.book-print-document .book-toc-body li { padding: 1.2pt 0; font-size: 9.5pt; line-height: 15pt; }
+.book-print-document .book-toc-body li > span { font-size: 7.5pt; }
+.book-print-document .book-cover-title h2 { font-size: 24pt; line-height: 34pt; }
+.book-print-document.size-b5 .book-cover-title h2 { font-size: 28pt; line-height: 39pt; }
+.book-print-document .book-cover-title p,
+.book-print-document .book-cover-author { font-size: 10pt; line-height: 16pt; }
+.book-print-document .book-title-page h2 { font-size: 20pt; line-height: 30pt; }
+.book-print-document.size-b5 .book-title-page h2 { font-size: 23pt; line-height: 34pt; }
+.book-print-document .book-title-page p,
+.book-print-document .book-title-page span { font-size: 10pt; line-height: 16pt; }
+.book-print-document .book-colophon-page > p { font-size: 7.5pt; line-height: 10pt; }
+.book-print-document .book-colophon-page h2 { font-size: 13pt; line-height: 19pt; }
+.book-print-document .book-colophon-page div { font-size: 9.5pt; line-height: 16pt; }
+.book-print-document .book-dedication-page div { font-size: 11pt; line-height: 19pt; }
+.book-print-document.size-b5 .book-dedication-page div { font-size: 12pt; line-height: 21pt; }
+.book-print-document .book-cover-proof { font-size: 7.5pt; line-height: 10pt; }
+.book-print-document .book-section-page { padding: 15% 19% 20%; }
+.book-print-document .book-section-page > p { font-size: 7.5pt; line-height: 11pt; }
+.book-print-document .book-section-page h2 { margin-top: 4mm; font-size: 22pt; line-height: 32pt; }
+.book-print-document .book-section-page > div { margin-top: 7mm; font-size: 10pt; line-height: 18pt; }
+
+.book-meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; padding: .85rem; }
+.book-meta-grid label { color: var(--ink-3); font-size: .68rem; letter-spacing: .08em; }
+.book-meta-grid input, .book-meta-grid select { display: block; margin-top: .2rem; color: var(--ink); letter-spacing: 0; }
+.book-toc-body li[data-folio] { cursor: pointer; }
+.book-toc-body li[data-folio]:hover b { color: #a45b40; }
+.book-page-marks {
+  display: flex; flex-wrap: wrap; align-items: center; gap: .8rem; row-gap: .25rem;
+  padding: .42rem .55rem;
+  border: 1px solid var(--line); color: var(--ink-3); font-size: .68rem;
+}
+.book-page-marks > span { margin-right: auto; letter-spacing: .08em; }
+.book-page-marks .book-check { color: var(--ink-2); letter-spacing: 0; }
+.book-front-toggle { align-self: end; padding-bottom: .45rem; }
+.book-front-colophon-label, .book-front-dedication-label { grid-column: 1 / -1; }
+.book-front-colophon-label textarea,
+.book-front-dedication-label textarea {
+  display: block; width: 100%; margin-top: .2rem; color: var(--ink);
+  letter-spacing: 0; resize: vertical; font-family: inherit;
+}
+/* 插入动作留在编次时间线下方；内容本身只在时间线出现一次。 */
+.book-inserted-head {
+  display: flex; align-items: center; gap: .7rem; margin-top: .8rem;
+  padding: .42rem .55rem; border: 1px solid var(--line); color: var(--ink-3); font-size: .68rem;
+}
+.book-inserted-head > div { margin-right: auto; display: flex; align-items: baseline; gap: .5rem; }
+.book-inserted-head b { color: var(--ink-2); letter-spacing: .08em; }
+.book-page-modal textarea {
+  display: block; width: 100%; margin-top: .2rem; color: var(--ink);
+  letter-spacing: 0; resize: vertical; font-family: inherit; line-height: 1.7;
+}
+/* 排版视图内的就地编辑：悬停书页浮现“改稿 / 插页 / 尾花”；全屏试看保持纯页面。 */
+.book-edit-affordance, .book-insert-affordance, .book-tailpiece-affordance {
+  position: absolute; top: 2.4%; z-index: 5;
+  border: 1px solid #c8b9a4; background: rgba(255, 254, 249, .94);
+  color: #6d6255; font-size: .62rem; letter-spacing: .14em;
+  padding: .16rem .55rem; cursor: pointer; font-family: inherit;
+  opacity: 0; transition: opacity .15s ease;
+}
+.book-edit-affordance { right: 2.4%; }
+.book-insert-affordance { right: calc(2.4% + 4.1rem); }
+.book-tailpiece-affordance { right: calc(2.4% + 8.2rem); }
+.book-tailpiece-affordance.on {
+  background: #efe6d5; color: #8e443d; border-color: #bb9c82; font-weight: 500;
+}
+.book-sheet { position: relative; }
+.book-sheet:hover .book-edit-affordance, .book-edit-affordance:focus-visible,
+.book-sheet:hover .book-insert-affordance, .book-insert-affordance:focus-visible,
+.book-sheet:hover .book-tailpiece-affordance, .book-tailpiece-affordance:focus-visible { opacity: 1; }
+.book-print-shell:fullscreen .book-edit-affordance,
+.book-print-shell:fullscreen .book-insert-affordance,
+.book-print-shell:fullscreen .book-tailpiece-affordance { display: none; }
+.book-poem-edit-status { color: var(--ink-3); font-size: .72rem; margin: 0 0 .5rem; }
+.book-tailpiece-modal { max-width: 24rem; }
+.book-tailpiece-preview-wrap {
+  margin-top: .6rem; display: flex; flex-direction: column; align-items: center; gap: .5rem;
+}
+.book-tailpiece-preview-box {
+  width: 100%; min-height: 5rem; max-height: 9rem;
+  border: 1px dashed var(--line); background: rgba(0, 0, 0, .02);
+  display: flex; align-items: center; justify-content: center;
+  padding: .5rem;
+}
+.book-tailpiece-preview-box img {
+  max-width: 100%; max-height: 8rem; object-fit: contain;
+}
+.book-tailpiece-preview-box p {
+  color: var(--ink-3); font-size: .75rem; letter-spacing: .06em; margin: 0;
+}
+/* 短诗末页余白尾花：居中沉底点缀，最大高宽受限，古典雅致微淡质感 */
+.book-poem-tailpiece {
+  margin: var(--tailpiece-gap, 18pt) auto 0;
+  text-align: center;
+  width: var(--tailpiece-width, 32%);
+  max-width: 48%;
+  opacity: .85;
+  pointer-events: none;
+}
+.book-poem-tailpiece.align-left { margin-left: 0; margin-right: auto; }
+.book-poem-tailpiece.align-center { margin-left: auto; margin-right: auto; }
+.book-poem-tailpiece.align-right { margin-left: auto; margin-right: 0; }
+.book-poem-tailpiece img {
+  display: block;
+  margin: 0 auto;
+  max-height: var(--tailpiece-height, 24mm);
+  max-width: 100%;
+  object-fit: contain;
+  filter: contrast(1.05);
+}
+.book-print-document .book-poem-tailpiece {
+  margin-top: var(--tailpiece-gap, 18pt);
+}
+.book-print-document .book-poem-tailpiece img {
+  max-height: var(--tailpiece-height, 24mm);
+}
+.book-tailpiece-layout-controls { grid-template-columns: 1fr 1fr; }
+/* 就地活动稿纸插页：覆盖在书页原位展开的轻量活动稿纸，免除全屏弹窗遮罩感 */
+.book-draft-sheet {
+  position: absolute; inset: 0; z-index: 20;
+  display: flex; flex-direction: column;
+  background: #fdfaf4;
+  box-shadow: 0 12px 36px rgba(50, 42, 32, .26), inset 0 0 0 1px #d8cdbc;
+  padding: .9rem 1.2rem 1.1rem;
+  font-family: "ZQ Source Han Serif CN", "Songti SC", "Noto Serif SC", "Source Han Serif SC", "思源宋体", "STSong", "SimSun", serif;
+  animation: bookDraftAppear .18s cubic-bezier(.16, 1, .3, 1);
+  box-sizing: border-box;
+}
+@keyframes bookDraftAppear {
+  from { opacity: 0; transform: scale(.98); }
+  to { opacity: 1; transform: scale(1); }
+}
+.book-draft-sheet-ribbon {
+  display: flex; align-items: center; justify-content: space-between; gap: .5rem;
+  padding-bottom: .55rem; border-bottom: 1px solid #e2d9ca;
+  flex: none; font-size: .68rem;
+}
+.book-draft-sheet-badge {
+  color: #8e443d; font-weight: 600; letter-spacing: .12em;
+  background: rgba(142, 68, 61, .08); padding: .18rem .45rem; border-radius: 2px;
+}
+.book-draft-sheet-options {
+  display: flex; align-items: center; gap: .6rem; margin-left: auto;
+}
+.book-draft-sheet-kind {
+  font-size: .68rem; font-family: inherit; border: 1px solid #c8bdab;
+  background: #fff; padding: .15rem .35rem; color: #3d352b; border-radius: 2px;
+}
+.book-draft-sheet-toc {
+  display: flex; align-items: center; gap: .25rem; color: #6d6255; font-size: .65rem;
+  cursor: pointer; user-select: none;
+}
+.book-draft-sheet-actions {
+  display: flex; align-items: center; gap: .4rem;
+}
+.book-draft-sheet-content {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; margin-top: .7rem;
+}
+.book-draft-text-zone {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+.book-draft-title-input {
+  display: block; width: 100%; flex: none;
+  border: none; border-bottom: 1px solid #dfd5c5; background: transparent;
+  padding: .3rem .2rem; font-size: 1.05rem; font-family: inherit; font-weight: 600;
+  color: #27231d; outline: none; letter-spacing: .08em; text-align: center;
+}
+.book-draft-title-input:focus {
+  border-bottom-color: #8e443d;
+}
+.book-draft-title-input::placeholder {
+  color: #b5aa9b; font-weight: normal; font-size: .88rem;
+}
+.book-draft-body-input {
+  flex: 1; min-height: 0; margin-top: .7rem; width: 100%;
+  border: none; background: transparent; resize: none;
+  font-family: inherit; font-size: .82rem; line-height: 1.85;
+  color: #2b2620; outline: none; padding: .2rem;
+  background-image: repeating-linear-gradient(transparent, transparent calc(1.85em - 1px), rgba(200, 189, 171, .32) calc(1.85em - 1px), rgba(200, 189, 171, .32) 1.85em);
+  background-size: 100% 1.85em;
+  background-attachment: local;
+}
+.book-draft-body-input:not(.poem-mode) {
+  text-indent: 2em;
+}
+.book-draft-body-input::placeholder {
+  color: #b5aa9b; text-indent: 0;
+}
+.book-draft-image-zone {
+  flex: 1; min-height: 0; display: flex; flex-direction: column; align-items: center;
+}
+.book-draft-image-uploader {
+  flex: 1; min-height: 0; width: 100%; margin-top: .6rem;
+  border: 1px dashed #c8bdab; background: rgba(255, 255, 255, .6);
+  cursor: pointer; display: flex; align-items: center; justify-content: center;
+  transition: border-color .15s ease, background .15s ease;
+}
+.book-draft-image-uploader:hover {
+  border-color: #8e443d; background: #fff;
+}
+.book-draft-image-canvas {
+  width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
+  padding: .5rem;
+}
+.book-draft-image-canvas.drag-over { outline: 2px solid var(--accent); outline-offset: -4px; background: rgba(164, 89, 61, .08); }
+.book-draft-image-canvas img {
+  max-width: 100%; max-height: 100%; object-fit: contain;
+}
+.book-draft-image-canvas p {
+  color: #8d8375; text-align: center; font-size: .8rem; line-height: 1.5; margin: 0;
+}
+.book-draft-image-canvas small {
+  color: #aba092; font-size: .68rem;
+}
+.book-draft-blank-zone {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+}
+.book-draft-blank-box {
+  text-align: center; color: #a49989;
+}
+.book-draft-blank-box p {
+  font-size: 1.1rem; letter-spacing: .25em; margin: 0 0 .4rem; font-weight: 500;
+}
+.book-draft-blank-box small {
+  font-size: .72rem; letter-spacing: .08em;
+}
+/* 图片页：整页容纳一幅插图，等比缩放居中，图注（可选）沉底；离线 HTML 内嵌 data URI。 */
+.book-image-page {
+  position: absolute; inset: 7% 9% 8%; margin: 0;
+  display: flex; flex-direction: column; align-items: center;
+}
+.book-image-page.align-left { align-items: flex-start; }
+.book-image-page.align-center { align-items: center; }
+.book-image-page.align-right { align-items: flex-end; }
+.book-image-page img {
+  flex: 1; min-height: 0; width: var(--book-image-width, 100%); max-width: 100%; object-fit: contain;
+}
+.book-image-page figcaption {
+  flex: none; margin-top: .45rem; color: #8d8375; font-size: .58rem;
+  letter-spacing: .08em; text-align: center; width: var(--book-image-width, 100%); max-width: 100%;
+}
+.book-print-document .book-image-page figcaption { font-size: 7.5pt; line-height: 12pt; }
+.book-page-image-state { display: block; margin-top: .25rem; color: var(--ink-3); }
+.book-page-image-preview { display: block; margin-top: .3rem; }
+.book-page-image-preview img {
+  max-width: 100%; max-height: 16rem; border: 1px solid var(--line); object-fit: contain;
+}
+.book-image-library-shell {
+  display: grid; gap: .32rem; margin-top: .55rem; padding: .5rem;
+  border: 1px solid var(--line); border-radius: 5px; background: rgba(255, 255, 255, .42);
+}
+.book-image-library-shell > span {
+  color: var(--ink-3); font-size: .68rem; letter-spacing: .04em;
+}
+.book-image-library {
+  display: flex; gap: .42rem; min-height: 3.8rem; max-width: 100%; overflow-x: auto;
+  padding: .08rem .08rem .28rem;
+}
+.book-image-library-state {
+  align-self: center; color: var(--ink-3); font-size: .7rem;
+}
+.book-image-library-state.error { color: #94483f; }
+.book-image-library-item {
+  position: relative; flex: 0 0 4.2rem; height: 4.2rem; padding: .14rem;
+  border: 1px solid #cfc4b3; border-radius: 4px; background: #fff; cursor: pointer;
+  overflow: hidden; transition: border-color .15s ease, box-shadow .15s ease;
+}
+.book-image-library-item:hover { border-color: var(--warm); }
+.book-image-library-item.selected {
+  border-color: var(--accent); box-shadow: 0 0 0 2px rgba(164, 89, 61, .18);
+}
+.book-image-library-item img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.book-image-library-item span {
+  position: absolute; right: .14rem; bottom: .14rem; padding: .05rem .18rem;
+  color: #fff; background: rgba(31, 27, 23, .68); border-radius: 2px; font-size: .52rem;
+}
+.book-image-layout-controls {
+  display: grid; grid-template-columns: repeat(3, minmax(7rem, 1fr)); gap: .45rem;
+  width: 100%; margin-top: .55rem;
+}
+.book-image-layout-controls label { display: grid; gap: .2rem; color: var(--ink-3); font-size: .7rem; }
+.book-image-layout-controls select, .book-image-layout-controls input { width: 100%; box-sizing: border-box; font: inherit; }
+@media (max-width: 48rem) { .book-image-layout-controls { grid-template-columns: 1fr 1fr; } }
+.book-sort-row {
+  display: flex; align-items: center; flex-wrap: wrap; gap: .4rem;
+  padding: 0 .85rem .8rem; border-bottom: 1px solid var(--line);
+}
+.book-sort-row > span { color: var(--ink-3); font-size: .67rem; margin-right: auto; }
+.book-signatures { list-style: none; max-height: 32rem; overflow: auto; counter-reset: folio; }
+.book-signatures > li[data-index] {
+  cursor: grab;
+  transition: background .15s ease, box-shadow .15s ease, opacity .15s ease;
+}
+.book-signatures > li[data-index]:active { cursor: grabbing; }
+.book-signatures > li.dragging {
+  opacity: .38;
+  background: rgba(230, 222, 207, .45);
+}
+.book-signatures > li.drag-over {
+  box-shadow: inset 0 3px 0 #a45b40;
+  background: rgba(181, 104, 75, .05);
+}
+.book-signatures > li {
+  position: relative; display: grid; grid-template-columns: 2.25rem 1fr auto; gap: .65rem;
+  align-items: center; min-height: 3.65rem; padding: .65rem .75rem;
+  border-bottom: 1px solid rgba(227, 218, 199, .72);
+}
+.book-signatures > li::before {
+  content: ""; position: absolute; left: 1.83rem; top: 0; bottom: 0;
+  border-left: 1px solid #c9b99d;
+}
+.book-folio {
+  position: relative; z-index: 1; color: var(--warm); background: var(--panel);
+  font-size: .67rem; font-variant-numeric: tabular-nums; letter-spacing: .05em;
+}
+/* 编次时间线上的序号做成明确的“节点”，避免像一块补丁恰好压住竖线。 */
+.book-signatures > li .book-folio {
+  align-self: center; justify-self: center; white-space: nowrap;
+  padding: .14rem .32rem; border: 1px solid #c9b99d; border-radius: 9px;
+}
+.book-insert-row { background: rgba(47, 109, 98, .045); }
+.book-insert-row .book-folio { color: var(--accent-deep); border-color: rgba(47, 109, 98, .38) !important; }
+.book-insert-row .book-order-actions button { width: auto; padding: 0 .38rem; }
+.book-signatures b, .book-signatures span { display: block; }
+.book-signatures b { font-size: .82rem; font-weight: 600; }
+.book-signatures li > div > span { color: var(--ink-3); font-size: .67rem; }
+.book-order-actions { display: flex; gap: .2rem; }
+.book-order-actions button {
+  width: 1.55rem; height: 1.55rem; border: 1px solid var(--line); background: var(--panel);
+  color: var(--ink-2); cursor: pointer;
+  font-family: var(--serif); font-size: .8rem; line-height: 1;
+}
+.book-order-actions button:hover { border-color: var(--accent); color: var(--accent-deep); }
+.book-order-actions button:disabled { opacity: .28; cursor: default; }
+.book-order-actions .book-proof-break-open { width: auto; padding: 0 .38rem; }
+.book-order-actions .book-proof-break-open.on { border-color: #6e9488; color: #35695d; background: #edf4ef; }
+.book-order-actions .book-proof-break-open.stale { border-color: #b96b50; color: #91452e; background: #f7ebe3; }
+.book-proof-status { color: #397164; font-style: normal; }
+.book-proof-status.stale { color: #a24f34; }
+.book-signatures > li.book-section-marker {
+  grid-template-columns: 2.25rem 1fr auto; min-height: 3.2rem;
+  margin-top: .45rem; border-top: 1px solid #d7c5a8; border-bottom-color: #d7c5a8;
+  background: linear-gradient(90deg, rgba(181, 104, 75, .1), transparent 72%);
+}
+.book-signatures > li.book-section-marker::before { display: none; }
+.book-section-marker > span { color: #a45b40; font-size: .72rem; font-weight: 600; letter-spacing: .2em; }
+.book-section-marker small { display: block; margin-top: .15rem; color: var(--ink-3); font-size: .64rem; }
+.book-section-marker .book-order-actions button:first-child { width: auto; padding: 0 .45rem; }
+.book-section-modal { width: min(31rem, calc(100vw - 2rem)); }
+.book-section-form { display: grid; gap: .75rem; }
+.book-section-form label { color: var(--ink-3); font-size: .7rem; letter-spacing: .08em; }
+.book-section-form input:not([type="checkbox"]), .book-section-form select {
+  display: block; width: 100%; margin-top: .25rem; color: var(--ink);
+  letter-spacing: 0; font-family: inherit;
+}
+.book-section-form p { color: var(--ink-3); font-size: .68rem; line-height: 1.65; }
+.book-proof-break-modal { width: min(68rem, calc(100vw - 2rem)); max-width: 68rem; max-height: calc(100vh - 2rem); overflow: auto; }
+.book-proof-break-intro, .book-proof-stale { margin-bottom: .7rem; color: var(--ink-3); font-size: .72rem; line-height: 1.65; }
+.book-proof-stale { padding: .5rem .65rem; border-left: 3px solid #ad573c; color: #87442f; background: #f8ede4; }
+.book-proof-break-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0; border: 1px solid #cfc2aa; background: #fbf7ed; }
+.book-proof-break-grid > section, .book-proof-break-grid > label { min-width: 0; padding: .75rem; }
+.book-proof-break-grid > label { border-left: 1px solid #cfc2aa; }
+.book-proof-break-grid b { display: block; margin-bottom: .45rem; color: #8c503b; font-size: .65rem; font-weight: 600; letter-spacing: .12em; }
+.book-proof-break-grid pre, .book-proof-break-grid textarea {
+  width: 100%; height: min(54vh, 30rem); margin: 0; padding: .8rem;
+  border: 0; color: var(--ink); background: #fffdf7;
+  font: .82rem/1.9 "ZQ Source Han Serif CN", "STSong", "Source Han Serif SC", "思源宋体", serif;
+  white-space: pre-wrap; overflow: auto; resize: none;
+}
+.book-proof-break-grid pre { color: #71695d; background: #f3ede1; }
+.book-proof-break-grid textarea:focus { outline: 2px solid rgba(64, 117, 103, .38); outline-offset: -2px; }
+.book-proof-break-actions { display: grid; grid-template-columns: auto auto 1fr auto auto; }
+.book-signatures .book-empty-signature {
+  display: block; padding: 2.4rem 1.2rem; color: var(--ink-3); font-size: .76rem; text-align: center;
+}
+.book-signatures .book-empty-signature::before { display: none; }
+.book-proof-launch {
+  position: relative; display: flex; align-items: center; justify-content: space-between; gap: 1rem;
+  margin: .85rem; padding: 1rem 1.05rem 1rem 1.3rem;
+  border-top: 1px solid #cdbb9e; border-bottom: 1px solid #cdbb9e;
+  background: linear-gradient(90deg, rgba(181, 104, 75, .12), rgba(248, 242, 230, .42));
+}
+.book-proof-launch::before {
+  content: ""; position: absolute; left: 0; top: .65rem; bottom: .65rem; width: 3px; background: #a6553b;
+}
+.book-proof-launch span, .book-proof-launch b, .book-proof-launch p { display: block; }
+.book-proof-launch span { color: #a6553b; font-size: .61rem; letter-spacing: .2em; }
+.book-proof-launch b { margin-top: .12rem; color: var(--ink); font-size: 1rem; font-weight: 600; letter-spacing: .06em; }
+.book-proof-launch p { margin-top: .18rem; color: var(--ink-3); font-size: .68rem; }
+.book-proof-launch .btn { min-width: 8.8rem; min-height: 2.45rem; }
+.book-proof-launch .btn:disabled { opacity: .42; cursor: not-allowed; }
+.book-savebar {
+  display: flex; flex-wrap: wrap; gap: .65rem; align-items: center;
+  padding: 0 .85rem .85rem; background: rgba(241, 234, 220, .44);
+}
+.book-save-history { display: flex; gap: .35rem; }
+.book-content-copy-note { color: var(--accent-deep); font-size: .69rem; }
+.book-body-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); border: 1px solid var(--line); }
+.book-body-grid > section, .book-body-edit { min-width: 0; padding: .8rem; }
+.book-body-edit { border-left: 1px solid var(--line); }
+.book-body-grid b { display: block; margin-bottom: .5rem; font-size: .7rem; color: var(--warm); }
+.book-body-grid pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 55vh; overflow: auto; font-family: var(--serif); color: var(--ink); }
+.book-body-node { margin-bottom: .8rem; border-top: 1px solid var(--line); padding-top: .5rem; }
+.book-body-node-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; flex-wrap: wrap; margin-bottom: .35rem; }
+.book-body-node-head span { color: var(--accent-deep); font-size: .7rem; white-space: nowrap; }
+.book-body-node-head > div { display: flex; flex-wrap: wrap; gap: .25rem; }
+.book-body-node-head .btn { font-size: .62rem; padding: .2rem .42rem; }
+.book-body-node textarea { display: block; width: 100%; min-height: 7rem; padding: .65rem; resize: vertical; font: .83rem/1.8 var(--serif); color: var(--ink); background: var(--panel); border: 1px solid var(--line); }
+.book-body-node textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.book-body-modal .book-proof-break-actions { grid-template-columns: auto 1fr auto auto; }
+.book-save-state { color: var(--ink-3); font-size: .68rem; margin-left: auto; }
+.book-save-state.warn { color: var(--warm); font-weight: 650; }
+.book-savebar .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+@media (max-width: 68rem) {
+  .book-workspace { grid-template-columns: minmax(18rem, .9fr) minmax(22rem, 1.1fr); }
+  .book-shelf { position: static; grid-column: 1 / -1; }
+  .book-project-list { display: flex; gap: .4rem; overflow-x: auto; }
+  .book-project { min-width: 11rem; width: auto; border-top: 0 !important; }
+}
+@media (max-width: 62rem) {
+  .book-preview-toolbar { align-items: flex-start; }
+  .book-preview-controls { flex-wrap: wrap; justify-content: flex-end; }
+  .book-preview-stage { min-height: 38rem; padding-left: .8rem; padding-right: .8rem; }
+  .book-sheet { width: min(25.5rem, 43vw); }
+  .book-sheet.size-b5 { width: min(27rem, 44vw); }
+  .book-print-toolbar { top: 7.7rem; grid-template-columns: 1fr auto auto auto; }
+  .book-print-profile { display: none; }
+  .book-print-jump select { width: 9rem; }
+}
+@media (max-width: 47rem) {
+  .book-body-grid { grid-template-columns: 1fr; }
+  .book-body-edit { border-left: 0; border-top: 1px solid var(--line); }
+  main.book-wide { width: min(94vw, 40rem); }
+  .book-head { display: block; }
+  .book-tally { margin-top: 1rem; grid-template-columns: auto 1fr; border-left: 0; border-top: 1px solid var(--line); padding: .8rem 0 0; }
+  .book-workspace { grid-template-columns: 1fr; }
+  .book-shelf { grid-column: auto; }
+  .book-meta-grid, .book-filters { grid-template-columns: 1fr; }
+  .book-poem-pool, .book-signatures { max-height: 28rem; }
+  .book-proof-launch { align-items: stretch; flex-direction: column; }
+  .book-proof-launch .btn { width: 100%; }
+  .book-savebar { align-items: center; }
+  .book-save-state { flex: 1 1 100%; order: -1; margin-left: 0; }
+  .book-preview-toolbar { display: block; padding: .75rem 1rem; }
+  .book-preview-controls { justify-content: flex-start; margin-top: .65rem; }
+  .book-preview-stage { display: block; min-height: 36rem; padding: 1.2rem .75rem 1.8rem; }
+  .book-spread { justify-content: flex-start; width: max-content; }
+  .book-sheet, .book-sheet.size-b5 { width: 78vw; }
+  .book-print-toolbar { position: static; display: flex; flex-wrap: wrap; }
+  .book-print-toolbar > div:first-child { flex: 1 1 100%; flex-wrap: wrap; }
+  .book-print-jump { width: 100%; margin-left: 0; }
+  .book-print-jump select { width: min(100%, 18rem); }
+  .book-view-switch { order: 3; }
+  .book-print-guidance { display: block; text-align: center; }
+  .book-print-guidance b, .book-print-guidance span { display: block; }
+  .book-proof-break-grid { grid-template-columns: 1fr; }
+  .book-proof-break-grid > label { border-left: 0; border-top: 1px solid #cfc2aa; }
+  .book-proof-break-grid pre, .book-proof-break-grid textarea { height: 15rem; }
+  .book-proof-break-actions { display: flex; flex-wrap: wrap; }
+  .book-proof-break-actions span { display: none; }
+}
+@media (hover: none) { .book-poem-proof { display: none; } }
+
+@media print {
+  html, body { display: block; min-height: 0; background: white !important; }
+  .site-head, .site-foot, .book-print-toolbar, .book-print-guidance { display: none !important; }
+  main.book-print-wide, .book-print-shell, .book-print-canvas, .book-print-document {
+    display: block; width: auto; min-width: 0; margin: 0; padding: 0; background: white; zoom: 1;
+  }
+  .book-print-document .book-sheet {
+    margin: 0; border: 0; box-shadow: none; filter: none;
+    break-after: page; page-break-after: always;
+  }
+  .book-print-document .book-sheet:last-child { break-after: auto; page-break-after: auto; }
+}
 
 /* ---------- 榜单页 ---------- */
 
@@ -669,6 +1651,7 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
   background: var(--panel-2); color: var(--ink-3); font-size: .72rem;
 }
 .mobile-access-light.on { background: var(--accent-soft); color: var(--accent-deep); }
+.mobile-access-light.expired { background: #f6e8df; color: #8a4938; }
 .mobile-access-status { margin: 1.2rem 0; }
 .mobile-trust-choice {
   display: grid; grid-template-columns: auto 1fr; gap: .7rem; align-items: start;
@@ -679,14 +1662,22 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .mobile-trust-choice b { display: block; color: var(--accent-deep); font-size: .82rem; }
 .mobile-trust-choice small { display: block; margin-top: .18rem; color: var(--ink-3); font-size: .7rem; line-height: 1.55; }
 .mobile-trust-choice:has(input:disabled) { cursor: default; opacity: .78; }
+.mobile-trust-choice[hidden], .mobile-access-actions > [hidden] { display: none; }
 .mobile-access-empty {
   padding: 1rem; border: 1px dashed var(--line); border-radius: 8px;
   text-align: center; color: var(--ink-3); font-size: .82rem;
 }
+.mobile-access-expired { display: grid; gap: .35rem; text-align: left; border-color: #dfc2b6; background: #fbf3ee; }
+.mobile-access-expired b { color: #7d4032; font-size: .82rem; }
+.mobile-access-expired span { line-height: 1.6; }
 .connection-slip {
   display: grid; grid-template-columns: minmax(9rem, 12rem) 1fr; gap: 1.35rem; align-items: center;
   padding: 1.2rem; border: 1px solid #cbdad4; border-radius: 12px;
   background: linear-gradient(145deg, #fdfbf5, #edf4f1);
+}
+.connection-slip.portable-slip {
+  border-color: #9dbdb3;
+  box-shadow: 0 10px 30px rgba(36, 84, 76, .07);
 }
 .connection-qr { display: block; width: 100%; aspect-ratio: 1; padding: .35rem; background: var(--panel); border-radius: 8px; }
 .connection-copy > b { display: block; color: var(--accent-deep); font-size: 1rem; margin-bottom: .15rem; }
@@ -700,6 +1691,22 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 }
 .connection-url span, .connection-url em { color: var(--ink-3); font: normal .7rem/1.4 var(--serif); }
 .connection-url em { color: var(--accent-deep); }
+.connection-url.mobile-primary-url {
+  border-color: #9dbdb3; background: #f2f7f4; color: var(--accent-deep);
+  font-family: var(--serif); font-weight: 600;
+}
+.mobile-direct-list { margin-top: .65rem; }
+.mobile-direct-list summary { cursor: pointer; color: var(--ink-3); font-size: .72rem; }
+.mobile-direct-qr-wrap {
+  display: grid; grid-template-columns: 7rem 1fr; gap: .8rem; align-items: center;
+  margin-top: .65rem; padding: .7rem; border: 1px dashed var(--line); border-radius: 8px;
+}
+.mobile-direct-qr { width: 7rem; }
+.mobile-direct-qr-wrap p { color: var(--ink-3); font-size: .72rem; line-height: 1.65; }
+@media (max-width: 34rem) {
+  .mobile-direct-qr-wrap { grid-template-columns: 5.5rem 1fr; }
+  .mobile-direct-qr { width: 5.5rem; }
+}
 .mobile-access-actions > span { color: var(--ink-3); font-size: .75rem; }
 .mobile-tradeoff { margin-top: 1rem; padding-top: .85rem; border-top: 1px dashed var(--line); }
 .mobile-tradeoff summary { cursor: pointer; color: var(--ink-2); font-size: .8rem; }
@@ -710,6 +1717,21 @@ details.more-boards h2 { font-size: .92rem; letter-spacing: .2em; color: var(--i
 .mobile-private-row { display: grid; grid-template-columns: 1fr auto; gap: .65rem; align-items: center; }
 .mobile-private-row input { min-width: 0; }
 .private-slip { margin-top: .8rem; }
+
+/* 平板加入“诗集”后导航不再硬挤同一行；品牌与导航分层，链接保持单行横滑。 */
+@media (max-width: 62rem) {
+  .site-head { display: block; padding: .9rem 4vw .55rem; }
+  .brand { display: block; margin: 0 0 .55rem .35rem; white-space: nowrap; }
+  .site-head nav {
+    display: flex; gap: 1.15rem; overflow-x: auto; padding: .15rem .35rem .45rem;
+    scrollbar-width: none; -webkit-overflow-scrolling: touch; scroll-snap-type: x proximity;
+  }
+  .site-head nav::-webkit-scrollbar { display: none; }
+  .site-head nav a {
+    margin-left: 0; white-space: nowrap; font-size: .82rem; scroll-snap-align: start;
+    min-height: 2.4rem; display: inline-flex; align-items: center;
+  }
+}
 
 @media (max-width: 46rem) {
   .site-head { display: block; padding: .9rem 4vw .55rem; }

@@ -10,6 +10,8 @@ __pycache__/
 temp.txt
 task-*.txt
 /scratch/
+/tmp/
+/output/pdf/
 /.update-backups/
 /.update-stage-*/
 
@@ -25,18 +27,24 @@ Thumbs.db
 
 # Local safety snapshots (git history is the real backup now)
 corpus/.backups/
+corpus/mobile_trust.json
+corpus/诗集方案.json
+corpus/诗集图片/
 results/reads/*.bak-*
 results/.write.lock
 
 # Stray run logs
 collect_tmp.log
 
-# Dispatch batch working dirs: tasks/prompts/inbox responses are reproducible
-# intermediates; ingested data lives in results/. Never commit these.
+# 派发批次工作目录：任务/提示词/inbox 回执都是可复现的中间产物，入库后的数据在 results/。
+# 不进 git，避免把批量 inbox 回执作为工程源码提交。
 theater/runners/batches/
+# 临时抽样/投票目标清单：可由覆盖账和批次参数重建，不作为工程源码提交。
+theater/runners/*_ids*.txt
+theater/runners/*_targets.txt
 /batches/
 
-# Local credentials and signing material must never enter the public tree.
+# 本地凭据与签名材料不得进入开发仓或后续公开同步。
 .env
 .env.*
 !.env.example
@@ -47,13 +55,11 @@ theater/runners/batches/
 *credentials*.json
 *service-account*.json
 
-# Your own data — corpus/ and results/ are generated locally by you,
-# never committed. See 01_corpus_schema.md / 03_runner_and_coverage.md.
+# 项目本地可选增强依赖（诗集专业 PDF）
+node_modules/
+package.json
+package-lock.json
 /corpus/
 /results/
-
-# Internal fork-audit working doc — not meant for the public repo
 /FORK_REPORT.md
-
-# Sanitizer audit report - local only
 /SANITIZATION_REPORT.md

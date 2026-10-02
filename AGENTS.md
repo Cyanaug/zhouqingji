@@ -29,7 +29,9 @@
 2. `01_corpus_schema.md`：作品数据的唯一字段定义。
 3. `03_runner_and_coverage.md`：盲读记录、覆盖和入库规则。
 4. 涉及跟帖、投票或 UI 时，再读 `05_run_modes.md`、`04_app_and_design.md`。
-5. 接续工程前看 `PROGRESS.md`；历史设计理由在 `theater/NOTES.md`。
+5. 接续工程时先核对当前代码、版本与检查结果。私有开发仓若有 `PROGRESS.md`、
+   `theater/NOTES.md`，可读它们了解历史；公开发行包不附这两份内部记录，
+   不得因文件不存在而猜测进度或要求用户提供。
 
 ## 不可破坏的边界
 

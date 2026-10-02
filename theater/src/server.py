@@ -32,7 +32,14 @@ import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
 
+try:
+    from . import book_order
+except ImportError:  # python theater/src/server.py
+    import book_order
+
 ROOT = Path(__file__).resolve().parents[2]
+# 启动时固定当前后端代码身份；旧进程读取同一磁盘上的 VERSION 不能冒充新版本。
+AUTHOR_BUILD_ID = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()[:16]
 CORPUS = ROOT / "corpus" / "诗稿.json"
 BACKUPS = ROOT / "corpus" / ".backups"
 READS = ROOT / "results" / "reads" / "reads.jsonl"
@@ -42,6 +49,7 @@ VOTES = ROOT / "results" / "votes" / "votes.jsonl"
 CALIBRATION = ROOT / "results" / "calibration" / "scores.json"
 FAVS = ROOT / "corpus" / "作者偏爱.json"
 STANZAS = ROOT / "corpus" / "分段.json"
+BOOK_PROJECTS = ROOT / "corpus" / "诗集方案.json"
 PERSONAS = ROOT / "theater" / "personas" / "personas.json"
 PERSONAS_SIDECAR = ROOT / "corpus" / "personas.json"
 WEBAPP = Path(__file__).resolve().parent / "webapp"
@@ -49,9 +57,15 @@ VERSION_FILE = ROOT / "VERSION"
 PUBLIC_VERSION_URL = "https://raw.githubusercontent.com/Cyanaug/zhouqingji/main/VERSION"
 PUBLIC_ARCHIVE_URL = "https://github.com/Cyanaug/zhouqingji/archive/refs/tags/v{version}.zip"
 PUBLIC_REPO_URL = "https://github.com/Cyanaug/zhouqingji"
+# 这个地址只承载公开的 PWA 程序外壳，不承载作者作品或评论。正式发布前由
+# GitHub Pages 工作流部署；本地开发可用环境变量指向另一个 HTTPS 测试壳。
+DEFAULT_MOBILE_PWA_URL = "https://cyanaug.github.io/zhouqingji/mobile.html"
+# 官方空壳已独立部署并通过 marker/哈希验收；环境变量仍可让开发者指向测试壳。
+MOBILE_PWA_URL = (os.environ.get("ZQ_MOBILE_PWA_URL") or DEFAULT_MOBILE_PWA_URL).strip()
 UPDATE_MAX_DOWNLOAD = 50 * 1024 * 1024
 UPDATE_MAX_EXPANDED = 120 * 1024 * 1024
 UPDATE_MAX_FILES = 5000
+API_MAX_BODY = 32 * 1024 * 1024
 
 UPDATE_ROOT_FILES = {
     ".gitignore", "AGENTS.md", "CLAUDE.md", "LICENSE", "README.md", "VERSION",
@@ -62,7 +76,7 @@ UPDATE_ROOT_FILES = {
 UPDATE_PREFIXES = (
     ".agents/skills/", ".codex/agents/", ".claude/agents/", ".claude/skills/",
     ".github/workflows/", "theater/assets/", "theater/release/", "theater/src/",
-    "theater/tests/", "theater/vendor/",
+    "theater/tests/", "theater/tools/", "theater/vendor/",
 )
 UPDATE_THEATER_FILES = {
     "theater/NOTES.md", "theater/check.ps1", "theater/open-theater.ps1",
@@ -93,6 +107,8 @@ VIEW_CHOICES = ("boards", "readers", "timeline", "stats", "all")
 SETTINGS = ROOT / "corpus" / "settings.json"
 MOBILE_TRUST = ROOT / "corpus" / "mobile_trust.json"
 MOBILE_TRUST_SECONDS = 30 * 24 * 60 * 60
+MOBILE_TRUST_RENEW_WINDOW = 7 * 24 * 60 * 60
+MOBILE_SYNC_RECORD_INTERVAL = 5 * 60
 
 MIME = {".html": "text/html; charset=utf-8",
         ".css": "text/css; charset=utf-8",
@@ -488,6 +504,771 @@ def set_stanzas(payload):
     STANZAS.parent.mkdir(parents=True, exist_ok=True)
     STANZAS.write_text(json.dumps(st, ensure_ascii=False, indent=1),
                        encoding="utf-8")
+
+
+BOOK_SORT_MODES = ("manual", "time_asc", "time_desc", "quality_desc")
+BOOK_PAGE_SIZES = ("A5", "B5")
+BOOK_SECTION_STARTS = ("recto", "next")
+BOOK_DATE_POSITIONS = ("none", "under_title", "poem_end")
+BOOK_INTERIOR_COLORS = ("warm", "mono")
+BOOK_BLOCK_ALIGNS = ("left", "center")
+BOOK_RUNNING_HEAD_CONTENTS = ("book", "section", "both")
+BOOK_PAGE_KINDS = ("prose", "poem", "blank", "image")
+BOOK_IMAGE_WIDTHS = (40, 60, 80, 100)
+BOOK_IMAGE_ALIGNS = ("left", "center", "right")
+BOOK_IMAGE_FITS = ("contain", "cover")
+BOOK_TAILPIECE_PRESETS = {
+    "small": {"width_pct": 20, "height_mm": 16, "gap_pt": 12},
+    "standard": {"width_pct": 32, "height_mm": 24, "gap_pt": 18},
+    "large": {"width_pct": 48, "height_mm": 36, "gap_pt": 24},
+}
+# 插图图片库：按内容哈希落盘，任何方案可复用；目录在 corpus 下，私有且不进 release。
+BOOK_IMAGES_DIR = ROOT / "corpus" / "诗集图片"
+BOOK_IMAGE_MAX_BYTES = 10 * 1024 * 1024
+BOOK_IMAGE_MIMES = {".jpg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
+BOOK_APPENDIX_KEYS = ("author_notes", "scores", "author_marks", "comments")
+# 与 app.js 的 BOOK_TYPOGRAPHY_PROFILES 保持一致；新增 profile 时两处同步。
+BOOK_TYPOGRAPHY_PROFILE_IDS = ("qinglang-song-105-18", "shulang-song-11-22")
+BOOK_DEFAULT_PROFILE_ID = "qinglang-song-105-18"
+BOOK_PROFILE_OVERRIDE_RANGES = {
+    "topMm": (5, 40), "bottomMm": (5, 40), "innerMm": (5, 40), "outerMm": (5, 40),
+    "bodyPt": (8, 14), "leadingPt": (12, 30),
+}
+BOOK_SECTION_ID_RE = re.compile(r"section-[a-z0-9-]{6,48}")
+
+
+def _empty_book_projects():
+    return {"schema": 3, "books": []}
+
+
+# 方案侧车的结构版本。内部 schema 2 一次性备份迁移后，只保存单一编次。
+# 非当前格式只读保护，绝不让不理解该文件的程序覆盖它。
+BOOK_PROJECTS_SCHEMA = 3
+BOOK_PROJECTS_BACKUP_KEEP = 200
+BOOK_PROJECTS_LOCK = threading.RLock()
+AUTHOR_API_LEVEL = 3
+
+
+class BookRevisionConflict(ValueError):
+    """诗集方案被另一个页面或进程先一步保存。"""
+
+    def __init__(self, current_revision):
+        super().__init__("磁盘中的方案已更新；本页面的旧草稿没有覆盖它")
+        self.current_revision = current_revision
+
+
+def load_book_projects(strict=False):
+    """诗集工作台的作者侧车。普通方案只引用作品；显式分段编稿副本
+    会另存出版正文，不改冻结 corpus schema。读页面时容错；写入时严格拒绝
+    覆盖已损坏的方案文件，也拒绝降级覆盖由更新版本创建的文件。
+    """
+    if not BOOK_PROJECTS.exists():
+        return _empty_book_projects()
+    try:
+        data = json.loads(BOOK_PROJECTS.read_text(encoding="utf-8"))
+        if not isinstance(data, dict) or not isinstance(data.get("books"), list):
+            raise ValueError("books 必须是数组")
+        schema = data.get("schema")
+        if not isinstance(schema, int) or isinstance(schema, bool) or schema < 1:
+            raise ValueError("schema 缺失或无效")
+    except (OSError, json.JSONDecodeError, ValueError) as exc:
+        if strict:
+            raise ValueError("诗集方案文件无法解析；为避免覆盖原文件，本次保存已中止") from exc
+        data = _empty_book_projects()
+        data["error"] = "诗集方案文件无法解析；请先恢复备份再继续编辑。"
+        return data
+    if schema != BOOK_PROJECTS_SCHEMA:
+        # 不支持的旧/未来格式都原样带回并置只读；迁移只允许在已备份的离线操作中完成。
+        direction = "旧格式，请先迁移方案文件" if schema < BOOK_PROJECTS_SCHEMA else "更新版本创建，请升级应用"
+        error = (f"这份方案文件的格式与当前程序不同（schema {schema}，"
+                 f"当前 {BOOK_PROJECTS_SCHEMA}）；{direction}后再编辑。")
+        if strict:
+            raise ValueError(error + " 为避免降级破坏数据，本次保存已中止")
+        return {**data, "error": error, "readonly": True}
+    return data
+
+
+def _write_book_projects(data):
+    BOOK_PROJECTS.parent.mkdir(parents=True, exist_ok=True)
+    if BOOK_PROJECTS.exists():
+        BACKUPS.mkdir(parents=True, exist_ok=True)
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000:06d}"
+        shutil.copy2(BOOK_PROJECTS, BACKUPS / f"诗集方案-{stamp}.json")
+        # 备份封顶：只保留最近 N 份，长年使用也不会无限增长。
+        backups = sorted(BACKUPS.glob("诗集方案-*.json"))
+        for old in backups[:-BOOK_PROJECTS_BACKUP_KEEP]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+    tmp = BOOK_PROJECTS.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(BOOK_PROJECTS)
+
+
+def _detect_image_type(blob: bytes):
+    """只认文件魔数，不信任扩展名；返回 (ext, mime) 或 None。"""
+    png_magic = bytes((0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A))
+    if blob[:8] == png_magic:
+        return "png", "image/png"
+    if blob[:3] == bytes((0xFF, 0xD8, 0xFF)):
+        return "jpg", "image/jpeg"
+    if blob[:4] == b"RIFF" and blob[8:12] == b"WEBP":
+        return "webp", "image/webp"
+    return None
+
+
+def save_book_image(payload):
+    """插图上传：校验魔数与大小，按 sha256 前 16 位落盘（去重），返回图片 ID。
+    目录在 corpus 下私有保存，不进 release 允许清单。"""
+    data_b64 = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data_b64, str) or not data_b64:
+        raise ValueError("缺少图片数据")
+    try:
+        blob = base64.b64decode(data_b64, validate=True)
+    except Exception as exc:
+        raise ValueError("图片数据不是有效的 base64") from exc
+    if not blob:
+        raise ValueError("图片内容为空")
+    if len(blob) > BOOK_IMAGE_MAX_BYTES:
+        raise ValueError("图片超过 10MB 上限")
+    detected = _detect_image_type(blob)
+    if not detected:
+        raise ValueError("只支持 JPEG / PNG / WebP 图片")
+    ext, mime = detected
+    image_id = hashlib.sha256(blob).hexdigest()[:16]
+    BOOK_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+    target = BOOK_IMAGES_DIR / f"{image_id}.{ext}"
+    if not target.exists():
+        tmp = target.with_suffix(f".{ext}.tmp")
+        tmp.write_bytes(blob)
+        tmp.replace(target)
+    name = str(payload.get("name") or "").strip()[:120]
+    return {"image_id": image_id, "ext": ext, "mime": mime, "bytes": len(blob), "name": name}
+
+
+def load_book_image(image_id):
+    """按 ID 读取插图；ID 必须是 16 位十六进制，杜绝路径穿越。"""
+    if not re.fullmatch(r"[0-9a-f]{16}", str(image_id or "")):
+        raise ValueError("图片 ID 无效")
+    if not BOOK_IMAGES_DIR.exists():
+        raise ValueError("找不到这张图片")
+    for entry in BOOK_IMAGES_DIR.glob(f"{image_id}.*"):
+        mime = BOOK_IMAGE_MIMES.get(entry.suffix.lower())
+        if mime:
+            return entry, mime
+    raise ValueError("找不到这张图片")
+
+
+def list_book_images():
+    """列出作者私有图片库中的可复用图片，不暴露文件名或本机路径。"""
+    if not BOOK_IMAGES_DIR.exists():
+        return []
+    images = []
+    for entry in BOOK_IMAGES_DIR.iterdir():
+        if not entry.is_file() or not re.fullmatch(r"[0-9a-f]{16}", entry.stem):
+            continue
+        mime = BOOK_IMAGE_MIMES.get(entry.suffix.lower())
+        if not mime:
+            continue
+        try:
+            stat = entry.stat()
+        except OSError:
+            continue
+        images.append({
+            "image_id": entry.stem,
+            "mime": mime,
+            "bytes": stat.st_size,
+            "updated_at": int(stat.st_mtime),
+        })
+    images.sort(key=lambda item: (-item["updated_at"], item["image_id"]))
+    return images
+
+
+def _book_image_exists(image_id):
+    return (BOOK_IMAGES_DIR.exists()
+            and any(BOOK_IMAGES_DIR.glob(f"{image_id}.*")))
+
+
+def _book_image_references(book):
+    """把图片页和尾花投影为统一只读资源关系。"""
+    references = []
+    pages = ((book.get("inserts") or {}).values() if "order" in book
+             else (book.get("pages") or []))
+    for page in pages:
+        if not isinstance(page, dict) or page.get("kind") != "image":
+            continue
+        image_id = str(page.get("image_id") or "").strip()
+        if image_id:
+            references.append({
+                "image_id": image_id,
+                "role": "full-page",
+                "anchor": {"block_id": f"insert:{page.get('id') or ''}", "edge": "self"},
+            })
+    for poem_id, image_id in (book.get("tailpieces") or {}).items():
+        image_id = str(image_id or "").strip()
+        if image_id:
+            references.append({
+                "image_id": image_id,
+                "role": "poem-end-ornament",
+                "anchor": {"block_id": f"poem:{poem_id}", "edge": "end"},
+            })
+    return references
+
+
+def clean_orphan_book_images(dry_run=False):
+    """只统计当前方案未引用的候选图片；不代表可删除，不执行删除。"""
+    # 未保存草稿、备份以及未来扩展中的引用尚不能完整追踪。只提供候选统计，
+    # 显式调用也不得绕过保全边界；不把“当前方案未引用”等同于“可以删除”。
+    if not dry_run:
+        raise ValueError("图片清理暂只支持预览；备份与草稿引用尚未完整核验，不执行删除")
+    if not BOOK_IMAGES_DIR.exists():
+        return {"total": 0, "in_use": 0, "removed": 0, "freed_bytes": 0, "files": [], "dry_run": dry_run}
+    data = load_book_projects(strict=True)
+    in_use_ids = set()
+    for book in data.get("books", []):
+        in_use_ids.update(reference["image_id"] for reference in _book_image_references(book))
+    all_files = [f for f in BOOK_IMAGES_DIR.iterdir() if f.is_file()]
+    total_count = len(all_files)
+    removed_files = []
+    freed_bytes = 0
+    for file in all_files:
+        stem = file.stem.lower()
+        if stem not in in_use_ids:
+            size = file.stat().st_size
+            removed_files.append({"name": file.name, "image_id": stem, "bytes": size})
+            freed_bytes += size
+    return {
+        "total": total_count,
+        "in_use": len(in_use_ids),
+        "removed": len(removed_files),
+        "freed_bytes": freed_bytes,
+        "files": removed_files,
+        "dry_run": dry_run,
+    }
+
+
+
+def _book_text_hash(text):
+    """与前端 bookTextHash 相同的 UTF-16 FNV-1a 指纹，仅供修订失效判断。"""
+    encoded = text.encode("utf-16-le", errors="surrogatepass")
+    value = 0x811c9dc5
+    for at in range(0, len(encoded), 2):
+        value = ((value ^ (encoded[at] | encoded[at + 1] << 8)) * 0x01000193) & 0xffffffff
+    return f"{value:08x}"
+
+
+def _book_extensions(clean, raw, previous=None, reserved=()):
+    """只补未知字段；已知字段以校验结果为准，不复活删除的记录。"""
+    known = set(clean) | set(reserved)
+    result = {}
+    for source in (previous, raw):
+        if isinstance(source, dict):
+            result.update({key: value for key, value in source.items() if key not in known})
+    result.update(clean)
+    return result
+
+
+def _clean_book_project(raw, previous=None):
+    if not isinstance(raw, dict):
+        raise ValueError("诗集方案必须是对象")
+    previous = previous or {}
+    title = str(raw.get("title") or "").strip()
+    if not title:
+        raise ValueError("诗集名不能为空")
+    if len(title) > 120:
+        raise ValueError("诗集名不能超过 120 字")
+
+    book_id = str(raw.get("id") or "").strip()
+    if not book_id:
+        book_id = "book-" + secrets.token_hex(5)
+    if not re.fullmatch(r"book-[a-z0-9-]{6,48}", book_id):
+        raise ValueError("诗集方案 ID 无效")
+
+    poem_ids = raw.get("poem_ids", [])
+    if not isinstance(poem_ids, list) or not all(isinstance(x, str) for x in poem_ids):
+        raise ValueError("poem_ids 必须是字符串数组")
+    corpus_by_id = {p["id"]: p for p in load_corpus()}
+    known = set(corpus_by_id)
+    ordered, seen = [], set()
+    for poem_id in poem_ids:
+        if poem_id not in known:
+            raise ValueError(f"找不到作品：{poem_id}")
+        if poem_id not in seen:
+            ordered.append(poem_id)
+            seen.add(poem_id)
+
+    sort_mode = raw.get("sort_mode", "manual")
+    if sort_mode not in BOOK_SORT_MODES:
+        raise ValueError("诗集排序方式无效")
+    layout = raw.get("layout") or {}
+    if not isinstance(layout, dict):
+        raise ValueError("layout 必须是对象")
+    page_size = layout.get("page_size", "A5")
+    if page_size not in BOOK_PAGE_SIZES:
+        raise ValueError("页面尺寸只能是 A5/B5")
+    start_each_poem = layout.get("start_each_poem", True)
+    if not isinstance(start_each_poem, bool):
+        raise ValueError("start_each_poem 必须是布尔值")
+    running_head = layout.get("running_head", True)
+    folio = layout.get("folio", True)
+    if not isinstance(running_head, bool) or not isinstance(folio, bool):
+        raise ValueError("页眉与页码开关必须是布尔值")
+    section_start = layout.get("section_start", "recto")
+    if section_start not in BOOK_SECTION_STARTS:
+        raise ValueError("分辑扉页只能右页起或紧接下一页")
+    date_position = layout.get("date_position", "none")
+    if date_position not in BOOK_DATE_POSITIONS:
+        raise ValueError("写作时间位置无效")
+    interior_color = layout.get("interior_color", "warm")
+    if interior_color not in BOOK_INTERIOR_COLORS:
+        raise ValueError("书芯颜色只能是暖红点色或黑白")
+    block_align = layout.get("block_align", "left")
+    if block_align not in BOOK_BLOCK_ALIGNS:
+        raise ValueError("诗节对齐只能是左对齐或居中成块")
+    running_head_content = layout.get("running_head_content", "book")
+    if running_head_content not in BOOK_RUNNING_HEAD_CONTENTS:
+        raise ValueError("页眉内容只能是书名、辑名或两者")
+    show_numbering = layout.get("show_numbering", True)
+    continue_hint = layout.get("continue_hint", False)
+    if not isinstance(show_numbering, bool) or not isinstance(continue_hint, bool):
+        raise ValueError("“第 N 首”编号与页底未完提示必须是布尔值")
+
+    profile_id = layout.get("profile_id")
+    if profile_id is not None:
+        if not isinstance(profile_id, str) or profile_id not in BOOK_TYPOGRAPHY_PROFILE_IDS:
+            raise ValueError("未知版式 profile")
+    overrides_raw = layout.get("profile_overrides") or {}
+    if not isinstance(overrides_raw, dict):
+        raise ValueError("profile_overrides 必须是对象")
+    clean_overrides = {}
+    for key, value in overrides_raw.items():
+        if key not in BOOK_PROFILE_OVERRIDE_RANGES:
+            raise ValueError(f"不允许覆盖版式参数：{key}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"版式参数 {key} 必须是数字")
+        low, high = BOOK_PROFILE_OVERRIDE_RANGES[key]
+        if not low <= value <= high:
+            raise ValueError(f"版式参数 {key} 超出允许范围 {low}–{high}")
+        clean_overrides[key] = float(value)
+
+    # 前置页：只保存作者显式填写的书名页开关与出版说明文字；
+    # 不编造出版社、ISBN、版次等任何出版信息。旧方案缺少该键时等价于关闭。
+    front_matter = raw.get("front_matter") or {}
+    if not isinstance(front_matter, dict):
+        raise ValueError("front_matter 必须是对象")
+    title_page = front_matter.get("title_page", False)
+    if not isinstance(title_page, bool):
+        raise ValueError("front_matter.title_page 必须是布尔值")
+    colophon_raw = front_matter.get("colophon", "")
+    if not isinstance(colophon_raw, str):
+        raise ValueError("front_matter.colophon 必须是字符串")
+    colophon = colophon_raw.strip()
+    if len(colophon) > 2000:
+        raise ValueError("出版说明最长 2000 字")
+    # 题词/献词页按出版惯例只有正文、无标题，放在书名页之前；一页放不下就失去
+    # “一页题词”的语义，因此限制比出版说明更紧。
+    dedication_raw = front_matter.get("dedication", "")
+    if not isinstance(dedication_raw, str):
+        raise ValueError("front_matter.dedication 必须是字符串")
+    dedication = dedication_raw.strip()
+    if len(dedication) > 500:
+        raise ValueError("题词最长 500 字")
+
+    sections = raw.get("sections") or []
+    if not isinstance(sections, list):
+        raise ValueError("sections 必须是数组")
+    if len(sections) > 100:
+        raise ValueError("分辑不能超过 100 个")
+    clean_sections, section_ids, section_anchors = [], set(), set()
+    section_sources = {}
+    for section in sections:
+        if not isinstance(section, dict):
+            raise ValueError("分辑必须是对象")
+        section_id = str(section.get("id") or "").strip()
+        if not section_id:
+            section_id = "section-" + secrets.token_hex(5)
+        if not BOOK_SECTION_ID_RE.fullmatch(section_id):
+            raise ValueError("分辑 ID 无效")
+        if section_id in section_ids:
+            raise ValueError("分辑 ID 重复")
+        # 分辑名用独立变量：不得覆盖外层书名 title（书名要在函数末尾返回）。
+        section_title = str(section.get("title") or "").strip()
+        if not section_title:
+            raise ValueError("分辑名不能为空")
+        if len(section_title) > 120:
+            raise ValueError("分辑名不能超过 120 字")
+        before_poem_id = str(section.get("before_poem_id") or "").strip()
+        if before_poem_id not in seen:
+            raise ValueError("分辑起点必须是已入集作品")
+        if before_poem_id in section_anchors:
+            raise ValueError("同一首作品前只能放一个分辑")
+        clean_sections.append({
+            "id": section_id,
+            "title": section_title,
+            "subtitle": str(section.get("subtitle") or "").strip()[:240],
+            "before_poem_id": before_poem_id,
+        })
+        section_sources[section_id] = section
+        section_ids.add(section_id)
+        section_anchors.add(before_poem_id)
+    poem_order = {poem_id: index for index, poem_id in enumerate(ordered)}
+    clean_sections.sort(key=lambda section: poem_order[section["before_poem_id"]])
+
+    # 诗集校样分行只保存 Unicode 字符流中的换行位置，不复制正文。source_hash
+    # 与当前原文一致时同时核验位置上界；原文更新后的旧记录允许保留但渲染层会停用，
+    # 这样作者保存方案时不会悄悄丢掉曾做过的校样。
+    proof_breaks = raw.get("proof_breaks")
+    if proof_breaks is None:
+        proof_breaks = {}
+    if not isinstance(proof_breaks, dict):
+        raise ValueError("proof_breaks 必须是对象")
+    if len(proof_breaks) > len(ordered):
+        raise ValueError("校样分行只能用于已入集作品")
+    clean_proof_breaks = {}
+    for poem_id, record in proof_breaks.items():
+        if poem_id not in seen:
+            raise ValueError("校样分行只能用于已入集作品")
+        if not isinstance(record, dict):
+            raise ValueError("校样分行记录必须是对象")
+        source_hash = record.get("source_hash")
+        positions = record.get("positions")
+        if not isinstance(source_hash, str) or not source_hash or len(source_hash) > 160:
+            raise ValueError("校样分行缺少有效 source_hash")
+        if (not isinstance(positions, list) or len(positions) > 10000
+                or any(isinstance(value, bool) or not isinstance(value, int)
+                       or value < 0 or value > 200000 for value in positions)
+                or positions != sorted(positions)):
+            raise ValueError("校样分行位置必须是递增的非负整数数组")
+        clean_proof_breaks[poem_id] = {
+            "source_hash": source_hash,
+            "positions": positions,
+        }
+
+    versions = raw.get("versions")
+    if versions is None:
+        versions = {}
+    if not isinstance(versions, dict):
+        raise ValueError("versions 必须是对象")
+    if len(versions) > len(ordered):
+        raise ValueError("出版版本数量超过入集作品数")
+    clean_versions = {}
+    for poem_id, record in versions.items():
+        if poem_id not in seen:
+            raise ValueError("出版版本只能用于已入集作品")
+        if not isinstance(record, dict):
+            raise ValueError("出版版本记录必须是对象")
+        source_hash = record.get("source_hash")
+        if not isinstance(source_hash, str) or not source_hash or len(source_hash) > 160:
+            raise ValueError("出版版本缺少有效 source_hash")
+        content = str(record.get("content") or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
+        if not content.strip():
+            raise ValueError("出版版本正文不能为空；撤销改字请删除该记录")
+        if len(content) > 20000:
+            raise ValueError("出版版本正文过长（上限 20000 字）")
+        clean_versions[poem_id] = {"source_hash": source_hash, "content": content}
+
+    # Opt-in copy editing: each text node owns one stable identity. Its text is
+    # concatenated verbatim; there is no second writable version for that poem.
+    content_edit_copy = raw.get("content_edit_copy", False)
+    if not isinstance(content_edit_copy, bool):
+        raise ValueError("content_edit_copy 必须是布尔值")
+    body_nodes = raw.get("body_nodes", {})
+    if not isinstance(body_nodes, dict) or (body_nodes and not content_edit_copy):
+        raise ValueError("分段正文只允许在显式编稿副本中保存")
+    if len(body_nodes) > len(ordered):
+        raise ValueError("分段正文只能用于已入集作品")
+    clean_body_nodes = {}
+    for poem_id, record in body_nodes.items():
+        if poem_id not in seen or not isinstance(record, dict):
+            raise ValueError("分段正文引用了无效作品")
+        if poem_id in clean_versions or poem_id in clean_proof_breaks:
+            raise ValueError("同一首诗不能同时保存分段正文与旧式改稿/分行")
+        source_hash = record.get("source_hash")
+        if not isinstance(source_hash, str) or not source_hash or len(source_hash) > 160:
+            raise ValueError("分段正文缺少源稿指纹")
+        nodes = record.get("nodes")
+        if not isinstance(nodes, list) or not 1 <= len(nodes) <= 500:
+            raise ValueError("分段正文节点数量无效")
+        clean_nodes, node_ids = [], set()
+        for node in nodes:
+            if not isinstance(node, dict) or node.get("kind") != "text":
+                raise ValueError("当前分段正文只支持文字节点")
+            node_id, text = node.get("id"), node.get("text")
+            if (not isinstance(node_id, str) or not re.fullmatch(r"block-[a-z0-9-]{6,48}", node_id)
+                    or node_id in node_ids or not isinstance(text, str) or "\r" in text):
+                raise ValueError("分段正文节点 ID 或文字无效")
+            node_ids.add(node_id)
+            clean_nodes.append({"id": node_id, "kind": "text", "text": text})
+        text = "".join(node["text"] for node in clean_nodes)
+        if not text.strip() or len(text) > 20000:
+            raise ValueError("分段正文不能为空或超过 20000 字")
+        clean_body_nodes[poem_id] = {"source_hash": source_hash, "nodes": clean_nodes}
+
+    # 断点与前端一样作用于生效文本；过期记录保留但不应用。
+    for poem_id, record in clean_proof_breaks.items():
+        poem = corpus_by_id[poem_id]
+        version = clean_versions.get(poem_id)
+        content = (version["content"] if version and version["source_hash"] == poem.get("content_hash")
+                   else str(poem.get("content") or ""))
+        plain = content.replace("\r\n", "\n").replace("\r", "\n").replace("\n", "")
+        text_hash = proof_breaks[poem_id].get("text_hash")
+        if text_hash is not None:
+            if not isinstance(text_hash, str) or not re.fullmatch(r"[0-9a-f]{8}", text_hash):
+                raise ValueError("校样分行 text_hash 无效")
+            record["text_hash"] = text_hash
+        if record["source_hash"] == poem.get("content_hash") and (
+                text_hash is None or text_hash == _book_text_hash(plain)):
+            if any(value > len(plain) for value in record["positions"]):
+                raise ValueError("校样分行位置超出当前原文或生效出版文本")
+
+    appendices = raw.get("appendices") or {}
+    if not isinstance(appendices, dict):
+        raise ValueError("appendices 必须是对象")
+    clean_appendices = {}
+    for key in BOOK_APPENDIX_KEYS:
+        value = appendices.get(key, False)
+        if not isinstance(value, bool):
+            raise ValueError(f"appendices.{key} 必须是布尔值")
+        clean_appendices[key] = value
+
+    pages = raw.get("pages")
+    if pages is None:
+        pages = []
+    if not isinstance(pages, list):
+        raise ValueError("pages 必须是数组")
+    if len(pages) > 200:
+        raise ValueError("插入页过多（上限 200 页）")
+    clean_pages = []
+    page_ids = set()
+    for item in pages:
+        if not isinstance(item, dict):
+            raise ValueError("插入页必须是对象")
+        page_id = str(item.get("id") or "").strip()
+        if not page_id or len(page_id) > 64 or page_id in page_ids:
+            raise ValueError("插入页 id 无效或重复")
+        kind = item.get("kind", "prose")
+        if kind not in BOOK_PAGE_KINDS:
+            raise ValueError("插入页款式只能是文字页、诗页、空白页或图片页")
+        page_title = str(item.get("title") or "").strip()[:60]
+        body = str(item.get("body") or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+        if len(body) > 20000:
+            raise ValueError("插入页正文过长（上限 20000 字）")
+        placement = str(item.get("placement") or "front")
+        if placement not in ("front", "back") and not (
+                placement.startswith("before:") and placement[7:] in seen):
+            raise ValueError("插入页位置无效：只能是 front、back 或已入集作品前")
+        toc = item.get("toc", kind != "image")
+        if not isinstance(toc, bool):
+            raise ValueError("插入页进目录必须是布尔值")
+        image_id = ""
+        image_layout = None
+        if kind == "image":
+            # 图片页必须引用已上传的插图；图注进 title，正文不适用。
+            image_id = str(item.get("image_id") or "")
+            if not re.fullmatch(r"[0-9a-f]{16}", image_id) or not _book_image_exists(image_id):
+                raise ValueError("图片页必须引用已上传的图片")
+            layout_raw = item.get("image_layout") or {}
+            if not isinstance(layout_raw, dict):
+                raise ValueError("image_layout 必须是对象")
+            width_pct = layout_raw.get("width_pct", 100)
+            align = layout_raw.get("align", "center")
+            fit = layout_raw.get("fit", "contain")
+            focal_x = layout_raw.get("focal_x", 50)
+            focal_y = layout_raw.get("focal_y", 50)
+            if isinstance(width_pct, bool) or width_pct not in BOOK_IMAGE_WIDTHS:
+                raise ValueError("图片宽度只能是 40/60/80/100%")
+            if align not in BOOK_IMAGE_ALIGNS:
+                raise ValueError("图片对齐方式无效")
+            if fit not in BOOK_IMAGE_FITS:
+                raise ValueError("图片适应方式无效")
+            if any(isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100
+                   for value in (focal_x, focal_y)):
+                raise ValueError("图片焦点必须在 0–100 之间")
+            image_layout = {"width_pct": width_pct, "align": align, "fit": fit,
+                            "focal_x": focal_x, "focal_y": focal_y}
+            body = ""
+        if kind == "blank":
+            page_title, body, toc = "", "", False
+        page_ids.add(page_id)
+        entry = {"id": page_id, "kind": kind, "title": page_title,
+                 "body": body, "placement": placement, "toc": toc}
+        if kind == "image":
+            entry["image_id"] = image_id
+            entry["image_layout"] = image_layout
+        clean_pages.append(entry)
+
+    tailpieces = raw.get("tailpieces")
+    if tailpieces is None:
+        tailpieces = {}
+    if not isinstance(tailpieces, dict):
+        raise ValueError("tailpieces 必须是对象")
+    clean_tailpieces = {}
+    for poem_id, img_id in tailpieces.items():
+        if poem_id not in seen:
+            continue
+        img_id_str = str(img_id or "").strip()
+        if img_id_str:
+            if not re.fullmatch(r"[0-9a-f]{16}", img_id_str) or not _book_image_exists(img_id_str):
+                raise ValueError("尾花插图必须引用已上传的图片")
+            clean_tailpieces[poem_id] = img_id_str
+
+    tailpiece_layouts = raw.get("tailpiece_layouts") or {}
+    if not isinstance(tailpiece_layouts, dict):
+        raise ValueError("tailpiece_layouts 必须是对象")
+    clean_tailpiece_layouts = {}
+    for poem_id, layout_raw in tailpiece_layouts.items():
+        if poem_id not in clean_tailpieces:
+            continue
+        if not isinstance(layout_raw, dict):
+            raise ValueError("尾花版式必须是对象")
+        size = layout_raw.get("size")
+        if size is None:
+            # 兼容 2026-09-22 尚未公开的宽度试验字段，不要求作者迁移。
+            size = {20: "small", 32: "standard", 45: "large", 48: "large"}.get(
+                layout_raw.get("width_pct"), "standard")
+        align = layout_raw.get("align", "center")
+        if size not in BOOK_TAILPIECE_PRESETS:
+            raise ValueError("诗末装饰图大小只能是 small/standard/large")
+        if align not in BOOK_IMAGE_ALIGNS:
+            raise ValueError("诗末装饰图对齐方式无效")
+        clean_tailpiece_layouts[poem_id] = {"size": size, "align": align}
+
+    now = now_iso()
+    result = {
+        "id": book_id,
+        "title": title,
+        "subtitle": str(raw.get("subtitle") or "").strip()[:240],
+        "author": str(raw.get("author") or "").strip()[:120],
+        "poem_ids": ordered,
+        "sections": clean_sections,
+        "proof_breaks": clean_proof_breaks,
+        "versions": clean_versions,
+        "content_edit_copy": content_edit_copy,
+        "body_nodes": clean_body_nodes,
+        "pages": clean_pages,
+        "tailpieces": clean_tailpieces,
+        "tailpiece_layouts": clean_tailpiece_layouts,
+        "front_matter": {"title_page": title_page, "colophon": colophon, "dedication": dedication},
+        "sort_mode": sort_mode,
+        "layout": {
+            "page_size": page_size,
+            "start_each_poem": start_each_poem,
+            "running_head": running_head,
+            "folio": folio,
+            "section_start": section_start,
+            "date_position": date_position,
+            "interior_color": interior_color,
+            "block_align": block_align,
+            "running_head_content": running_head_content,
+            "show_numbering": show_numbering,
+            "continue_hint": continue_hint,
+            "profile_id": profile_id or BOOK_DEFAULT_PROFILE_ID,
+            "profile_overrides": clean_overrides,
+        },
+        # 附录开关先进 manifest，界面与渲染层后续逐项实现；默认全关，不挤诗正文。
+        "appendices": clean_appendices,
+        "created_at": previous.get("created_at") or now,
+        "updated_at": now,
+        "archived_at": previous.get("archived_at"),
+        # revision 由 update_book_projects 在 CAS 校验后递增；这里先将它
+        # 声明为已知字段，避免未经校验的客户端值被未知键保留逻辑带回。
+        "revision": 0,
+    }
+    # 扩展字段随同一稳定记录往返；数组/映射的成员删除仍由作者输入决定。
+    for key in ("layout", "front_matter", "appendices"):
+        result[key] = _book_extensions(result[key], raw.get(key), previous.get(key))
+    for key in ("sections", "pages"):
+        incoming = section_sources if key == "sections" else {item.get("id"): item for item in raw.get(key, []) or []}
+        prior = {item.get("id"): item for item in previous.get(key, []) or []
+                 if isinstance(item, dict)}
+        result[key] = [_book_extensions(item, incoming.get(item["id"]), prior.get(item["id"]),
+                                        reserved=("image_id", "imageId") if key == "pages" else ())
+                       for item in result[key]]
+    for key in ("versions", "proof_breaks"):
+        incoming = raw.get(key) or {}
+        prior = previous.get(key) or {}
+        result[key] = {pid: _book_extensions(item, incoming.get(pid), prior.get(pid),
+                                            reserved=("text_hash",) if key == "proof_breaks" else ())
+                       for pid, item in result[key].items()}
+    return _book_extensions(result, raw, previous)
+
+
+def _clean_order_book_project(raw, previous=None):
+    """Validate one canonical order without persisting legacy placement fields.
+
+    The legacy projection borrows field checks only; returned data contains a
+    single order. Existing schema-2 sidecars remain read-only until migrated.
+    """
+    known = {poem["id"] for poem in load_corpus()}
+    book_order.validate(raw, known)
+    prior_projection = (book_order.legacy_validation_projection(previous)
+                        if isinstance(previous, dict) and "order" in previous else previous)
+    projected = book_order.legacy_validation_projection(raw)
+    cleaned = _clean_book_project(projected, prior_projection)
+    result = book_order.from_validated_projection(raw["order"], cleaned)
+    book_order.validate(result, known)
+    return result
+
+
+def _update_book_projects_locked(payload):
+    """方案写入入口：save / archive / restore。archive 只打标记，不删记录。"""
+    action = payload.get("action", "save")
+    data = load_book_projects(strict=True)
+    books = data["books"]
+    if action == "save":
+        raw = payload.get("book")
+        raw_id = (raw or {}).get("id") if isinstance(raw, dict) else None
+        previous = next((b for b in books if b.get("id") == raw_id), None)
+        current_revision = previous.get("revision", 0) if previous else 0
+        if (isinstance(current_revision, bool) or not isinstance(current_revision, int)
+                or current_revision < 0):
+            current_revision = 0
+        expected_revision = payload.get("expected_revision")
+        if expected_revision is not None:
+            if (isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+                    or expected_revision < 0):
+                raise ValueError("expected_revision 必须是非负整数")
+            if expected_revision != current_revision:
+                raise BookRevisionConflict(current_revision)
+        clean = _clean_order_book_project(raw, previous)
+        clean["revision"] = current_revision + 1
+        if previous:
+            books[books.index(previous)] = clean
+        else:
+            if any(b.get("id") == clean["id"] for b in books):
+                raise ValueError("诗集方案 ID 重复")
+            books.append(clean)
+        _write_book_projects(data)
+        return {"book": clean, "book_projects": data}
+
+    if action not in ("archive", "restore"):
+        raise ValueError("诗集方案动作无效")
+    book_id = str(payload.get("id") or "")
+    book = next((b for b in books if b.get("id") == book_id), None)
+    if book is None:
+        raise ValueError("找不到诗集方案")
+    current_revision = book.get("revision", 0)
+    if isinstance(current_revision, bool) or not isinstance(current_revision, int) or current_revision < 0:
+        current_revision = 0
+    expected_revision = payload.get("expected_revision")
+    if expected_revision is not None:
+        if (isinstance(expected_revision, bool) or not isinstance(expected_revision, int)
+                or expected_revision < 0):
+            raise ValueError("expected_revision 必须是非负整数")
+        if expected_revision != current_revision:
+            raise BookRevisionConflict(current_revision)
+    book["archived_at"] = now_iso() if action == "archive" else None
+    book["updated_at"] = now_iso()
+    book["revision"] = current_revision + 1
+    _write_book_projects(data)
+    return {"book": book, "book_projects": data}
+
+
+def update_book_projects(payload):
+    """将读取当前修订、CAS 校验和原子替换放在同一进程锁内。"""
+    with BOOK_PROJECTS_LOCK:
+        return _update_book_projects_locked(payload)
 
 
 def load_settings_file():
@@ -1021,6 +1802,7 @@ def build_author_state():
         "persona_echo": build_persona_echo(reads, personas, curation, votes),
         "favs": load_favs(),
         "stanzas": load_stanzas(),
+        "book_projects": load_book_projects(),
         "calibration": load_calibration(),
         "settings": load_settings(),
         "version": app_version(),
@@ -1125,6 +1907,38 @@ def _local_ipv4s():
     return sorted(out, key=lambda x: tuple(int(p) for p in x.split(".")))
 
 
+def _mobile_pwa_parts():
+    """返回公开移动壳的规范 URL 与 origin；配置错误时宁可关闭该入口。"""
+    try:
+        parsed = urllib.parse.urlsplit(MOBILE_PWA_URL)
+    except (TypeError, ValueError):
+        return None
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment):
+        return None
+    path = parsed.path or "/mobile.html"
+    origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+    url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path, "", ""))
+    return {"url": url, "origin": origin}
+
+
+def _is_lan_mobile_endpoint(value, port=None):
+    """公开 PWA 只可被配对到明确的 RFC1918 局域网 HTTP 入口。"""
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        ip = ipaddress.ip_address(parsed.hostname or "")
+        parsed_port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    private = (ip in ipaddress.ip_network("10.0.0.0/8")
+               or ip in ipaddress.ip_network("172.16.0.0/12")
+               or ip in ipaddress.ip_network("192.168.0.0/16"))
+    return (private and parsed.scheme == "http" and parsed.username is None
+            and parsed.password is None and parsed.path in {"", "/"}
+            and not parsed.query and not parsed.fragment
+            and (port is None or parsed_port == port))
+
+
 _QR_MODULE = None
 
 
@@ -1164,6 +1978,29 @@ class MobileHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
+    def _pwa_origin(self):
+        origin = self.headers.get("Origin", "")
+        allowed = getattr(self.server, "mobile_pwa_origin", "")
+        return origin if origin and allowed and hmac.compare_digest(origin, allowed) else ""
+
+    def _cors_headers(self):
+        origin = self._pwa_origin()
+        if not origin:
+            return {}
+        headers = {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Methods": "GET, OPTIONS",
+            "Access-Control-Allow-Headers": "X-ZQ-Mobile-Token, If-None-Match",
+            "Access-Control-Expose-Headers": "ETag",
+            "Access-Control-Max-Age": "600",
+            "Vary": "Origin",
+            "Cross-Origin-Resource-Policy": "cross-origin",
+        }
+        # 兼容仍发送旧 PNA 预检头的 Chromium 版本；新 LNA 权限不会依赖它。
+        if self.headers.get("Access-Control-Request-Private-Network") == "true":
+            headers["Access-Control-Allow-Private-Network"] = "true"
+        return headers
+
     def _send(self, code, body=b"", ctype="application/json; charset=utf-8",
               cache="no-store", headers=None):
         data = body if isinstance(body, bytes) else \
@@ -1175,16 +2012,21 @@ class MobileHandler(BaseHTTPRequestHandler):
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+        merged = {**self._cors_headers(), **(headers or {})}
+        self.send_header("Cross-Origin-Resource-Policy",
+                         merged.pop("Cross-Origin-Resource-Policy", "same-origin"))
         self.send_header("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
-        for key, value in (headers or {}).items():
+        for key, value in merged.items():
             self.send_header(key, value)
         self.end_headers()
         if data:
             self.wfile.write(data)
 
-    def _authorized(self):
+    def _authorized(self, renew=False):
         supplied = self.headers.get("X-ZQ-Mobile-Token", "")
+        access = getattr(self.server, "mobile_access", None)
+        if access:
+            return access.authorize(supplied, renew=renew)
         return bool(supplied) and hmac.compare_digest(supplied, self.server.mobile_token)
 
     def _query_pair(self):
@@ -1195,10 +2037,23 @@ class MobileHandler(BaseHTTPRequestHandler):
         return supplied if supplied and hmac.compare_digest(
             supplied, self.server.mobile_token) else ""
 
+    def do_OPTIONS(self):
+        path = urllib.parse.urlsplit(self.path).path
+        if path not in {"/api/mobile-state", "/api/wordcloud", "/api/word-context"}:
+            return self._send(404, {"error": "not found"})
+        if not self._pwa_origin():
+            return self._send(403, {"error": "移动应用来源未获允许"})
+        requested = {item.strip().lower() for item in
+                     self.headers.get("Access-Control-Request-Headers", "").split(",")
+                     if item.strip()}
+        if not requested.issubset({"x-zq-mobile-token", "if-none-match"}):
+            return self._send(403, {"error": "移动应用请求头未获允许"})
+        return self._send(204, b"")
+
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/api/mobile-state":
-            if not self._authorized():
+            if not self._authorized(renew=True):
                 return self._send(401, {"error": "手机访问口令无效，请从电脑重新扫码。"})
             snapshot = build_mobile_snapshot(include_wordcloud=False)
             etag = '"' + snapshot["mobile"]["content_hash"] + '"'
@@ -1259,9 +2114,10 @@ class MobileAccess:
         self.port = None
         self.trusted = False
         self.trust_expires_at = None
+        self.last_sync_at = None
 
     @staticmethod
-    def _load_trust():
+    def _load_trust(allow_expired=False):
         if not MOBILE_TRUST.exists():
             return None
         try:
@@ -1269,16 +2125,20 @@ class MobileAccess:
             token = data.get("token")
             port = data.get("port")
             expires_at = float(data.get("expires_at", 0))
+            last_sync_at = data.get("last_sync_at")
+            if last_sync_at is not None:
+                last_sync_at = float(last_sync_at)
             if (data.get("schema") != 1 or not isinstance(token, str) or len(token) < 24
                     or not isinstance(port, int) or not 1024 <= port <= 65535
-                    or expires_at <= time.time()):
+                    or expires_at <= 0 or (expires_at <= time.time() and not allow_expired)):
                 return None
-            return {"token": token, "port": port, "expires_at": expires_at}
+            return {"token": token, "port": port, "expires_at": expires_at,
+                    "last_sync_at": last_sync_at}
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return None
 
     @staticmethod
-    def _save_trust(token, port, expires_at):
+    def _save_trust(token, port, expires_at, last_sync_at=None):
         MOBILE_TRUST.parent.mkdir(parents=True, exist_ok=True)
         tmp = MOBILE_TRUST.with_suffix(".tmp")
         tmp.write_text(json.dumps({
@@ -1286,6 +2146,7 @@ class MobileAccess:
             "token": token,
             "port": port,
             "expires_at": expires_at,
+            "last_sync_at": last_sync_at,
         }, ensure_ascii=False, indent=2), encoding="utf-8")
         try:
             os.chmod(tmp, 0o600)
@@ -1317,21 +2178,28 @@ class MobileAccess:
                 return self.status()
             if self.server:
                 self.stop()
-            saved = _saved or (self._load_trust() if trusted else None)
+            # 自动恢复只接受仍有效的签；作者在桌面明确重新开启时，可以延续已经
+            # 过期的同一张签，从而让已安装手机恢复同步而无需重新扫码。
+            saved = _saved or (self._load_trust(allow_expired=True) if trusted else None)
             token = saved["token"] if saved else secrets.token_urlsafe(24)
-            expires_at = saved["expires_at"] if saved else (
-                time.time() + MOBILE_TRUST_SECONDS if trusted else None)
+            expires_at = saved["expires_at"] if saved else None
+            if trusted and (not expires_at or expires_at <= time.time()):
+                expires_at = time.time() + MOBILE_TRUST_SECONDS
             try:
                 server = MobileHTTPServer(("0.0.0.0", port), MobileHandler)
             except OSError as exc:
                 raise ValueError(f"端口 {port} 无法开启：{exc}") from exc
             server.mobile_token = token
+            server.mobile_access = self
+            parts = _mobile_pwa_parts()
+            server.mobile_pwa_origin = parts["origin"] if parts else ""
             thread = threading.Thread(target=server.serve_forever,
                                       name="zhouqingji-mobile", daemon=True)
             self.server, self.thread, self.token, self.port = server, thread, token, port
             self.trusted, self.trust_expires_at = trusted, expires_at
+            self.last_sync_at = saved.get("last_sync_at") if saved else None
             if trusted:
-                self._save_trust(token, port, expires_at)
+                self._save_trust(token, port, expires_at, self.last_sync_at)
             thread.start()
             return self.status()
 
@@ -1341,7 +2209,7 @@ class MobileAccess:
         with self._lock:
             server, thread = self.server, self.thread
             self.server = self.thread = self.token = self.port = None
-            self.trusted, self.trust_expires_at = False, None
+            self.trusted, self.trust_expires_at, self.last_sync_at = False, None, None
             if revoke:
                 self._delete_trust()
         if server:
@@ -1351,18 +2219,85 @@ class MobileAccess:
             thread.join(timeout=3)
         return self.status()
 
+    def renew(self):
+        """作者从桌面延长现有可信签；不换 token，手机无需重新扫码。"""
+        with self._lock:
+            if not self.server or not self.trusted or not self.token:
+                raise ValueError("当前没有可续期的可信手机入口")
+            self.trust_expires_at = time.time() + MOBILE_TRUST_SECONDS
+            self._save_trust(self.token, self.port, self.trust_expires_at,
+                             self.last_sync_at)
+        return self.status()
+
+    def authorize(self, supplied, renew=False):
+        """校验正在运行的签，并在真实快照同步临近到期时低频续期。"""
+        if not supplied:
+            return False
+        with self._lock:
+            if (not self.server or not self.token
+                    or not hmac.compare_digest(supplied, self.token)):
+                return False
+            now = time.time()
+            if self.trusted and (not self.trust_expires_at
+                                 or self.trust_expires_at <= now):
+                return False
+            if renew:
+                previous_sync = self.last_sync_at or 0
+                should_record = now - previous_sync >= MOBILE_SYNC_RECORD_INTERVAL
+                should_extend = (self.trusted and self.trust_expires_at - now
+                                 <= MOBILE_TRUST_RENEW_WINDOW)
+                if should_record:
+                    self.last_sync_at = now
+                if should_extend:
+                    self.trust_expires_at = now + MOBILE_TRUST_SECONDS
+                if self.trusted and (should_record or should_extend):
+                    self._save_trust(self.token, self.port, self.trust_expires_at,
+                                     self.last_sync_at)
+            return True
+
     def status(self):
         with self._lock:
             running, port, token = bool(self.server), self.port, self.token
             trusted, expires_at = self.trusted, self.trust_expires_at
+            last_sync_at = self.last_sync_at
+        expired = bool(trusted and expires_at and expires_at <= time.time())
         urls = []
         if running:
             urls = [f"http://{ip}:{port}/?pair={token}" for ip in _local_ipv4s()]
+        pwa_urls = [self.pwa_pair_url(url) for url in urls]
+        pwa_urls = [url for url in pwa_urls if url]
+        pwa = _mobile_pwa_parts()
         return {"running": running, "port": port, "urls": urls,
+                "pwa_urls": pwa_urls, "pwa_shell_url": pwa["url"] if pwa else None,
                 "token": token if running else None, "trusted": trusted,
+                "trust_expired": expired,
                 "trust_expires_at": (time.strftime("%Y-%m-%dT%H:%M:%S%z",
                                      time.localtime(expires_at))
-                                     if trusted and expires_at else None)}
+                                     if trusted and expires_at else None),
+                "last_sync_at": (time.strftime("%Y-%m-%dT%H:%M:%S%z",
+                                 time.localtime(last_sync_at))
+                                 if last_sync_at else None)}
+
+    def pwa_pair_url(self, local_url):
+        """生成只在 URL fragment 携带口令的 Android 离线壳配对地址。"""
+        with self._lock:
+            token, port = (self.token, self.port) if self.server else (None, None)
+        pwa = _mobile_pwa_parts()
+        if not token or not pwa:
+            return None
+        try:
+            parsed = urllib.parse.urlsplit(local_url)
+            query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+            supplied = (query.get("pair") or [""])[0]
+            endpoint = urllib.parse.urlunsplit(parsed._replace(
+                path="/", query="", fragment=""))
+        except (TypeError, ValueError):
+            return None
+        if (not supplied or not hmac.compare_digest(supplied, token)
+                or not _is_lan_mobile_endpoint(endpoint, port)):
+            return None
+        fragment = urllib.parse.urlencode({"pair": token, "endpoint": endpoint})
+        return pwa["url"] + "#" + fragment
 
     def valid_pair_url(self, value):
         """只为本轮有效配对地址生成二维码，兼容 Tailscale Serve 的 HTTPS 域名。"""
@@ -1372,6 +2307,15 @@ class MobileAccess:
             return False
         try:
             parsed = urllib.parse.urlsplit(value)
+            pwa = _mobile_pwa_parts()
+            if (pwa and urllib.parse.urlunsplit(parsed._replace(
+                    query="", fragment="")) == pwa["url"]):
+                fragment = urllib.parse.parse_qs(parsed.fragment, keep_blank_values=True)
+                pair = fragment.get("pair") or []
+                endpoint = fragment.get("endpoint") or []
+                return (not parsed.query and len(pair) == 1 and len(endpoint) == 1
+                        and hmac.compare_digest(pair[0], token)
+                        and _is_lan_mobile_endpoint(endpoint[0], self.port))
             query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
             return (parsed.scheme in {"http", "https"} and bool(parsed.hostname)
                     and parsed.username is None and parsed.password is None
@@ -1423,6 +2367,39 @@ def _is_local_origin(value, port):
         return False
 
 
+def book_pdf_module():
+    tool = ROOT / "theater" / "tools" / "book_pdf.py"
+    spec = importlib.util.spec_from_file_location("zhouqingji_book_pdf", tool)
+    if spec is None or spec.loader is None:
+        raise ValueError("专业 PDF 工具不完整，请重新更新昼青集")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def book_pdf_dependency_status():
+    """只读体检可选 PDF 环境；不导入诗稿、不安装依赖、不启动浏览器。"""
+    return book_pdf_module().dependency_status()
+
+
+def build_book_pdf_bytes(html, title="诗集"):
+    """在系统临时目录原子生成并核验 PDF；不把私人 HTML/PDF 写入仓库。"""
+    if not isinstance(html, str) or not html.strip():
+        raise ValueError("缺少离线排版内容")
+    encoded = html.encode("utf-8")
+    if len(encoded) > 24 * 1024 * 1024:
+        raise ValueError("诗集排版文件超过 24 MB，请改用离线 HTML 专业输出")
+    safe_title = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(title or "诗集")).strip(" .")[:80] or "诗集"
+    module = book_pdf_module()
+    with tempfile.TemporaryDirectory(prefix="zq-book-pdf-") as folder:
+        work = Path(folder)
+        source = work / f"{safe_title}-离线排版.html"
+        output = work / f"{safe_title}-专业阅读.pdf"
+        source.write_bytes(encoded)
+        qa = module.build_pdf(source, output, None, False, 300)
+        return output.read_bytes(), qa
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # 安静
@@ -1463,6 +2440,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, data)
         if path == "/api/mobile/status":
             return self._send(200, MOBILE_ACCESS.status())
+        if path == "/api/book-pdf/status":
+            try:
+                return self._send(200, book_pdf_dependency_status())
+            except (OSError, ValueError, RuntimeError) as exc:
+                return self._send(500, {"error": str(exc)})
         if path == "/api/mobile/qr":
             query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             text = (query.get("text") or [""])[0]
@@ -1471,8 +2453,24 @@ class Handler(BaseHTTPRequestHandler):
             if not MOBILE_ACCESS.valid_pair_url(text):
                 return self._send(400, {"error": "二维码地址无效或手机入口已关闭"})
             return self._send(200, qr_svg(text), "image/svg+xml")
+        if path == "/api/books/clean-images":
+            return self._send(200, clean_orphan_book_images(dry_run=True))
+        if path == "/api/books/images":
+            return self._send(200, {"images": list_book_images()})
+        if path == "/api/runtime":
+            return self._send(200, {"app": "zhouqingji", "version": app_version(),
+                                    "author_api_level": AUTHOR_API_LEVEL,
+                                    "build_id": AUTHOR_BUILD_ID})
         if path == "/api/state":
             return self._send(200, build_author_state())
+        if path.startswith("/api/books/image/"):
+            try:
+                entry, mime = load_book_image(path.rsplit("/", 1)[-1])
+                return self._send(200, entry.read_bytes(), mime)
+            except ValueError as exc:
+                return self._send(400, {"error": str(exc)})
+            except OSError as exc:
+                return self._send(500, {"error": f"读取图片失败：{exc}"})
         # 静态文件
         if path == "/":
             path = "/index.html"
@@ -1486,6 +2484,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self._local_request_allowed():
             return self._send(403, {"error": "forbidden origin"})
         length = int(self.headers.get("Content-Length", 0))
+        if length > API_MAX_BODY:
+            return self._send(413, {"error": "请求内容过大"})
         try:
             payload = json.loads(self.rfile.read(length) or b"{}")
         except json.JSONDecodeError:
@@ -1503,6 +2503,8 @@ class Handler(BaseHTTPRequestHandler):
                 port = payload.get("port", load_settings().get("mobile_port", 8738))
                 trusted = payload.get("trusted", False)
                 return self._send(200, MOBILE_ACCESS.start(port, trusted=trusted))
+            if self.path == "/api/mobile/renew":
+                return self._send(200, MOBILE_ACCESS.renew())
             if self.path == "/api/mobile/stop":
                 return self._send(200, MOBILE_ACCESS.stop(
                     revoke=payload.get("revoke", False)))
@@ -1523,6 +2525,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/stanzas":
                 set_stanzas(payload)
                 return self._send(200, {"ok": True})
+            if self.path == "/api/book-projects":
+                result = update_book_projects(payload)
+                return self._send(200, {"ok": True, **result})
+            if self.path == "/api/books/image":
+                return self._send(200, save_book_image(payload))
+            if self.path == "/api/books/clean-images":
+                dry_run = bool(payload.get("dry_run", False))
+                return self._send(200, clean_orphan_book_images(dry_run=dry_run))
+            if self.path == "/api/book-pdf/build":
+                pdf, qa = build_book_pdf_bytes(payload.get("html"), payload.get("title"))
+                return self._send(200, pdf, "application/pdf", headers={
+                    "X-ZQ-PDF-Pages": str(qa.get("pages", "")),
+                    "X-ZQ-PDF-Verified": "true",
+                })
             if self.path == "/api/action":
                 action = payload.get("action")
                 if action not in ACTIONS:
@@ -1534,9 +2550,25 @@ class Handler(BaseHTTPRequestHandler):
                 ACTIONS[action](poem, payload, corpus)
                 save_corpus(corpus)
                 return self._send(200, {"ok": True, "poem": poem})
-        except ValueError as e:
+        except BookRevisionConflict as e:
+            return self._send(409, {"error": str(e), "code": "book_revision_conflict",
+                                    "current_revision": e.current_revision})
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as e:
             return self._send(400, {"error": str(e)})
         return self._send(404, {"error": "not found"})
+
+
+class AuthorHTTPServer(ThreadingHTTPServer):
+    """桌面作者服务严格单实例，避免 Windows 把同端口请求分给新旧两个进程。"""
+    allow_reuse_address = False
+    daemon_threads = True
+
+    def server_bind(self):
+        # Windows 的 SO_REUSEADDR 允许后来进程抢占已监听端口，语义不同于 Unix。
+        # 显式独占后，旧版仍运行时新版会立即失败并给出可理解提示。
+        if os.name == "nt" and hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        return super().server_bind()
 
 
 if __name__ == "__main__":
@@ -1548,4 +2580,11 @@ if __name__ == "__main__":
             print(f"可信手机入口已恢复（有效至 {restored['trust_expires_at']}）")
     except (OSError, ValueError) as exc:
         print(f"可信手机入口未能自动恢复：{exc}")
-    ThreadingHTTPServer(("127.0.0.1", st["port"]), Handler).serve_forever()
+    try:
+        server = AuthorHTTPServer(("127.0.0.1", st["port"]), Handler)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 10048 or getattr(exc, "errno", None) in {48, 98, 10048}:
+            print(f"无法启动：端口 {st['port']} 已被占用。请关闭旧的昼青集窗口后再打开。")
+            raise SystemExit(2) from None
+        raise
+    server.serve_forever()

@@ -10,7 +10,7 @@
   "poem_id": "zq-0001",
   "reader": {
     "persona_id": "classical-scholar",
-    "model": "<运行时返回的模型 ID>",
+    "model": "claude-...",
     "knows_诠释": false,
     "knows_date": false
   },
@@ -25,7 +25,7 @@
 }
 ```
 
-（2026-07-17 补充：`context_mode=="thread"` 时 `score` 落 `null`——跟帖不评分，`calibrate.py` 本就按 `context_mode=="blind"` 过滤，天然不受影响。跟帖专属的 `persona_hash`/链深/立场变化/沉默/void 不进这个 FROZEN 字段集，走独立侧车 `results/threads/`，见 `theater/NOTES.md` 与 `theater/runners/plan_thread.py`。）
+跟帖记录的 `context_mode=="thread"`、`score=null`；校准只处理 `context_mode=="blind"`。跟帖专属的 `persona_hash`、链深、立场变化、沉默和 void 不加入上述盲读冻结字段，另存于 `results/threads/`；执行规则见 `theater/runners/plan_thread.py`。
 
 - `reaction` **设字数上限**（建议 2–3 句），保证列表能扫。
 - 若读者产出了长文分析，放 `long_form`，前端最小化、点开进独立"深读"专栏页慢慢看，不挤在评论列表里。

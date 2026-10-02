@@ -145,10 +145,34 @@ def test_single_html_is_self_contained():
 
 def test_mobile_pair_token_survives_ios_browser_handoff():
     app = (S.WEBAPP / "app.js").read_text(encoding="utf-8")
-    assert 'const token = paired || storageGet(MOBILE_TOKEN_KEY) || "";' in app
+    assert 'const token = paired || portable?.token || storageGet(MOBILE_TOKEN_KEY) || "";' in app
     assert 'params.delete("pair")' not in app
-    assert 'history.replaceState(null, "", location.pathname' not in app
-    print("[ok] iPad 扫码器转 Safari / 主屏幕时连接签不被预览页抹除")
+    assert 'history.replaceState(null, "", location.pathname + location.search + "#/settings")' in app
+    print("[ok] 旧局域网签保留 / 安卓 PWA 配对片段落盘后才清理")
+
+
+def test_android_shell_is_static_and_offline_capable():
+    html = (S.WEBAPP / "mobile.html").read_text(encoding="utf-8")
+    manifest = json.loads((S.WEBAPP / "mobile.webmanifest").read_text(encoding="utf-8"))
+    marker = json.loads((S.WEBAPP / "mobile-shell.json").read_text(encoding="utf-8"))
+    worker = (S.WEBAPP / "mobile-sw.js").read_text(encoding="utf-8")
+    assert 'content="portable"' in html and "mobile.webmanifest" in html
+    assert "window.__ZQ_SNAPSHOT__" not in html, "公开安卓壳不得内嵌私人快照"
+    assert manifest["display"] == "standalone" and "mobile.html" in manifest["start_url"]
+    assert marker == {"schema": 1, "kind": "zhouqingji-mobile-shell", "compatibility": 1}
+    assert "mobile.html" in worker and "app.js" in worker and "style.css" in worker
+    assert "api/mobile-state" not in worker, "Service Worker 只缓存程序壳，不缓存跨源私人接口"
+    print("[ok] 安卓公开空壳 / 可安装 manifest / 离线程序缓存")
+
+
+def test_mobile_trust_ui_has_explicit_running_actions():
+    app = (S.WEBAPP / "app.js").read_text(encoding="utf-8")
+    assert 'id="mobile-renew" hidden' in app
+    assert 'id="mobile-trust-choice"' in app
+    assert 'post("/api/mobile/renew", {})' in app
+    assert 'document.getElementById("mobile-start").hidden = running' in app
+    assert "最近同步" in app and "不需要重新扫码" in app
+    print("[ok] 手机设置页按状态显示开启/续期/撤销，不再留下无解释的禁用按钮")
 
 
 def test_thread_filters_survive_detail_return():
@@ -185,6 +209,32 @@ def test_private_pair_url_requires_current_token():
     assert not S.MOBILE_ACCESS.valid_pair_url(
         f"https://computer.example.ts.net/?pair={token}")
     print("[ok] 私密 HTTPS 二维码仅接受本轮有效口令")
+
+
+def test_android_pair_url_uses_fragment_and_private_lan_only():
+    port = _free_port()
+    old_pwa = S.MOBILE_PWA_URL
+    S.MOBILE_PWA_URL = S.DEFAULT_MOBILE_PWA_URL
+    try:
+        status = S.MOBILE_ACCESS.start(port)
+        token = status["token"]
+        local = f"http://192.168.4.20:{port}/?pair={token}"
+        pair = S.MOBILE_ACCESS.pwa_pair_url(local)
+        assert pair and pair.startswith(S.MOBILE_PWA_URL + "#")
+        parsed = S.urllib.parse.urlsplit(pair)
+        assert not parsed.query and token not in parsed.path
+        fragment = S.urllib.parse.parse_qs(parsed.fragment)
+        assert fragment["pair"] == [token]
+        assert fragment["endpoint"] == [f"http://192.168.4.20:{port}/"]
+        assert S.MOBILE_ACCESS.valid_pair_url(pair)
+        assert S.MOBILE_ACCESS.pwa_pair_url(
+            f"http://8.8.8.8:{port}/?pair={token}") is None
+        assert not S.MOBILE_ACCESS.valid_pair_url(
+            S.MOBILE_PWA_URL + f"#pair={token}&endpoint=http://8.8.8.8:{port}")
+    finally:
+        S.MOBILE_ACCESS.stop()
+        S.MOBILE_PWA_URL = old_pwa
+    print("[ok] 安卓配对口令只进 fragment / 仅接受 RFC1918 局域网端点")
 
 
 def test_ephemeral_token_rotates():
@@ -226,11 +276,43 @@ def test_trusted_token_survives_restart_and_revokes():
                 "expires_at": time.time() - 1,
             }), encoding="utf-8")
             assert S.MobileAccess().restore_trusted() is None
+            resumed = S.MobileAccess()
+            resumed_status = resumed.start(port, trusted=True)
+            assert resumed_status["token"] == "x" * 32
+            assert not resumed_status["trust_expired"]
+            resumed.stop(revoke=True)
         finally:
             first.stop()
             second.stop(revoke=True)
             S.MOBILE_TRUST = old_path
     print("[ok] 可信入口跨重启复用 / 撤销与过期失效 / 口令不进快照")
+
+
+def test_trusted_token_sliding_renewal_and_live_expiry():
+    old_path = S.MOBILE_TRUST
+    with tempfile.TemporaryDirectory(prefix="zq-mobile-renew-") as td:
+        S.MOBILE_TRUST = Path(td) / "mobile_trust.json"
+        access = S.MobileAccess()
+        port = _free_port()
+        try:
+            status = access.start(port, trusted=True)
+            token = status["token"]
+            access.trust_expires_at = time.time() + 2
+            old_expiry = access.trust_expires_at
+            assert access.authorize(token, renew=True)
+            assert access.token == token, "续期不能更换已安装手机保存的连接签"
+            assert access.trust_expires_at > old_expiry + S.MOBILE_TRUST_RENEW_WINDOW
+            assert access.status()["last_sync_at"]
+
+            access.trust_expires_at = time.time() - 1
+            assert not access.authorize(token), "运行中的可信签到期后也必须即时拒绝"
+            renewed = access.renew()
+            assert renewed["token"] == token and not renewed["trust_expired"]
+            assert access.authorize(token)
+        finally:
+            access.stop(revoke=True)
+            S.MOBILE_TRUST = old_path
+    print("[ok] 可信签临近到期自动续期 / 运行中到期即时生效 / 手动续期不换签")
 
 
 def _free_port():
@@ -245,8 +327,9 @@ def test_mobile_server_rejects_writes_and_requires_token():
     port = _free_port()
     tiny = {"poems": [], "reads": [], "personas": [], "settings": {}, "version": "x",
             "mobile": {"content_hash": "abc", "generated_at": "now"}}
-    old = S.build_mobile_snapshot
+    old, old_pwa = S.build_mobile_snapshot, S.MOBILE_PWA_URL
     S.build_mobile_snapshot = lambda include_wordcloud=True: tiny
+    S.MOBILE_PWA_URL = S.DEFAULT_MOBILE_PWA_URL
     try:
         status = S.MOBILE_ACCESS.start(port)
         token = status["token"]
@@ -259,6 +342,35 @@ def test_mobile_server_rejects_writes_and_requires_token():
         req = urllib.request.Request(url, headers={"X-ZQ-Mobile-Token": token})
         data = json.loads(urllib.request.urlopen(req, timeout=3).read().decode("utf-8"))
         assert data["mobile"]["content_hash"] == "abc"
+
+        origin = S._mobile_pwa_parts()["origin"]
+        preflight = urllib.request.Request(url, method="OPTIONS", headers={
+            "Origin": origin,
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-ZQ-Mobile-Token, If-None-Match",
+            "Access-Control-Request-Private-Network": "true",
+        })
+        with urllib.request.urlopen(preflight, timeout=3) as res:
+            assert res.status == 204
+            assert res.headers["Access-Control-Allow-Origin"] == origin
+            assert res.headers["Access-Control-Allow-Private-Network"] == "true"
+        cors_get = urllib.request.Request(url, headers={
+            "Origin": origin, "X-ZQ-Mobile-Token": token,
+        })
+        with urllib.request.urlopen(cors_get, timeout=3) as res:
+            assert res.headers["Access-Control-Allow-Origin"] == origin
+            assert res.headers["Cross-Origin-Resource-Policy"] == "cross-origin"
+
+        evil = urllib.request.Request(url, method="OPTIONS", headers={
+            "Origin": "https://evil.example",
+            "Access-Control-Request-Method": "GET",
+            "Access-Control-Request-Headers": "X-ZQ-Mobile-Token",
+        })
+        try:
+            urllib.request.urlopen(evil, timeout=3)
+            assert False, "非配置来源的跨源预检必须拒绝"
+        except urllib.error.HTTPError as exc:
+            assert exc.code == 403
 
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/?pair={token}", timeout=3) as res:
             html = res.read().decode("utf-8")
@@ -282,7 +394,8 @@ def test_mobile_server_rejects_writes_and_requires_token():
     finally:
         S.MOBILE_ACCESS.stop()
         S.build_mobile_snapshot = old
-    print("[ok] 手机入口口令校验 / iPad 安装启动签 / 全部写入拒绝 / 临时启停")
+        S.MOBILE_PWA_URL = old_pwa
+    print("[ok] 手机入口口令 / 精确 CORS 来源 / iPad 兼容签 / 全部写入拒绝")
 
 
 if __name__ == "__main__":
@@ -291,10 +404,14 @@ if __name__ == "__main__":
     test_word_context_is_on_demand_and_excludes_private_or_piggyback()
     test_single_html_is_self_contained()
     test_mobile_pair_token_survives_ios_browser_handoff()
+    test_android_shell_is_static_and_offline_capable()
+    test_mobile_trust_ui_has_explicit_running_actions()
     test_thread_filters_survive_detail_return()
     test_qr_is_local_svg()
     test_private_pair_url_requires_current_token()
+    test_android_pair_url_uses_fragment_and_private_lan_only()
     test_ephemeral_token_rotates()
     test_trusted_token_survives_restart_and_revokes()
+    test_trusted_token_sliding_renewal_and_live_expiry()
     test_mobile_server_rejects_writes_and_requires_token()
     print("ALL PASS")

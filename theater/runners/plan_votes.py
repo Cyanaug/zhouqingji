@@ -84,8 +84,8 @@ def cmd_invite(args):
     seed = args.seed if args.seed else int(time.time())
     random.seed(seed)
 
-    batch_size = getattr(args, "batch_size", 8)
-    batch_chars = getattr(args, "batch_chars", 4000)
+    batch_size = getattr(args, "batch_size", 16)
+    batch_chars = getattr(args, "batch_chars", 5000)
     tasks = []
 
     if batch_size <= 1:
@@ -341,10 +341,10 @@ def main():
     i.add_argument("--targets", default="",
                     help="逗号分隔 read_id：直接指定要投票的评论（优先于 --poem-ids）")
     i.add_argument("--fraction", type=float, default=0.3, help="邀请的读者比例")
-    i.add_argument("--batch-size", dest="batch_size", type=int, default=8,
-                   help="批量装箱上限：一个任务最多读几条评论（默认 8；1=逐条退化模式）")
-    i.add_argument("--batch-chars", dest="batch_chars", type=int, default=4000,
-                   help="每箱评论正文的字符预算（默认 4000）：长评多的箱自动装得少")
+    i.add_argument("--batch-size", dest="batch_size", type=int, default=16,
+                   help="批量装箱上限：一个任务最多读几条评论（默认 16；1=逐条退化模式）")
+    i.add_argument("--batch-chars", dest="batch_chars", type=int, default=5000,
+                   help="每箱评论正文的字符预算（默认 5000）：长评多的箱自动装得少")
     i.add_argument("--seed", type=int, default=0, help="0=用当前时间，其他值可复现")
     i.add_argument("--out", default="")
 

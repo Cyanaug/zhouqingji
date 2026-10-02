@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """ZIP 安装更新的安全边界测试（零网络、零第三方依赖）。"""
 import io
+import hashlib
 import sys
 import tempfile
 import zipfile
@@ -24,6 +25,7 @@ def test_safe_archive_update():
         root = Path(td)
         (root / "theater/src").mkdir(parents=True)
         (root / "theater/runners").mkdir(parents=True)
+        (root / "theater/tools").mkdir(parents=True)
         (root / "corpus").mkdir()
         (root / "results").mkdir()
         (root / "VERSION").write_text("1.5\n", encoding="utf-8")
@@ -37,15 +39,17 @@ def test_safe_archive_update():
             "README.md": "new docs",
             "theater/src/server.py": "new server",
             "theater/runners/runner.py": "new runner",
+            "theater/tools/book_pdf.py": "new pdf tool",
             "corpus/诗稿.json": "PUBLIC SHOULD NEVER COPY",
             "results/reads.jsonl": "PUBLIC SHOULD NEVER COPY",
             "theater/runners/batches/task.json": "SHOULD NEVER COPY",
         })
         result = S.install_update_archive(data, root)
-        assert result["changed"] == 4
+        assert result["changed"] == 5
         assert (root / "VERSION").read_text(encoding="utf-8") == "1.6\n"
         assert (root / "theater/src/server.py").read_text(encoding="utf-8") == "new server"
         assert (root / "theater/runners/runner.py").read_text(encoding="utf-8") == "new runner"
+        assert (root / "theater/tools/book_pdf.py").read_text(encoding="utf-8") == "new pdf tool"
         assert (root / "corpus/诗稿.json").read_text(encoding="utf-8") == "PRIVATE"
         assert (root / "results/reads.jsonl").read_text(encoding="utf-8") == "PRIVATE"
         assert not (root / "theater/runners/batches/task.json").exists()
@@ -95,6 +99,35 @@ def test_local_request_guards():
     print("[ok] 本地 Host / Origin 防护")
 
 
+def test_author_server_is_single_instance():
+    first = S.AuthorHTTPServer(("127.0.0.1", 0), S.Handler)
+    try:
+        port = first.server_address[1]
+        try:
+            second = S.AuthorHTTPServer(("127.0.0.1", port), S.Handler)
+        except OSError:
+            second = None
+        assert second is None, "同一作者端口不得被第二个新旧进程同时监听"
+    finally:
+        first.server_close()
+        if 'second' in locals() and second is not None:
+            second.server_close()
+    print("[ok] 作者服务严格单实例，旧版运行时新版不会抢占同一端口")
+
+
+def test_launcher_detects_stale_author_runtime():
+    launcher = (ROOT / "theater" / "open-theater.ps1").read_text(encoding="utf-8-sig")
+    assert S.AUTHOR_API_LEVEL == 3
+    assert "$expectedApiLevel = 3" in launcher
+    assert "/api/runtime" in launcher
+    assert "Stop-Process" in launcher
+    assert "$expectedBuildId" in launcher
+    assert "Test-OwnServerProcess" in launcher
+    assert S.AUTHOR_BUILD_ID == hashlib.sha256(Path(S.__file__).read_bytes()).hexdigest()[:16]
+    assert "昼青集需要重启后台" in launcher
+    print("[ok] 桌面启动器识别旧后台并在确认后重启当前版本")
+
+
 def test_official_remote_url_normalization():
     official = "https://github.com/Cyanaug/zhouqingji"
     assert S._normalized_git_url(official + ".git") == S._normalized_git_url(official)
@@ -110,5 +143,7 @@ if __name__ == "__main__":
     test_archive_rejects_traversal()
     test_archive_version_must_match_expected_tag()
     test_local_request_guards()
+    test_author_server_is_single_instance()
+    test_launcher_detects_stale_author_runtime()
     test_official_remote_url_normalization()
     print("ALL PASS")

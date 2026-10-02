@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """公开发行树的隐私阻断检查；不扫描用户自己的 corpus/results/batches。"""
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -29,11 +30,12 @@ SECRET_SHAPE = re.compile(
 )
 
 # 仓库所有者名只允许用于固定更新源及其测试；不得扩散到作者署名、
-# 示例作品或其他产品文案。若未来迁移到组织账号，只需替换这两个位置。
+# 示例作品或其他产品文案。仅允许固定更新源、部署目标校验及其测试使用。
 REPOSITORY_OWNER = re.compile(r"\bCyanaug\b", re.IGNORECASE)
 REPOSITORY_OWNER_ALLOWED = {
     "theater/src/server.py",
     "theater/tests/test_update.py",
+    "theater/release/sync_mobile_pages.py",
 }
 
 # v1.6 已经公开，保留它作为兼容更新基线；从 v1.6.1 起，每个新增提交
@@ -150,6 +152,14 @@ def test_new_release_history_is_sanitized():
 
 
 if __name__ == "__main__":
+    manifest = ROOT / "theater/release/candidate.json"
+    ignore_rules = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    private_source = (manifest.is_file()
+                      and json.loads(manifest.read_text(encoding="utf-8")).get("audience", "private") == "private"
+                      and "/corpus/" not in ignore_rules and "/results/" not in ignore_rules)
+    if private_source:
+        print("Private development source: run this privacy gate in the public checkout or review copy.")
+        raise SystemExit(0)
     test_public_tree_is_sanitized()
     test_new_release_history_is_sanitized()
     print("ALL PASS")

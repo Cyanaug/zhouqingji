@@ -1,0 +1,56 @@
+name: mobile-pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/mobile-pages.yml"
+      - "theater/release/build_mobile_pages.py"
+      - "theater/src/webapp/mobile.html"
+      - "theater/src/webapp/mobile.webmanifest"
+      - "theater/src/webapp/mobile-sw.js"
+      - "theater/src/webapp/mobile-shell.json"
+      - "theater/src/webapp/app.js"
+      - "theater/src/webapp/style.css"
+      - "theater/src/webapp/favicon.png"
+      - "theater/src/webapp/apple-touch-icon.png"
+      - "theater/src/webapp/icon-192.png"
+      - "theater/src/webapp/icon-512.png"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify and build privacy-scanned shell
+        run: |
+          python theater/tests/test_mobile_pages.py
+          python theater/release/build_mobile_pages.py --output _mobile_site
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: _mobile_site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

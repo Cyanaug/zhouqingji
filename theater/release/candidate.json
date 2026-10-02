@@ -1,57 +1,84 @@
 {
-  "schema": 1,
-  "target_version": "1.7.2",
-  "private_base_commit": "f9774e5",
+  "schema": 2,
+  "audience": "public",
+  "target_version": "1.8",
   "receipts": [
     {
-      "id": "reader-echo-v172",
-      "title": "掌中册修复、读者回声、词云广度与榜单开关",
+      "id": "poetry-book-selector-next",
+      "title": "诗集工作台：方案侧车与选稿编次",
       "status": "verified",
       "public_release": true,
       "files": [
-        ".claude/skills/dispatch-reads/SKILL.md",
+        ".gitignore",
         "00_START_HERE.md",
+        "03_runner_and_coverage.md",
+        "04_app_and_design.md",
+        "05_run_modes.md",
+        "AGENTS.md",
+        "README.md",
+        "VERSION",
+        "theater/BOOK_PDF.md",
+        "theater/check.ps1",
+        "theater/open-theater.ps1",
+        "theater/release/candidate.json",
+        "theater/runners/plan_votes.py",
+        "theater/src/book_order.py",
+        "theater/src/server.py",
+        "theater/src/webapp/app.js",
+        "theater/src/webapp/fonts/OFL-1.1.txt",
+        "theater/src/webapp/fonts/README.md",
+        "theater/src/webapp/fonts/SourceHanSerifCN-Regular.otf",
+        "theater/src/webapp/index.html",
+        "theater/src/webapp/style.css",
+        "theater/tests/test_book_document.py",
+        "theater/tests/test_book_order.py",
+        "theater/tests/test_book_pdf.py",
+        "theater/tests/test_books.py",
+        "theater/tests/test_update.py",
+        "theater/tools/book_pdf.py",
+        "theater/tools/book_verify.py"
+      ],
+      "verification_sha256": "1833b70f0ed8d183213dac8fd5b4b6d90b258c0aea1e0a5062cac16a6e7b9fc2"
+    },
+    {
+      "id": "android-offline-pocket",
+      "title": "安卓离线掌中册：一次配对、离线阅读、同网更新",
+      "status": "verified",
+      "public_release": true,
+      "files": [
+        ".github/workflows/mobile-pages.yml",
         "04_app_and_design.md",
         "MOBILE_ACCESS.md",
         "README.md",
-        "VERSION",
-        "theater/release/archive/v1.7.1.json",
-        "theater/release/candidate.json",
-        "theater/release/check_candidate.py",
-        "theater/release/README.md",
         "theater/check.ps1",
+        "theater/release/build_mobile_pages.py",
+        "theater/release/candidate.json",
+        "theater/release/sync_mobile_pages.py",
         "theater/src/server.py",
-        "theater/src/wordcloud_data.py",
         "theater/src/webapp/app.js",
+        "theater/src/webapp/mobile-shell.json",
+        "theater/src/webapp/mobile-sw.js",
+        "theater/src/webapp/mobile.html",
+        "theater/src/webapp/mobile.webmanifest",
         "theater/src/webapp/style.css",
         "theater/tests/test_mobile.py",
-        "theater/tests/test_release_candidate.py",
-        "theater/tests/test_sidecars.py",
-        "theater/tests/test_wordcloud.py"
+        "theater/tests/test_mobile_pages.py"
       ],
-      "tests": [
-        "python theater/tests/test_mobile.py",
-        "python theater/tests/test_release_candidate.py",
-        "python theater/tests/test_sidecars.py",
-        "python theater/tests/test_wordcloud.py",
-        "node --check theater/src/webapp/app.js",
-        "powershell -ExecutionPolicy Bypass -File theater/check.ps1",
-        "手机 390px 与平板 834px 视觉检查"
-      ],
-      "notes": "回声只数未折叠盲读收到的主动票，顺势票不计；作者藏印写后回读核验，只写 curation 侧车，与 AI 加精分列。点赞率仅使用方向票且设 20 票门槛，不制造缺少曝光分母的加精率。词频榜新增作品覆盖口径，词句索引点击后才加载。iPad 扫码器转 Safari/主屏幕时保留连接签，并把展示质分与逐条校准均值的差别写入悬停说明。榜单首页可关闭诗类专榜或逐项隐藏非诗文体榜，数据与直达页保持不变。跟帖索引按最近活动、回复数、深度和作品筛选，详情返回后保留筛选，不制造含义不清的“激烈度”。派发高级偏好不再写死历史模型、通道或固定覆盖层数。"
+      "verification_sha256": "a433e4c446450f82f9c2b5c4bc5f4bb0e2d164d1006d0a2c25848e4b7292be2f"
     },
     {
-      "id": "private-ledgers-v172",
-      "title": "私有进度与设计日志",
-      "status": "private",
-      "public_release": false,
+      "id": "receipt-driven-public-sync",
+      "title": "开发仓到公开仓：按回执同步与双向防漏闸门",
+      "status": "verified",
+      "public_release": true,
       "files": [
-        "PROGRESS.md",
-        "theater/NOTES.md",
-        "theater/release/roadmap-v1.8-author-threads.md"
+        "theater/release/candidate.json",
+        "theater/release/check_candidate.py",
+        "theater/release/sync_public_release.py",
+        "theater/tests/test_public_sanitization.py",
+        "theater/tests/test_release_candidate.py"
       ],
-      "tests": [],
-      "notes": "含私有开发过程与批次语境，不整文件复制到公开仓；公开用户所需说明已分别写入 README、应用设计和手机教程。"
+      "verification_sha256": "92bf5c8912ada28f741c7336e8c4eb6938fa11dd421f4241b3fd6caab64270bd"
     }
   ]
 }
