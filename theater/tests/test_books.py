@@ -760,12 +760,12 @@ def test_book_projects_stay_author_side():
 
 def test_book_bundled_font():
     font_dir = ROOT / "theater" / "src" / "webapp" / "fonts"
-    font = font_dir / "SourceHanSerifCN-Regular.otf"
+    font = font_dir / "ZQBookSong-Regular.otf"
     license_file = font_dir / "OFL-1.1.txt"
     payload = font.read_bytes()
-    assert payload[:4] == b"OTTO" and len(payload) == 11_626_108, "随包 OTF 文件损坏或被替换"
+    assert payload[:4] == b"OTTO" and len(payload) == 11_742_564, "随包 OTF 文件损坏或被替换"
     assert hashlib.sha256(payload).hexdigest() == \
-        "3754ea669c530e2473354f8f6d9f79680a44d7e26ec7d00eeabee4a7e0753c5d"
+        "e6a906c9f2f472d7b55b23dd80774818d00ae54c5766b682f502c4010822d29d"
     license_text = license_file.read_text(encoding="utf-8")
     assert "SIL OPEN FONT LICENSE Version 1.1" in license_text
     assert "Reserved Font" in license_text and "Name 'Source'" in license_text
@@ -950,7 +950,7 @@ const marksOff = bookPageMarkup(legacy.pages[2], marksOffDraft, 2, "A5");
 const standalone = bookStandaloneHtml({{...base, front_matter: {{title_page: true,
   colophon: "自印试集，仅赠友人。\\n第二行", dedication: "献给夜间赶路的人"}}}}, withAll, "/* embedded-book-css */");
 const embeddedCss = bookEmbedBundledFontCss(
-  '@font-face{{src:url("fonts/SourceHanSerifCN-Regular.otf") format("opentype")}}', "QUJD");
+  '@font-face{{src:url("fonts/ZQBookSong-Regular.otf") format("opentype")}}', "QUJD");
 const encoded = bookArrayBufferBase64(Uint8Array.from([65, 66, 67]).buffer);
 console.log(JSON.stringify({{legacy, withTitle, withBoth, colophonOnly, wsOnly, dedicationOnly, withAll, wsDedication,
   dedicationMarkup, manifest, marksOn, marksOff, standalone, embeddedCss, encoded}}));
@@ -1013,9 +1013,9 @@ console.log(JSON.stringify({{legacy, withTitle, withBoth, colophonOnly, wsOnly, 
     assert manifest["pagination"]["front_matter_pages"] == 3
     assert manifest["pagination"]["front_blank_pages"] == 1
     assert manifest["publication_profile"]["bundled_font"] == {
-        "family": "ZQ Source Han Serif CN", "version": "2.003R",
-        "sha256": "3754ea669c530e2473354f8f6d9f79680a44d7e26ec7d00eeabee4a7e0753c5d",
-        "mime": "font/otf", "source_file": "SourceHanSerifCN-Regular.otf"}
+        "family": "ZQ Book Song", "version": "2.003.1",
+        "sha256": "e6a906c9f2f472d7b55b23dd80774818d00ae54c5766b682f502c4010822d29d",
+        "mime": "font/otf", "source_file": "ZQBookSong-Regular.otf"}
     standalone = result["standalone"]
     assert standalone.startswith("<!doctype html>") and "/* embedded-book-css */" in standalone
     assert "<link" not in standalone and "book-print-manifest" in standalone
@@ -1028,7 +1028,7 @@ console.log(JSON.stringify({{legacy, withTitle, withBoth, colophonOnly, wsOnly, 
     assert embedded_manifest["pagination"] == manifest["pagination"]
     assert all("content" not in item for item in embedded_manifest["contents"])
     assert 'data:font/otf;base64,QUJD' in result["embeddedCss"]
-    assert "fonts/SourceHanSerifCN-Regular.otf" not in result["embeddedCss"]
+    assert "fonts/ZQBookSong-Regular.otf" not in result["embeddedCss"]
     assert result["encoded"] == "QUJD", "字体二进制必须可稳定转为 data URI"
     print("[ok] 封面与书芯分离，前置页右页起排且不计 folio，旧方案基线不漂移")
 

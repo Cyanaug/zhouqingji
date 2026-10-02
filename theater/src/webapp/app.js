@@ -203,6 +203,7 @@ function bookPdfEnvironmentSummary(status) {
   if (!status.node?.ready) missing.push(status.node?.installed ? `Node.js 需升级至 ${status.node.minimum}+` : "Node.js");
   if (!status.vivliostyle?.ready) missing.push("Vivliostyle 排版器");
   if (!status.pypdf?.ready || !status.fonttools?.ready) missing.push("PDF 核验组件");
+  if (!status.browsers?.length) missing.push("Chrome 或 Edge 浏览器");
   return { ready: false, text: `核验路径尚缺：${missing.join("、") || "可选组件"}。不影响快速保存，想启用时按下方步骤安装即可。` };
 }
 
@@ -2093,12 +2094,12 @@ function bookPreviewText(poem) {
 }
 
 const BOOK_BUNDLED_FONT = {
-  family: "ZQ Source Han Serif CN",
-  url: "fonts/SourceHanSerifCN-Regular.otf",
+  family: "ZQ Book Song",
+  url: "fonts/ZQBookSong-Regular.otf",
   mime: "font/otf",
   format: "opentype",
-  version: "2.003R",
-  sha256: "3754ea669c530e2473354f8f6d9f79680a44d7e26ec7d00eeabee4a7e0753c5d",
+  version: "2.003.1",
+  sha256: "e6a906c9f2f472d7b55b23dd80774818d00ae54c5766b682f502c4010822d29d",
 };
 
 // 版式 profile：唯一数据源。物理尺寸/边距/字号/行距与分页估算值（首页行数、

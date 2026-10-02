@@ -8,6 +8,7 @@ import hashlib
 from html.parser import HTMLParser
 import importlib.util
 import json
+import os
 from io import BytesIO
 from pathlib import Path
 import re
@@ -154,9 +155,11 @@ def font_alias_map(font_payload: bytes, preferred_text: str) -> dict[int, int]:
     preferred = {ord(char) for char in preferred_text}
     aliases: dict[int, int] = {}
     for codepoint, glyph in cmap.items():
-        if not _compatibility_codepoint(codepoint):
+        if not _compatibility_codepoint(codepoint) or codepoint in preferred:
             continue
-        candidates = [value for value in by_glyph[glyph] if _unified_han(value)]
+        candidates = [value for value in by_glyph[glyph]
+                      if value != codepoint and _unified_han(value)
+                      and not _compatibility_codepoint(value)]
         selected = [value for value in candidates if value in preferred]
         if len(selected) == 1:
             aliases[codepoint] = selected[0]
@@ -357,23 +360,36 @@ def build_pdf(input_html: Path, output_pdf: Path, executable: str | None,
     except (OSError, subprocess.SubprocessError, IndexError):
         renderer_version = "unknown"
     # 先渲染和验证临时文件；即使构建失败，也不破坏已有成品。
-    # Vivliostyle 11.2 起拒绝把输出写进输入文件所在目录（视为覆盖原稿），
-    # 因此在系统临时目录构建，成功后再落位到作者指定的输出路径。
+    # 输入和输出必须是同一盘的兄弟目录。部分 Windows 渲染器版本把跨盘
+    # relative 路径误认为子目录；仅改变 cwd 不能修复这个问题。
     with tempfile.TemporaryDirectory(prefix=".zq-book-pdf-") as folder:
-        staged_pdf = Path(folder) / output_pdf.name
-        args = [command, "build", str(input_html), "--output", str(staged_pdf), "--size", size,
+        work = Path(folder)
+        source_dir, output_dir = work / "source", work / "output"
+        source_dir.mkdir()
+        output_dir.mkdir()
+        staged_html = source_dir / "book.html"
+        staged_html.write_text(html, encoding="utf-8")
+        staged_pdf = output_dir / "book.pdf"
+        args = [command, "build", str(staged_html), "--output", str(staged_pdf), "--size", size,
                 "--single-doc", "--no-vite-config-file", "--timeout", str(timeout)]
+        if not browser:
+            browser = next(iter(installed_browsers()), None)
+        if not browser:
+            raise RuntimeError("未找到已安装的 Chrome/Edge；请安装浏览器或用 --browser 指定路径，不会自动下载")
         if browser:
             browser_path = Path(browser).resolve(strict=True)
             args.extend(["--executable-browser", str(browser_path)])
-        # Vivliostyle 11.2 起把进程工作目录当工作区根，输出在工作区树外或跨盘时
-        # 会被“覆盖原稿”守卫拒绝；暂存目录在系统临时目录里，cwd 取其父目录即可。
-        proc = subprocess.run(args, text=True, encoding="utf-8", errors="replace",
-                              capture_output=True, cwd=str(Path(folder).parent))
+        try:
+            proc = subprocess.run(args, text=True, encoding="utf-8", errors="replace",
+                                  capture_output=True, cwd=str(work), timeout=timeout + 30)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("PDF 渲染超时；原文件和已有成品未被覆盖") from exc
         if proc.returncode:
-            # 附上渲染器自己的报错尾部，避免只有退出码时无从下手。
-            tail = "\n".join((proc.stderr or proc.stdout or "").splitlines()[-6:]).strip()
-            detail = f"：{tail[-600:]}" if tail else ""
+            # 栈尾通常只有调用位置，优先显示真正的 ERROR 行。
+            lines = (proc.stderr or proc.stdout or "").splitlines()
+            errors = [line for line in lines if re.search(r"\b(?:ERROR|Error:)\b", line)]
+            tail = "\n".join(errors[:3] or lines[-6:]).strip()
+            detail = f"：{tail[:600]}" if tail else ""
             raise RuntimeError(f"Vivliostyle 构建失败（退出码 {proc.returncode}）{detail}")
         if not staged_pdf.is_file() or staged_pdf.stat().st_size < 1024:
             raise ValueError("渲染器没有产生有效 PDF")
@@ -387,7 +403,21 @@ def build_pdf(input_html: Path, output_pdf: Path, executable: str | None,
         unicode_repairs = repair_pdf_unicode(staged_pdf, font_payload, fragments)
         qa = verify_pdf(staged_pdf, manifest, fragments)
         qa["unicode_mappings_repaired"] = unicode_repairs
-        shutil.move(str(staged_pdf), str(output_pdf))
+        # 系统临时盘和作者保存盘可能不同。先完整复制到目标目录的临时
+        # 文件，再同盘原子替换；复制失败不能把已有 PDF 截断为半个文件。
+        pending = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=output_pdf.parent, prefix=".zq-pdf-",
+                                             suffix=".tmp", delete=False) as stream:
+                pending = Path(stream.name)
+                with staged_pdf.open("rb") as source:
+                    shutil.copyfileobj(source, stream)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(pending, output_pdf)
+        finally:
+            if pending is not None:
+                pending.unlink(missing_ok=True)
     receipt = {
         "schema": 1,
         "kind": "zhouqingji-book-pdf-verification",
@@ -409,6 +439,21 @@ def default_output(input_html: Path) -> Path:
     return input_html.with_name(stem + "-专业阅读.pdf")
 
 
+def installed_browsers() -> list[str]:
+    candidates = [
+        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
+        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
+        Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        Path("/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    ]
+    for name in ("google-chrome", "chromium", "chromium-browser", "microsoft-edge"):
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found))
+    return list(dict.fromkeys(str(path) for path in candidates if path.is_file()))
+
+
 def dependency_status() -> dict[str, Any]:
     node = shutil.which("node")
     node_version = None
@@ -423,12 +468,7 @@ def dependency_status() -> dict[str, Any]:
     cli = _local_vivliostyle() or next(
         (shutil.which(name) for name in ("vivliostyle", "vivliostyle.cmd", "vs")
          if shutil.which(name)), None)
-    browser_candidates = [
-        Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"),
-        Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe"),
-        Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe"),
-    ]
-    browsers = [str(path) for path in browser_candidates if path.is_file()]
+    browsers = installed_browsers()
     return {
         "node": {"ready": node_compatible, "installed": bool(node), "path": node, "version": node_version,
                  "minimum": "22.12.0"},
@@ -436,7 +476,7 @@ def dependency_status() -> dict[str, Any]:
         "pypdf": {"ready": importlib.util.find_spec("pypdf") is not None},
         "fonttools": {"ready": importlib.util.find_spec("fontTools") is not None},
         "browsers": browsers,
-        "ready": bool(node_compatible and cli and importlib.util.find_spec("pypdf")
+        "ready": bool(node_compatible and cli and browsers and importlib.util.find_spec("pypdf")
                       and importlib.util.find_spec("fontTools")),
     }
 

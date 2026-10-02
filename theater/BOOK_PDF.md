@@ -19,6 +19,10 @@
 
 项目不会静默下载以上增强依赖；不需要核验阅读 PDF 时完全不用安装。
 
+当前随包字体已在制作阶段分开外形相同但编码不同的字形编号，快速保存 PDF 不再依赖
+事后修复这些汉字映射，也不要求用户安装字体或 Python 增强组件。请从当前版本重新
+导出 HTML/PDF；已有旧 PDF 不会被自动改写。
+
 不确定电脑缺什么时，先运行只读体检（不会读取作品）：
 
 ```text
@@ -55,7 +59,7 @@ python theater/tools/book_pdf.py --doctor
 python theater/tools/book_pdf.py "我的诗集-离线排版.html"
 ```
 
-Vivliostyle 默认管理自己的浏览器运行时；也可以复用电脑现有 Chrome/Edge，例如：
+工具自动优先复用电脑已安装的 Edge/Chrome，避免另下载浏览器。也可以显式指定，例如：
 
 ```text
 python theater/tools/book_pdf.py "我的诗集-离线排版.html" --browser "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe"
@@ -65,6 +69,9 @@ python theater/tools/book_pdf.py "我的诗集-离线排版.html" --browser "C:\
 
 - `我的诗集-专业阅读.pdf`：固定 A5/B5 尺寸、嵌入字体的阅读成品；
 - `我的诗集-专业阅读.pdf.qa.json`：输入/输出哈希、页数、实际页面尺寸、字体嵌入和可提取文字检查。
+
+渲染时会把自包含 HTML 放入隔离的同盘临时工作区；输入、输出各占一个目录，避免 Windows
+跨盘路径被渲染器误判。原 HTML 不改写，渲染或核验失败时也不覆盖已有 PDF。
 
 已有同名 PDF 时工具会拒绝覆盖；确认后才可加 `--overwrite`。只想检查 HTML 是否自包含，可运行：
 

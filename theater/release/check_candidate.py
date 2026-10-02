@@ -22,6 +22,7 @@ PUBLIC_RETIRE_FILES = {
     "theater/release/README.md",
     "theater/release/archive/v1.7.1.json",
     "theater/release/roadmap-v1.8-author-threads.md",
+    "theater/src/webapp/fonts/SourceHanSerifCN-Regular.otf",
 }
 PRIVATE_ONLY_PREFIXES = ("theater/handoffs/", "theater/release/roadmap-",
                          "theater/release/archive/")
@@ -180,7 +181,7 @@ def differs_from_public(private_root, public_root, rel):
         data = json.loads(private.read_text(encoding="utf-8"))
         if all(r.get("status") == "verified" for r in data.get("receipts") or []
                if r.get("public_release")):
-            return public_manifest_bytes(private_root, data) != public.read_bytes()
+            return public_manifest_bytes(private_root, data) != canonical_file_bytes(public)
         return True
     return not private.exists() or not public.exists() or digest(private) != digest(public)
 

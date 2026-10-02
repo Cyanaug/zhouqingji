@@ -5,6 +5,9 @@ import hashlib
 from pathlib import Path
 import sys
 import tempfile
+from io import BytesIO
+from unittest.mock import patch
+import subprocess
 
 try:
     from pypdf import PdfWriter
@@ -100,14 +103,110 @@ def test_font_alias_and_cmap_repair():
     if importlib.util.find_spec("fontTools") is None:
         print("[skip] fonttools 未安装，跳过字体别名映射表执行测试")
         return
-    font = ROOT / "theater/src/webapp/fonts/SourceHanSerifCN-Regular.otf"
-    aliases = book_pdf.font_alias_map(font.read_bytes(), "青文首页色一而")
+    from fontTools.fontBuilder import FontBuilder
+    from fontTools.pens.ttGlyphPen import TTGlyphPen
+    builder = FontBuilder(1000, isTTF=True)
+    glyphs = [".notdef", "qing", "wen", "shou"]
+    builder.setupGlyphOrder(glyphs)
+    builder.setupCharacterMap({0x2ED8: "qing", ord("青"): "qing",
+                               0x2F42: "wen", ord("文"): "wen",
+                               0x2FB8: "shou", ord("首"): "shou"})
+    builder.setupGlyf({name: TTGlyphPen(None).glyph() for name in glyphs})
+    builder.setupHorizontalMetrics({name: (1000, 0) for name in glyphs})
+    builder.setupHorizontalHeader(ascent=800, descent=-200)
+    builder.setupNameTable({"familyName": "Alias Fixture", "styleName": "Regular"})
+    builder.setupOS2()
+    builder.setupPost()
+    payload = BytesIO()
+    builder.save(payload)
+    aliases = book_pdf.font_alias_map(payload.getvalue(), "青文首页色一而")
     assert aliases[0x2ED8] == ord("青")
     assert aliases[0x2F42] == ord("文")
     assert aliases[0x2FB8] == ord("首")
+    assert 0x2F42 not in book_pdf.font_alias_map(payload.getvalue(), "文⽂")
     source = b"1 beginbfchar\n<AD> <2ED8>\nendbfchar"
     repaired, count = book_pdf._rewrite_tounicode(source, aliases)
     assert b"<9752>" in repaired and count == 1
+    # The bundled derivative prevents ambiguity before the browser prints it.
+    from fontTools.ttLib import TTFont
+    font = ROOT / "theater/src/webapp/fonts/ZQBookSong-Regular.otf"
+    with TTFont(font) as bundled:
+        cmap = bundled.getBestCmap()
+        assert len(set(cmap.values())) == len(cmap)
+        assert bundled["name"].getDebugName(1) == "ZQ Book Song"
+        assert {ord(c) for c in "青文首页色一而⻘⽂⾸"} <= set(cmap)
+    assert book_pdf.font_alias_map(font.read_bytes(), "青文首页色一而") == {}
+
+
+def test_renderer_isolation(tmp: Path):
+    source = tmp / "author.html"
+    source.write_text(sample_html().replace("<script", '<p data-page-kind="poem">校样</p><script'),
+                      encoding="utf-8")
+    before = source.read_bytes()
+    output = tmp / "verified.pdf"
+    calls = []
+
+    def run(args, **kwargs):
+        if args[-1] == "--version":
+            return subprocess.CompletedProcess(args, 0, "11.2.0", "")
+        calls.append(args)
+        staged_input = Path(args[2])
+        staged_pdf = Path(args[args.index("--output") + 1])
+        work = Path(kwargs["cwd"])
+        assert staged_input.parent == work / "source"
+        assert staged_pdf.parent == work / "output"
+        assert staged_input.drive == staged_pdf.drive
+        assert staged_input.read_bytes() == before
+        assert kwargs["timeout"] == 150
+        assert args[args.index("--executable-browser") + 1] == str(source.resolve())
+        staged_pdf.write_bytes(b"%PDF-" + b"x" * 1024)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    with patch.object(book_pdf, "find_vivliostyle", return_value="fake-cli"), \
+         patch.object(book_pdf, "installed_browsers", return_value=[str(source.resolve())]), \
+         patch.object(book_pdf.subprocess, "run", side_effect=run), \
+         patch.object(book_pdf, "repair_pdf_unicode", return_value=0), \
+         patch.object(book_pdf, "verify_pdf", return_value={"pages": 2}):
+        book_pdf.build_pdf(source, output, None, False, 120)
+    assert len(calls) == 1 and source.read_bytes() == before
+    assert output.exists() and output.with_suffix(".pdf.qa.json").exists()
+    assert not Path(calls[0][2]).exists(), "Temporary source was not removed"
+
+    def failed_run(args, **kwargs):
+        if args[-1] == "--version":
+            return subprocess.CompletedProcess(args, 0, "11.2.0", "")
+        return subprocess.CompletedProcess(args, 1, "", "ERROR root cause\n" + "stack\n" * 8)
+
+    original = output.read_bytes()
+    with patch.object(book_pdf, "find_vivliostyle", return_value="fake-cli"), \
+         patch.object(book_pdf.subprocess, "run", side_effect=failed_run):
+        try:
+            book_pdf.build_pdf(source, output, None, True, 120)
+            raise AssertionError("Render failure must be rejected")
+        except RuntimeError as exc:
+            assert "root cause" in str(exc)
+    assert source.read_bytes() == before and output.read_bytes() == original
+    with patch.object(book_pdf, "find_vivliostyle", return_value="fake-cli"), \
+         patch.object(book_pdf, "installed_browsers", return_value=[str(source.resolve())]), \
+         patch.object(book_pdf.subprocess, "run", side_effect=run), \
+         patch.object(book_pdf, "repair_pdf_unicode", return_value=0), \
+         patch.object(book_pdf, "verify_pdf", return_value={"pages": 2}), \
+         patch.object(book_pdf.shutil, "copyfileobj", side_effect=OSError("disk full")):
+        try:
+            book_pdf.build_pdf(source, output, None, True, 120)
+            raise AssertionError("Failed cross-volume copy must be rejected")
+        except OSError:
+            pass
+    assert output.read_bytes() == original and not list(tmp.glob(".zq-pdf-*.tmp"))
+    with patch.object(book_pdf, "find_vivliostyle", return_value="fake-cli"), \
+         patch.object(book_pdf, "installed_browsers", return_value=[]), \
+         patch.object(book_pdf.subprocess, "run", side_effect=failed_run):
+        try:
+            book_pdf.build_pdf(source, output, None, True, 120)
+            raise AssertionError("Missing browser must not trigger a download")
+        except RuntimeError as exc:
+            assert "不会自动下载" in str(exc)
+    assert output.read_bytes() == original
 
 
 def test_safe_defaults(tmp: Path):
@@ -143,6 +242,7 @@ if __name__ == "__main__":
         test_pdf_page_contract(tmp)
         test_font_alias_and_cmap_repair()
         test_safe_defaults(tmp)
+        test_renderer_isolation(tmp)
     print("[ok] 离线 HTML 输入闭包、manifest 与外链边界")
     print("[ok] PDF 页数/物理尺寸/嵌字/可提取文字预检边界")
     print("[ok] 默认输出命名与不覆盖已有成品")

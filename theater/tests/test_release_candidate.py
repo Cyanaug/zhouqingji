@@ -256,6 +256,16 @@ def test_fingerprint_ignores_checkout_line_endings_but_not_binary_changes():
         (source / "font.otf").write_bytes(b"OTTO\r\n")
         (target / "font.otf").write_bytes(b"OTTO\n")
         assert RC.differs_from_public(source, target, "font.otf")
+        rel = RC.PUBLIC_MANIFEST
+        (source / rel).parent.mkdir(parents=True)
+        (target / rel).parent.mkdir(parents=True)
+        data = {"schema": 2, "target_version": "1.8.1", "receipts": [
+            {"id": "eol", "title": "EOL test", "status": "verified", "public_release": True,
+             "files": [rel]}]}
+        (source / rel).write_text(json.dumps(data), encoding="utf-8")
+        public = RC.public_manifest_bytes(source, data)
+        (target / rel).write_bytes(public.replace(b"\n", b"\r\n"))
+        assert not RC.differs_from_public(source, target, rel)
     print("[ok] Git 检出换行不使文本指纹失效，真实文字与二进制改动仍会失效")
 
 
